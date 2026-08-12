@@ -39,6 +39,7 @@
       width: 100%;
       height: 100%;
       cursor: crosshair;
+      touch-action: none;
     }
 
     .legend {
@@ -129,13 +130,11 @@
 
     @media (max-width: 680px) {
       .controls {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: auto minmax(0, 1fr);
       }
       #playPause { grid-column: 1; grid-row: 1; }
-      .time-control { grid-column: 2 / -1; grid-row: 1; }
-      #zoomIn { grid-column: 1; grid-row: 2; }
-      #zoomOut { grid-column: 2; grid-row: 2; }
-      #resetZoom { grid-column: 3; grid-row: 2; }
+      .time-control { grid-column: 2; grid-row: 1; }
+      #zoomIn, #zoomOut, #resetZoom { display: none; }
       .legend { gap: 9px; }
       .readout { top: 42px; left: 20px; right: auto; }
     }
@@ -587,6 +586,35 @@
         event.preventDefault();
         setZoom(state.zoom * Math.exp(-event.deltaY * 0.00125));
       }, { passive: false });
+
+      let pinchStartDistance = 0;
+      let pinchStartZoom = state.zoom;
+
+      function touchDistance(touches) {
+        return Math.hypot(
+          touches[1].clientX - touches[0].clientX,
+          touches[1].clientY - touches[0].clientY
+        );
+      }
+
+      canvas.addEventListener('touchstart', (event) => {
+        if (event.touches.length !== 2) return;
+        event.preventDefault();
+        pinchStartDistance = touchDistance(event.touches);
+        pinchStartZoom = state.zoom;
+      }, { passive: false });
+
+      canvas.addEventListener('touchmove', (event) => {
+        if (event.touches.length !== 2 || pinchStartDistance <= 0) return;
+        event.preventDefault();
+        setZoom(pinchStartZoom * touchDistance(event.touches) / pinchStartDistance);
+      }, { passive: false });
+
+      const endPinch = (event) => {
+        if (event.touches.length < 2) pinchStartDistance = 0;
+      };
+      canvas.addEventListener('touchend', endPinch, { passive: true });
+      canvas.addEventListener('touchcancel', endPinch, { passive: true });
 
       window.addEventListener('resize', resizeCanvas);
       resizeCanvas();
