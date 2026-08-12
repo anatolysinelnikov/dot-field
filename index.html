@@ -245,8 +245,9 @@
         const waveA = periodicPulse(t, 0.02);
         const waveB = periodicPulse(t, 0.36);
         const waveC = periodicPulse(t, 0.68);
-        // The system vanishes at the seam, so it can restart on the left without a jump.
-        const lifecycle = Math.pow(Math.sin(Math.PI * t), 0.32);
+        // A smooth loop envelope lets the system restart without a sharp
+        // appearance/disappearance at the timeline seam.
+        const lifecycle = smoothstep(0, 0.12, t) * smoothstep(0, 0.12, 1 - t);
 
         const rainA = travelingGaussian(x, y, travelX, -0.05, 0.47,
           mix(0.17, 0.25, waveA), mix(0.12, 0.18, waveB), mix(-0.35, 0.18, waveC));
@@ -283,13 +284,15 @@
           + hailC * mix(0.02, 0.55, waveB);
 
         // Fine, deterministic structure becomes visible only where precipitation exists.
-        const localX = ((x - travelX + 1.5) % 1) - 0.5;
-        const detail = 0.88
-          + 0.08 * Math.sin(localX * 91 + Math.sin(y * 43))
-          + 0.06 * Math.sin(y * 117 - localX * 29);
+        // Keep fine structure continuous as it passes through each fixed grid point.
+        // A wrapped coordinate here would create a visible intensity discontinuity.
+        const localX = x - travelX;
+        const detail = 0.91
+          + 0.045 * Math.sin(localX * 47 + Math.sin(y * 31))
+          + 0.035 * Math.sin(y * 59 - localX * 17);
         rain *= detail * lifecycle;
-        storm *= (0.94 + 0.08 * Math.sin(localX * 73 + y * 51)) * lifecycle;
-        hail *= (0.96 + 0.06 * Math.sin(localX * 121 - y * 87)) * lifecycle;
+        storm *= (0.96 + 0.045 * Math.sin(localX * 41 + y * 33)) * lifecycle;
+        hail *= (0.97 + 0.035 * Math.sin(localX * 53 - y * 47)) * lifecycle;
 
         return {
           rain: clamp(rain),
@@ -364,8 +367,8 @@
       function intensityToRadius(intensity, spacing, layer) {
         // Adjust thresholds and radius mapping here. Rain intentionally overlaps most.
         const thresholds = { rain: 0.045, storm: 0.075, hail: 0.11 };
-        if (intensity <= thresholds[layer]) return 0;
-        const normalized = smoothstep(thresholds[layer], 0.93, intensity);
+        // Ease through the visibility floor instead of switching a dot on abruptly.
+        const normalized = smoothstep(thresholds[layer] * 0.45, 0.93, intensity);
         const overlap = layer === 'rain' ? 0.91 : layer === 'storm' ? 0.72 : 0.59;
         return spacing * overlap * Math.pow(normalized, layer === 'rain' ? 0.47 : 0.56);
       }
@@ -525,11 +528,12 @@
         const desiredLOD = Math.round(continuousLOD);
         const t = state.time / LOOP_SECONDS;
         const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
-        // The whole system begins beyond the real left edge and ends beyond the right.
+        // Keep the synchronized system in the middle third of the viewport.
+        const travelProgress = smoothstep(0, 1, t);
         const travelX = mix(
-          bounds.minX - WEATHER_MARGIN_WORLD,
-          bounds.maxX + WEATHER_MARGIN_WORLD,
-          t
+          mix(bounds.minX, bounds.maxX, 0.33),
+          mix(bounds.minX, bounds.maxX, 0.67),
+          travelProgress
         );
 
         updateLODTransition(delta, desiredLOD);
