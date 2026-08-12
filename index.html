@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fixed-grid weather field</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #080b12;
+      color: #dce3f0;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #080b12;
+    }
+
+    body { display: grid; }
+
+    .playground {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 45%, rgba(22, 29, 45, 0.45), transparent 65%),
+        #080b12;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+
+    .legend {
+      position: absolute;
+      top: 18px;
+      left: 20px;
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      pointer-events: none;
+      color: #aeb9cb;
+      font-size: 11px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .legend i { width: 7px; height: 7px; border-radius: 50%; display: block; }
+    .rain i { background: #0090FF; }
+    .storm i { background: #D400FF; }
+    .hail i { background: #FFD400; }
+
+    .controls {
+      position: absolute;
+      left: 50%;
+      bottom: 18px;
+      width: calc(100% - 28px);
+      transform: translateX(-50%);
+      display: grid;
+      grid-template-columns: auto minmax(150px, 1fr) 96px 96px 96px;
+      gap: 8px;
+      align-items: center;
+      padding: 10px;
+      border: 1px solid rgba(158, 177, 210, .16);
+      border-radius: 10px;
+      background: rgba(10, 14, 23, .88);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, .32);
+      backdrop-filter: blur(10px);
+    }
+
+    button {
+      height: 34px;
+      padding: 0 12px;
+      border: 1px solid rgba(176, 193, 220, .18);
+      border-radius: 6px;
+      background: #151b28;
+      color: #e5ebf5;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    button:hover { background: #1c2434; border-color: rgba(176, 193, 220, .32); }
+    button:active { transform: translateY(1px); }
+
+    #zoomIn, #zoomOut, #resetZoom {
+      width: 100%;
+      white-space: nowrap;
+    }
+
+    .time-control {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(100px, 1fr) 52px;
+      gap: 9px;
+      align-items: center;
+      padding: 0 4px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: #6aa6ff;
+      cursor: pointer;
+    }
+
+    .readout {
+      position: absolute;
+      top: 18px;
+      right: 20px;
+      display: flex;
+      gap: 14px;
+      color: #7f8da4;
+      font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      pointer-events: none;
+    }
+
+    .readout b { color: #dce3f0; font-weight: 500; }
+
+    @media (max-width: 680px) {
+      .controls {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      #playPause { grid-column: 1; grid-row: 1; }
+      .time-control { grid-column: 2 / -1; grid-row: 1; }
+      #zoomIn { grid-column: 1; grid-row: 2; }
+      #zoomOut { grid-column: 2; grid-row: 2; }
+      #resetZoom { grid-column: 3; grid-row: 2; }
+      .legend { gap: 9px; }
+      .readout { top: 42px; left: 20px; right: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="playground">
+    <canvas id="field" aria-label="Animated fixed-grid rain, thunderstorm, and hail intensity field"></canvas>
+
+    <div class="legend" aria-hidden="true">
+      <span class="rain"><i></i>Rain</span>
+      <span class="storm"><i></i>Thunderstorm</span>
+      <span class="hail"><i></i>Hail</span>
+    </div>
+
+    <div class="readout" aria-live="polite">
+      <span>time <b id="timeLabel">00:00</b></span>
+      <span>zoom <b id="zoomLabel">1.00×</b></span>
+      <span>LOD <b id="lodLabel">0</b></span>
+    </div>
+
+    <section class="controls" aria-label="Playback and zoom controls">
+      <button id="playPause" type="button">Pause</button>
+      <label class="time-control">
+        <input id="timeSlider" type="range" min="0" max="1000" step="1" value="0" aria-label="Animation time">
+        <span id="timeInline">00:00</span>
+      </label>
+      <button id="zoomIn" type="button" aria-label="Zoom in">Zoom In</button>
+      <button id="zoomOut" type="button" aria-label="Zoom out">Zoom Out</button>
+      <button id="resetZoom" type="button">Reset</button>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      'use strict';
+
+      // ── Configuration ────────────────────────────────────────────────────────
+      const BASE_GRID = 128;           // Adjust underlying grid resolution here.
+      const LOOP_SECONDS = 18;         // Adjust animation loop length / speed here.
+      const MIN_ZOOM = 0.1;
+      const MAX_ZOOM = 5.5;
+      const TARGET_SPACING = 11.5;     // Desired approximate distance between dots in px.
+      const LOD_MORPH_SECONDS = 0.2;   // Adjust geometric split / merge duration here.
+      const GRID_OVERSCAN_CELLS = 4;   // Render fixed-grid samples beyond every viewport edge.
+      const WEATHER_MARGIN_WORLD = 0.72; // Keeps the full system off-screen at loop endpoints.
+
+      const canvas = document.querySelector('#field');
+      const ctx = canvas.getContext('2d', { alpha: false });
+      const playPause = document.querySelector('#playPause');
+      const timeSlider = document.querySelector('#timeSlider');
+      const timeLabel = document.querySelector('#timeLabel');
+      const timeInline = document.querySelector('#timeInline');
+      const zoomLabel = document.querySelector('#zoomLabel');
+      const lodLabel = document.querySelector('#lodLabel');
+
+      const state = {
+        playing: true,
+        time: 0,
+        zoom: 1,
+        width: 1,
+        height: 1,
+        dpr: 1,
+        lastFrame: performance.now(),
+        scrubbing: false,
+        lodLevel: null,
+        desiredLOD: null,
+        lodMorph: null
+      };
+
+      // ── Math and time interpolation ──────────────────────────────────────────
+      const clamp = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
+      const mix = (a, b, t) => a + (b - a) * t;
+      const smoothstep = (a, b, x) => {
+        const t = clamp((x - a) / (b - a));
+        return t * t * (3 - 2 * t);
+      };
+
+      function periodicPulse(t, phase, width = 1) {
+        return 0.5 + 0.5 * Math.sin((t + phase) * Math.PI * 2 * width);
+      }
+
+      function gaussian(x, y, cx, cy, sx, sy, rotation = 0) {
+        const dx = x - cx;
+        const dy = y - cy;
+        const c = Math.cos(rotation);
+        const s = Math.sin(rotation);
+        const rx = dx * c + dy * s;
+        const ry = -dx * s + dy * c;
+        return Math.exp(-0.5 * ((rx * rx) / (sx * sx) + (ry * ry) / (sy * sy)));
+      }
+
+      function travelingGaussian(x, y, anchorX, offsetX, cy, sx, sy, rotation = 0) {
+        return gaussian(x, y, anchorX + offsetX, cy, sx, sy, rotation);
+      }
+
+      // ── Intensity field generation ───────────────────────────────────────────
+      // The field travels beneath the fixed sampling grid. Component offsets stay
+      // locked together while amplitude, width, and rotation continue to evolve.
+      // Add or tune Gaussian components here to change the weather shapes.
+      function intensityAt(x, y, t, travelX) {
+        // Safe empty-space rejection: beyond this support even the widest Gaussian
+        // is far below every visible radius threshold. The fixed lattice remains unbounded.
+        if (Math.abs(x - travelX) > 0.92 || Math.abs(y - 0.5) > 0.76) {
+          return { rain: 0, storm: 0, hail: 0 };
+        }
+
+        const waveA = periodicPulse(t, 0.02);
+        const waveB = periodicPulse(t, 0.36);
+        const waveC = periodicPulse(t, 0.68);
+        // The system vanishes at the seam, so it can restart on the left without a jump.
+        const lifecycle = Math.pow(Math.sin(Math.PI * t), 0.32);
+
+        const rainA = travelingGaussian(x, y, travelX, -0.05, 0.47,
+          mix(0.17, 0.25, waveA), mix(0.12, 0.18, waveB), mix(-0.35, 0.18, waveC));
+        const rainB = travelingGaussian(x, y, travelX, 0.16, 0.39,
+          mix(0.10, 0.18, waveB), mix(0.09, 0.14, waveA), 0.62);
+        const rainC = travelingGaussian(x, y, travelX, -0.13, 0.66,
+          mix(0.07, 0.14, waveC), mix(0.11, 0.18, waveA), -0.46);
+        const rainNotch = travelingGaussian(x, y, travelX, 0.02, 0.54,
+          mix(0.05, 0.12, waveB), mix(0.04, 0.09, waveB), 0.15);
+
+        let rain = rainA * mix(0.72, 1.05, waveA)
+          + rainB * mix(0.22, 0.76, waveB)
+          + rainC * mix(0.18, 0.65, waveC)
+          - rainNotch * mix(0.02, 0.26, waveB);
+
+        const stormA = travelingGaussian(x, y, travelX, 0, 0.47,
+          mix(0.075, 0.125, waveB), mix(0.055, 0.095, waveC), -0.25);
+        const stormB = travelingGaussian(x, y, travelX, 0.13, 0.40,
+          mix(0.045, 0.085, waveC), mix(0.04, 0.07, waveA), 0.65);
+        const stormC = travelingGaussian(x, y, travelX, -0.11, 0.60,
+          mix(0.04, 0.075, waveA), mix(0.045, 0.09, waveB), -0.5);
+        let storm = stormA * mix(0.42, 1.0, waveB)
+          + stormB * mix(0.18, 0.88, waveC)
+          + stormC * mix(0.10, 0.67, waveA);
+
+        const hailA = travelingGaussian(x, y, travelX, 0.025, 0.445,
+          mix(0.028, 0.052, waveC), mix(0.024, 0.046, waveA), -0.2);
+        const hailB = travelingGaussian(x, y, travelX, 0.125, 0.39,
+          mix(0.018, 0.040, waveA), mix(0.020, 0.045, waveB), 0.7);
+        const hailC = travelingGaussian(x, y, travelX, -0.08, 0.585,
+          mix(0.017, 0.034, waveB), mix(0.021, 0.043, waveC), -0.3);
+        let hail = hailA * mix(0.16, 0.95, waveC)
+          + hailB * mix(0.04, 0.73, waveA)
+          + hailC * mix(0.02, 0.55, waveB);
+
+        // Fine, deterministic structure becomes visible only where precipitation exists.
+        const localX = ((x - travelX + 1.5) % 1) - 0.5;
+        const detail = 0.88
+          + 0.08 * Math.sin(localX * 91 + Math.sin(y * 43))
+          + 0.06 * Math.sin(y * 117 - localX * 29);
+        rain *= detail * lifecycle;
+        storm *= (0.94 + 0.08 * Math.sin(localX * 73 + y * 51)) * lifecycle;
+        hail *= (0.96 + 0.06 * Math.sin(localX * 121 - y * 87)) * lifecycle;
+
+        return {
+          rain: clamp(rain),
+          storm: clamp(storm),
+          hail: clamp(hail)
+        };
+      }
+
+      // ── LOD selection and aggregation / sampling ─────────────────────────────
+      // LOD thresholds derive from target screen spacing. Negative levels sample
+      // finer than the base grid; positive levels aggregate larger base-grid cells.
+      function selectLOD(zoom, fieldPixels) {
+        const baseCellPixels = fieldPixels * zoom / BASE_GRID;
+        const continuous = Math.log2(TARGET_SPACING / Math.max(baseCellPixels, 0.001));
+        return clamp(continuous, -2, 4);
+      }
+
+      function sampleField(x, y, t, lod, travelX) {
+        if (lod <= 0) return intensityAt(x, y, t, travelX); // Continuous function acts as fine interpolation.
+
+        const span = Math.pow(2, lod) / BASE_GRID;
+        const offsets = [-0.34, 0, 0.34];
+        let rain = 0;
+        let stormAvg = 0;
+        let hailAvg = 0;
+        let stormMax = 0;
+        let hailMax = 0;
+        let count = 0;
+
+        for (const oy of offsets) {
+          for (const ox of offsets) {
+            const v = intensityAt(x + ox * span, y + oy * span, t, travelX);
+            rain += v.rain;
+            stormAvg += v.storm;
+            hailAvg += v.hail;
+            stormMax = Math.max(stormMax, v.storm);
+            hailMax = Math.max(hailMax, v.hail);
+            count++;
+          }
+        }
+
+        // Aggregation rules: average rain; max-biased blend for storm and hail.
+        return {
+          rain: rain / count,
+          storm: mix(stormAvg / count, stormMax, 0.58),
+          hail: mix(hailAvg / count, hailMax, 0.72)
+        };
+      }
+
+      // ── Rendering ─────────────────────────────────────────────────────────────
+      function resizeCanvas() {
+        state.dpr = window.devicePixelRatio || 1;
+        state.width = Math.max(1, window.innerWidth);
+        state.height = Math.max(1, window.innerHeight);
+        canvas.style.width = `${state.width}px`;
+        canvas.style.height = `${state.height}px`;
+        canvas.width = Math.round(state.width * state.dpr);
+        canvas.height = Math.round(state.height * state.dpr);
+        ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+      }
+
+      function getVisibleWorldBounds(fieldPixels, centerX, centerY) {
+        const scale = fieldPixels * state.zoom;
+        return {
+          minX: 0.5 - centerX / scale,
+          maxX: 0.5 + (state.width - centerX) / scale,
+          minY: 0.5 - centerY / scale,
+          maxY: 0.5 + (state.height - centerY) / scale
+        };
+      }
+
+      function intensityToRadius(intensity, spacing, layer) {
+        // Adjust thresholds and radius mapping here. Rain intentionally overlaps most.
+        const thresholds = { rain: 0.045, storm: 0.075, hail: 0.11 };
+        if (intensity <= thresholds[layer]) return 0;
+        const normalized = smoothstep(thresholds[layer], 0.93, intensity);
+        const overlap = layer === 'rain' ? 0.91 : layer === 'storm' ? 0.72 : 0.59;
+        return spacing * overlap * Math.pow(normalized, layer === 'rain' ? 0.47 : 0.56);
+      }
+
+      function drawLayer(samples, key, color, spacing) {
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+        for (const sample of samples) {
+          const radius = intensityToRadius(sample.value[key], spacing, key);
+          if (radius <= 0) continue;
+          ctx.moveTo(sample.sx + radius, sample.sy);
+          ctx.arc(sample.sx, sample.sy, radius, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
+
+      function renderLOD(lod, t, travelX, fieldPixels, centerX, centerY) {
+        const step = Math.pow(2, lod) / BASE_GRID;
+        const spacing = step * fieldPixels * state.zoom;
+        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
+
+        // The lattice is unbounded and anchored to world origin; only the browser clips it.
+        const startI = Math.floor(bounds.minX / step) - GRID_OVERSCAN_CELLS;
+        const endI = Math.ceil(bounds.maxX / step) + GRID_OVERSCAN_CELLS;
+        const startJ = Math.floor(bounds.minY / step) - GRID_OVERSCAN_CELLS;
+        const endJ = Math.ceil(bounds.maxY / step) + GRID_OVERSCAN_CELLS;
+        const samples = [];
+
+        for (let j = startJ; j < endJ; j++) {
+          const y = (j + 0.5) * step;
+          for (let i = startI; i < endI; i++) {
+            const x = (i + 0.5) * step;
+            const sx = centerX + (x - 0.5) * fieldPixels * state.zoom;
+            const sy = centerY + (y - 0.5) * fieldPixels * state.zoom;
+            samples.push({ sx, sy, value: sampleField(x, y, t, lod, travelX) });
+          }
+        }
+
+        // Required order: rain → thunderstorm → hail.
+        drawLayer(samples, 'rain', '#0090FF', spacing);
+        drawLayer(samples, 'storm', '#D400FF', spacing);
+        drawLayer(samples, 'hail', '#FFD400', spacing);
+      }
+
+      function updateLODTransition(delta, desiredLOD) {
+        state.desiredLOD = desiredLOD;
+
+        if (state.lodLevel === null) {
+          state.lodLevel = desiredLOD;
+          return;
+        }
+
+        if (!state.lodMorph && desiredLOD !== state.lodLevel) {
+          if (desiredLOD < state.lodLevel) {
+            state.lodMorph = {
+              coarse: state.lodLevel,
+              fine: state.lodLevel - 1,
+              progress: 0,
+              direction: 1
+            };
+          } else {
+            state.lodMorph = {
+              coarse: state.lodLevel + 1,
+              fine: state.lodLevel,
+              progress: 1,
+              direction: -1
+            };
+          }
+        }
+
+        const morph = state.lodMorph;
+        if (!morph) return;
+
+        // Reversing zoom reverses the exact same parent/child geometry in place.
+        if (desiredLOD <= morph.fine) morph.direction = 1;
+        else if (desiredLOD >= morph.coarse) morph.direction = -1;
+
+        morph.progress += morph.direction * delta / LOD_MORPH_SECONDS;
+        if (morph.progress >= 1) {
+          state.lodLevel = morph.fine;
+          state.lodMorph = null;
+        } else if (morph.progress <= 0) {
+          state.lodLevel = morph.coarse;
+          state.lodMorph = null;
+        }
+      }
+
+      function drawMorphLayer(samples, key, color, coarseSpacing, fineSpacing, progress) {
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+
+        for (const sample of samples) {
+          const parentRadius = intensityToRadius(sample.parentValue[key], coarseSpacing, key);
+          const childRadius = intensityToRadius(sample.childValue[key], fineSpacing, key);
+          const radius = mix(parentRadius, childRadius, progress);
+          if (radius <= 0) continue;
+
+          const x = mix(sample.parentSx, sample.childSx, progress);
+          const y = mix(sample.parentSy, sample.childSy, progress);
+          ctx.moveTo(x + radius, y);
+          ctx.arc(x, y, radius, 0, Math.PI * 2);
+        }
+
+        ctx.fill();
+      }
+
+      function renderLODMorph(morph, t, travelX, fieldPixels, centerX, centerY) {
+        const fineStep = Math.pow(2, morph.fine) / BASE_GRID;
+        const coarseStep = fineStep * 2;
+        const fineSpacing = fineStep * fieldPixels * state.zoom;
+        const coarseSpacing = coarseStep * fieldPixels * state.zoom;
+        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
+        const startI = Math.floor(bounds.minX / fineStep) - GRID_OVERSCAN_CELLS * 2;
+        const endI = Math.ceil(bounds.maxX / fineStep) + GRID_OVERSCAN_CELLS * 2;
+        const startJ = Math.floor(bounds.minY / fineStep) - GRID_OVERSCAN_CELLS * 2;
+        const endJ = Math.ceil(bounds.maxY / fineStep) + GRID_OVERSCAN_CELLS * 2;
+        const samples = [];
+
+        for (let j = startJ; j < endJ; j++) {
+          const childY = (j + 0.5) * fineStep;
+          const parentJ = Math.floor(j / 2);
+          const parentY = (parentJ + 0.5) * coarseStep;
+
+          for (let i = startI; i < endI; i++) {
+            const childX = (i + 0.5) * fineStep;
+            const parentI = Math.floor(i / 2);
+            const parentX = (parentI + 0.5) * coarseStep;
+            samples.push({
+              childSx: centerX + (childX - 0.5) * fieldPixels * state.zoom,
+              childSy: centerY + (childY - 0.5) * fieldPixels * state.zoom,
+              parentSx: centerX + (parentX - 0.5) * fieldPixels * state.zoom,
+              parentSy: centerY + (parentY - 0.5) * fieldPixels * state.zoom,
+              childValue: sampleField(childX, childY, t, morph.fine, travelX),
+              parentValue: sampleField(parentX, parentY, t, morph.coarse, travelX)
+            });
+          }
+        }
+
+        const progress = smoothstep(0, 1, clamp(morph.progress));
+        // Required order remains rain → thunderstorm → hail; no opacity changes.
+        drawMorphLayer(samples, 'rain', '#0090FF', coarseSpacing, fineSpacing, progress);
+        drawMorphLayer(samples, 'storm', '#D400FF', coarseSpacing, fineSpacing, progress);
+        drawMorphLayer(samples, 'hail', '#FFD400', coarseSpacing, fineSpacing, progress);
+      }
+
+      function render(delta) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#080b12';
+        ctx.fillRect(0, 0, state.width, state.height);
+
+        const fieldPixels = Math.min(state.width, state.height) * 0.92;
+        const centerX = state.width / 2;
+        const centerY = state.height / 2 - Math.min(24, state.height * 0.025);
+        const continuousLOD = selectLOD(state.zoom, fieldPixels);
+        const desiredLOD = Math.round(continuousLOD);
+        const t = state.time / LOOP_SECONDS;
+        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
+        // The whole system begins beyond the real left edge and ends beyond the right.
+        const travelX = mix(
+          bounds.minX - WEATHER_MARGIN_WORLD,
+          bounds.maxX + WEATHER_MARGIN_WORLD,
+          t
+        );
+
+        updateLODTransition(delta, desiredLOD);
+        if (state.lodMorph) {
+          renderLODMorph(state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
+        } else {
+          renderLOD(state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
+        }
+
+        ctx.globalAlpha = 1;
+        const minutes = Math.floor(state.time);
+        const seconds = Math.floor((state.time - minutes) * 60);
+        const timeText = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        timeLabel.textContent = timeText;
+        timeInline.textContent = timeText;
+        zoomLabel.textContent = `${state.zoom.toFixed(2)}×`;
+        lodLabel.textContent = state.lodMorph
+          ? `${state.lodMorph.coarse}→${state.lodMorph.fine}`
+          : String(state.lodLevel);
+        if (!state.scrubbing) timeSlider.value = String(Math.round(state.time / LOOP_SECONDS * 1000));
+      }
+
+      function frame(now) {
+        const delta = Math.min((now - state.lastFrame) / 1000, 0.1);
+        state.lastFrame = now;
+        if (state.playing && !state.scrubbing) state.time = (state.time + delta) % LOOP_SECONDS;
+        render(delta);
+        requestAnimationFrame(frame);
+      }
+
+      // ── Player controls ───────────────────────────────────────────────────────
+      playPause.addEventListener('click', () => {
+        state.playing = !state.playing;
+        playPause.textContent = state.playing ? 'Pause' : 'Play';
+      });
+
+      timeSlider.addEventListener('pointerdown', () => { state.scrubbing = true; });
+      timeSlider.addEventListener('input', () => {
+        state.time = Number(timeSlider.value) / 1000 * LOOP_SECONDS;
+      });
+      const endScrub = () => { state.scrubbing = false; };
+      timeSlider.addEventListener('pointerup', endScrub);
+      timeSlider.addEventListener('pointercancel', endScrub);
+
+      // ── Zoom controls ─────────────────────────────────────────────────────────
+      function setZoom(next) {
+        state.zoom = clamp(next, MIN_ZOOM, MAX_ZOOM);
+      }
+
+      document.querySelector('#zoomIn').addEventListener('click', () => setZoom(state.zoom * 1.28));
+      document.querySelector('#zoomOut').addEventListener('click', () => setZoom(state.zoom / 1.28));
+      document.querySelector('#resetZoom').addEventListener('click', () => setZoom(1));
+      canvas.addEventListener('wheel', (event) => {
+        event.preventDefault();
+        setZoom(state.zoom * Math.exp(-event.deltaY * 0.00125));
+      }, { passive: false });
+
+      window.addEventListener('resize', resizeCanvas);
+      resizeCanvas();
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
