@@ -77,7 +77,7 @@
       width: calc(100% - 28px);
       transform: translateX(-50%);
       display: grid;
-      grid-template-columns: auto minmax(150px, 1fr) 96px 96px 96px;
+      grid-template-columns: auto minmax(150px, 1fr);
       gap: 8px;
       align-items: center;
       padding: 10px;
@@ -125,11 +125,6 @@
       border-left: 10px solid currentColor;
     }
 
-    #zoomIn, #zoomOut, #resetZoom {
-      width: 100%;
-      white-space: nowrap;
-    }
-
     .render-mode {
       position: absolute;
       left: 50%;
@@ -138,6 +133,7 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       width: 232px;
+      height: auto;
       margin: 0;
       padding: 4px;
       border: 1px solid rgba(176, 193, 220, .16);
@@ -147,6 +143,7 @@
       font-size: 14px;
       backdrop-filter: blur(8px);
       isolation: isolate;
+      cursor: pointer;
     }
 
     .render-mode::before {
@@ -163,43 +160,76 @@
       transition: transform 160ms ease;
     }
 
-    .render-mode:has(input[value="blur"]:checked)::before {
+    .render-mode[aria-pressed="true"]::before {
       transform: translateX(100%);
     }
 
-    .render-mode legend {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip: rect(0 0 0 0);
-      white-space: nowrap;
-    }
-
-    .render-mode label {
+    .render-mode span {
       position: relative;
       display: block;
       padding: 10px 24px;
       border-radius: 8px;
       text-align: center;
-      cursor: pointer;
       transition: color 160ms ease;
     }
 
-    .render-mode input {
+    .zoom-controls {
       position: absolute;
-      opacity: 0;
-      pointer-events: none;
+      top: 50%;
+      right: 20px;
+      transform: translateY(-50%);
+      display: grid;
+      gap: 8px;
     }
 
-    .render-mode label:hover { color: #c7d0df; }
-    .render-mode:has(input:focus-visible) {
+    .zoom-stepper {
+      display: grid;
+      padding: 4px;
+      border: 1px solid rgba(176, 193, 220, .16);
+      border-radius: 12px;
+      background: rgba(14, 19, 30, .82);
+      backdrop-filter: blur(8px);
+    }
+
+    .zoom-stepper button {
+      width: 44px;
+      height: 42px;
+      padding: 0;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      font-size: 24px;
+      line-height: 1;
+    }
+
+    .zoom-stepper button + button {
+      border-top: 1px solid rgba(176, 193, 220, .12);
+    }
+
+    .zoom-stepper button:hover { border-color: transparent; background: #253149; }
+
+    .zoom-reset {
+      width: 54px;
+      height: 42px;
+      padding: 0;
+      border-radius: 10px;
+      background: rgba(14, 19, 30, .82);
+      font-size: 22px;
+      line-height: 1;
+      backdrop-filter: blur(8px);
+    }
+
+    .zoom-reset[hidden] { display: none; }
+
+    .render-mode span:first-child,
+    .render-mode[aria-pressed="true"] span:last-child { color: #f1f5fb; }
+    .render-mode[aria-pressed="true"] span:first-child { color: #8794a9; }
+    .render-mode:hover span { color: #c7d0df; }
+    .render-mode:focus-visible {
       outline: 2px solid #6aa6ff;
       outline-offset: 2px;
     }
-    .render-mode label:has(input:checked) {
-      color: #f1f5fb;
-    }
+    button.render-mode:active { transform: translateX(-50%); }
 
     .time-control {
       min-width: 0;
@@ -235,9 +265,8 @@
       }
       #playPause { grid-column: 1; grid-row: 1; }
       .time-control { grid-column: 2; grid-row: 1; }
-      #zoomIn, #zoomOut, #resetZoom { display: none; }
+      .zoom-controls { right: 14px; }
       .legend { gap: 9px; }
-      .readout { top: 78px; left: 20px; right: auto; }
     }
   </style>
 </head>
@@ -251,26 +280,30 @@
       <span class="hail"><i></i>Hail</span>
     </div>
 
-    <fieldset class="render-mode">
-      <legend>Weather rendering mode</legend>
-      <label><input type="radio" name="renderMode" value="dots" checked>Dots</label>
-      <label><input type="radio" name="renderMode" value="blur">Blur</label>
-    </fieldset>
+    <button id="renderModeToggle" class="render-mode" type="button" aria-label="Toggle weather rendering mode" aria-pressed="false">
+      <span>Dots</span>
+      <span>Blur</span>
+    </button>
 
     <div class="readout" aria-live="polite">
       <span>zoom <b id="zoomLabel">1.00×</b></span>
       <span>LOD <b id="lodLabel">0</b></span>
     </div>
 
-    <section class="controls" aria-label="Playback and zoom controls">
+    <div class="zoom-controls" role="group" aria-label="Zoom controls">
+      <div class="zoom-stepper">
+        <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
+        <button id="zoomOut" type="button" aria-label="Zoom out">−</button>
+      </div>
+      <button id="resetZoom" class="zoom-reset" type="button" aria-label="Reset zoom" hidden>↺</button>
+    </div>
+
+    <section class="controls" aria-label="Playback and timeline controls">
       <button id="playPause" type="button" data-state="playing" aria-label="Pause"></button>
       <label class="time-control">
         <input id="timeSlider" type="range" min="0" max="1000" step="1" value="0" aria-label="Animation time">
         <span id="timeInline">00:00</span>
       </label>
-      <button id="zoomIn" type="button" aria-label="Zoom in">Zoom In</button>
-      <button id="zoomOut" type="button" aria-label="Zoom out">Zoom Out</button>
-      <button id="resetZoom" type="button">Reset</button>
     </section>
   </main>
 
@@ -299,10 +332,12 @@
       const precipitationCanvas = document.createElement('canvas');
       const precipitationCtx = precipitationCanvas.getContext('2d', { alpha: true });
       const playPause = document.querySelector('#playPause');
+      const renderModeToggle = document.querySelector('#renderModeToggle');
       const timeSlider = document.querySelector('#timeSlider');
       const timeInline = document.querySelector('#timeInline');
       const zoomLabel = document.querySelector('#zoomLabel');
       const lodLabel = document.querySelector('#lodLabel');
+      const resetZoom = document.querySelector('#resetZoom');
 
       const state = {
         playing: true,
@@ -1012,10 +1047,9 @@
         playPause.setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
       });
 
-      document.querySelectorAll('input[name="renderMode"]').forEach((input) => {
-        input.addEventListener('change', () => {
-          if (input.checked) state.renderMode = input.value;
-        });
+      renderModeToggle.addEventListener('click', () => {
+        state.renderMode = state.renderMode === 'dots' ? 'blur' : 'dots';
+        renderModeToggle.setAttribute('aria-pressed', String(state.renderMode === 'blur'));
       });
 
       timeSlider.addEventListener('pointerdown', () => { state.scrubbing = true; });
@@ -1029,11 +1063,12 @@
       // ── Zoom controls ─────────────────────────────────────────────────────────
       function setZoom(next) {
         state.zoom = clamp(next, MIN_ZOOM, MAX_ZOOM);
+        resetZoom.hidden = state.zoom.toFixed(2) === '1.00';
       }
 
       document.querySelector('#zoomIn').addEventListener('click', () => setZoom(state.zoom * 1.28));
       document.querySelector('#zoomOut').addEventListener('click', () => setZoom(state.zoom / 1.28));
-      document.querySelector('#resetZoom').addEventListener('click', () => setZoom(1));
+      resetZoom.addEventListener('click', () => setZoom(1));
       canvas.addEventListener('wheel', (event) => {
         event.preventDefault();
         setZoom(state.zoom * Math.exp(-event.deltaY * 0.00125));
