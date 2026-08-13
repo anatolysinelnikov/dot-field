@@ -134,13 +134,36 @@
       position: absolute;
       top: 42px;
       left: 20px;
-      display: flex;
-      gap: 6px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      width: 116px;
       margin: 0;
-      padding: 0;
-      border: 0;
+      padding: 2px;
+      border: 1px solid rgba(176, 193, 220, .16);
+      border-radius: 7px;
+      background: rgba(14, 19, 30, .82);
       color: #8794a9;
       font-size: 11px;
+      backdrop-filter: blur(8px);
+      isolation: isolate;
+    }
+
+    .render-mode::before {
+      content: '';
+      position: absolute;
+      z-index: -1;
+      top: 2px;
+      bottom: 2px;
+      left: 2px;
+      width: calc(50% - 2px);
+      border-radius: 5px;
+      background: #253149;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
+      transition: transform 160ms ease;
+    }
+
+    .render-mode:has(input[value="blur"]:checked)::before {
+      transform: translateX(100%);
     }
 
     .render-mode legend {
@@ -155,12 +178,11 @@
     .render-mode label {
       position: relative;
       display: block;
-      padding: 5px 8px;
-      border: 1px solid rgba(176, 193, 220, .14);
-      border-radius: 6px;
-      background: rgba(14, 19, 30, .82);
+      padding: 4px 8px;
+      border-radius: 5px;
+      text-align: center;
       cursor: pointer;
-      backdrop-filter: blur(8px);
+      transition: color 160ms ease;
     }
 
     .render-mode input {
@@ -169,14 +191,12 @@
       pointer-events: none;
     }
 
-    .render-mode label:hover { background: rgba(28, 36, 52, .88); }
-    .render-mode label:has(input:focus-visible) {
+    .render-mode label:hover { color: #c7d0df; }
+    .render-mode:has(input:focus-visible) {
       outline: 2px solid #6aa6ff;
       outline-offset: 2px;
     }
     .render-mode label:has(input:checked) {
-      border-color: rgba(128, 165, 226, .32);
-      background: rgba(37, 49, 73, .92);
       color: #f1f5fb;
     }
 
@@ -233,8 +253,7 @@
     <fieldset class="render-mode">
       <legend>Weather rendering mode</legend>
       <label><input type="radio" name="renderMode" value="dots" checked>Dots</label>
-      <label><input type="radio" name="renderMode" value="blur-rain">Blur Rain</label>
-      <label><input type="radio" name="renderMode" value="blur-everything">Blur Everything</label>
+      <label><input type="radio" name="renderMode" value="blur">Blur</label>
     </fieldset>
 
     <div class="readout" aria-live="polite">
@@ -615,7 +634,7 @@
         return smoothed;
       }
 
-      function buildSmoothedWeatherGrid(bounds, t, travelX, includeHazards) {
+      function buildSmoothedWeatherGrid(bounds, t, travelX) {
         const step = 1 / BASE_GRID;
         const padding = SCALAR_SMOOTH_RADIUS + 3;
         // intensityAt has compact empty-space rejection. Intersecting the visible
@@ -632,8 +651,8 @@
         const width = endI - startI + 1;
         const height = endJ - startJ + 1;
         const rainSource = new Float32Array(width * height);
-        const stormSource = includeHazards ? new Float32Array(rainSource.length) : null;
-        const hailSource = includeHazards ? new Float32Array(rainSource.length) : null;
+        const stormSource = new Float32Array(rainSource.length);
+        const hailSource = new Float32Array(rainSource.length);
 
         for (let row = 0; row < height; row++) {
           const y = (startJ + row + 0.5) * step;
@@ -643,17 +662,15 @@
             const value = intensityAt(x, y, t, travelX);
             const index = offset + column;
             rainSource[index] = value.rain;
-            if (includeHazards) {
-              stormSource[index] = value.storm;
-              hailSource[index] = value.hail;
-            }
+            stormSource[index] = value.storm;
+            hailSource[index] = value.hail;
           }
         }
 
         return {
           rain: smoothScalarGrid(rainSource, width, height),
-          storm: includeHazards ? smoothScalarGrid(stormSource, width, height) : null,
-          hail: includeHazards ? smoothScalarGrid(hailSource, width, height) : null,
+          storm: smoothScalarGrid(stormSource, width, height),
+          hail: smoothScalarGrid(hailSource, width, height),
           width,
           height,
           startI,
@@ -699,9 +716,9 @@
         };
       }
 
-      function renderBlurredFields(t, travelX, fieldPixels, centerX, centerY, includeHazards) {
+      function renderBlurredFields(t, travelX, fieldPixels, centerX, centerY) {
         const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
-        const grid = buildSmoothedWeatherGrid(bounds, t, travelX, includeHazards);
+        const grid = buildSmoothedWeatherGrid(bounds, t, travelX);
         const rasterWidth = Math.max(1, Math.ceil(state.width * BLUR_RASTER_SCALE));
         const rasterHeight = Math.max(1, Math.ceil(state.height * BLUR_RASTER_SCALE));
         if (precipitationCanvas.width !== rasterWidth || precipitationCanvas.height !== rasterHeight) {
@@ -736,10 +753,8 @@
                 const sampleIndex = rowOffset + sampleX;
                 const weight = xSpline.weights[wxOffset + kx];
                 rainRow += grid.rain[sampleIndex] * weight;
-                if (includeHazards) {
-                  stormRow += grid.storm[sampleIndex] * weight;
-                  hailRow += grid.hail[sampleIndex] * weight;
-                }
+                stormRow += grid.storm[sampleIndex] * weight;
+                hailRow += grid.hail[sampleIndex] * weight;
               }
               const yWeight = ySpline.weights[wyOffset + ky];
               rain += rainRow * yWeight;
@@ -752,10 +767,8 @@
             const rainOpacity = smoothstep(0.008, 0.58, rain);
             const strong = smoothstep(RAIN_MODERATE_MAX, 0.9, rain);
             let pixel = { r: 0, g: mix(144, 0, strong), b: 255, a: rainOpacity };
-            if (includeHazards) {
-              pixel = compositeField([255, 0, 255], smoothstep(0.012, 0.72, storm), pixel);
-              pixel = compositeField([255, 212, 0], smoothstep(0.018, 0.62, hail), pixel);
-            }
+            pixel = compositeField([255, 0, 255], smoothstep(0.012, 0.72, storm), pixel);
+            pixel = compositeField([255, 212, 0], smoothstep(0.018, 0.62, hail), pixel);
             const pixelOffset = (py * rasterWidth + px) * 4;
             pixels[pixelOffset] = Math.round(pixel.r);
             pixels[pixelOffset + 1] = Math.round(pixel.g);
@@ -797,31 +810,6 @@
         // Required order: rain → strong precipitation → composite hazard.
         drawLayer(samples, 'rain', RAIN_BLUE, spacing);
         drawStrongPrecipitationLayer(samples, spacing);
-        drawHazardLayer(samples, spacing);
-      }
-
-      function renderHazardsLOD(lod, t, travelX, fieldPixels, centerX, centerY) {
-        const step = Math.pow(2, lod) / BASE_GRID;
-        const spacing = step * fieldPixels * state.zoom;
-        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
-        const startI = Math.floor(bounds.minX / step) - GRID_OVERSCAN_CELLS;
-        const endI = Math.ceil(bounds.maxX / step) + GRID_OVERSCAN_CELLS;
-        const startJ = Math.floor(bounds.minY / step) - GRID_OVERSCAN_CELLS;
-        const endJ = Math.ceil(bounds.maxY / step) + GRID_OVERSCAN_CELLS;
-        const samples = [];
-
-        for (let j = startJ; j < endJ; j++) {
-          const y = (j + 0.5) * step;
-          for (let i = startI; i < endI; i++) {
-            const x = (i + 0.5) * step;
-            samples.push({
-              sx: centerX + (x - 0.5) * fieldPixels * state.zoom,
-              sy: centerY + (y - 0.5) * fieldPixels * state.zoom,
-              value: sampleField(x, y, t, lod, travelX)
-            });
-          }
-        }
-
         drawHazardLayer(samples, spacing);
       }
 
@@ -967,40 +955,6 @@
         drawHazardMorph(samples, coarseSpacing, fineSpacing, progress);
       }
 
-      function renderHazardsLODMorph(morph, t, travelX, fieldPixels, centerX, centerY) {
-        const fineStep = Math.pow(2, morph.fine) / BASE_GRID;
-        const coarseStep = fineStep * 2;
-        const fineSpacing = fineStep * fieldPixels * state.zoom;
-        const coarseSpacing = coarseStep * fieldPixels * state.zoom;
-        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
-        const startI = Math.floor(bounds.minX / fineStep) - GRID_OVERSCAN_CELLS * 2;
-        const endI = Math.ceil(bounds.maxX / fineStep) + GRID_OVERSCAN_CELLS * 2;
-        const startJ = Math.floor(bounds.minY / fineStep) - GRID_OVERSCAN_CELLS * 2;
-        const endJ = Math.ceil(bounds.maxY / fineStep) + GRID_OVERSCAN_CELLS * 2;
-        const samples = [];
-
-        for (let j = startJ; j < endJ; j++) {
-          const childY = (j + 0.5) * fineStep;
-          const parentJ = Math.floor(j / 2);
-          const parentY = (parentJ + 0.5) * coarseStep;
-          for (let i = startI; i < endI; i++) {
-            const childX = (i + 0.5) * fineStep;
-            const parentI = Math.floor(i / 2);
-            const parentX = (parentI + 0.5) * coarseStep;
-            samples.push({
-              childSx: centerX + (childX - 0.5) * fieldPixels * state.zoom,
-              childSy: centerY + (childY - 0.5) * fieldPixels * state.zoom,
-              parentSx: centerX + (parentX - 0.5) * fieldPixels * state.zoom,
-              parentSy: centerY + (parentY - 0.5) * fieldPixels * state.zoom,
-              childValue: sampleField(childX, childY, t, morph.fine, travelX),
-              parentValue: sampleField(parentX, parentY, t, morph.coarse, travelX)
-            });
-          }
-        }
-
-        drawHazardMorph(samples, coarseSpacing, fineSpacing, smoothstep(0, 1, clamp(morph.progress)));
-      }
-
       function render(delta) {
         ctx.globalAlpha = 1;
         ctx.fillStyle = '#080b12';
@@ -1022,15 +976,8 @@
         );
 
         updateLODTransition(delta, desiredLOD);
-        if (state.renderMode === 'blur-everything') {
-          renderBlurredFields(t, travelX, fieldPixels, centerX, centerY, true);
-        } else if (state.renderMode === 'blur-rain') {
-          renderBlurredFields(t, travelX, fieldPixels, centerX, centerY, false);
-          if (state.lodMorph) {
-            renderHazardsLODMorph(state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
-          } else {
-            renderHazardsLOD(state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
-          }
+        if (state.renderMode === 'blur') {
+          renderBlurredFields(t, travelX, fieldPixels, centerX, centerY);
         } else if (state.lodMorph) {
           renderLODMorph(state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
         } else {
