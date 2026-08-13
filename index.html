@@ -181,6 +181,11 @@
       const LOD_MORPH_SECONDS = 0.2;   // Adjust geometric split / merge duration here.
       const GRID_OVERSCAN_CELLS = 4;   // Render fixed-grid samples beyond every viewport edge.
       const WEATHER_MARGIN_WORLD = 0.72; // Keeps the full system off-screen at loop endpoints.
+      const RAIN_MODERATE_MAX = 0.55;
+      const RAIN_STRONG = 0.78;
+      const RAIN_BLUE = [0x00, 0x90, 0xFF];
+      const RAIN_STRONG_BLUE = [0x00, 0x66, 0xD6];
+      const RAIN_VERY_STRONG_BLUE = [0x00, 0x3F, 0xA8];
 
       const canvas = document.querySelector('#field');
       const ctx = canvas.getContext('2d', { alpha: false });
@@ -373,9 +378,44 @@
         return spacing * overlap * Math.pow(normalized, layer === 'rain' ? 0.47 : 0.56);
       }
 
+      function mixColor(from, to, amount) {
+        const channels = from.map((channel, index) => Math.round(mix(channel, to[index], amount)));
+        return `rgb(${channels[0]} ${channels[1]} ${channels[2]})`;
+      }
+
+      function rainColor(intensity) {
+        if (intensity <= RAIN_MODERATE_MAX) return '#0090FF';
+        if (intensity <= RAIN_STRONG) {
+          return mixColor(
+            RAIN_BLUE,
+            RAIN_STRONG_BLUE,
+            smoothstep(RAIN_MODERATE_MAX, RAIN_STRONG, intensity)
+          );
+        }
+        return mixColor(
+          RAIN_STRONG_BLUE,
+          RAIN_VERY_STRONG_BLUE,
+          smoothstep(RAIN_STRONG, 1, intensity)
+        );
+      }
+
       function drawLayer(samples, key, color, spacing) {
-        ctx.fillStyle = color;
         ctx.globalAlpha = 1;
+
+        if (typeof color === 'function') {
+          for (const sample of samples) {
+            const intensity = sample.value[key];
+            const radius = intensityToRadius(intensity, spacing, key);
+            if (radius <= 0) continue;
+            ctx.fillStyle = color(intensity);
+            ctx.beginPath();
+            ctx.arc(sample.sx, sample.sy, radius, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          return;
+        }
+
+        ctx.fillStyle = color;
         ctx.beginPath();
         for (const sample of samples) {
           const radius = intensityToRadius(sample.value[key], spacing, key);
@@ -409,7 +449,7 @@
         }
 
         // Required order: rain → thunderstorm → hail.
-        drawLayer(samples, 'rain', '#0090FF', spacing);
+        drawLayer(samples, 'rain', rainColor, spacing);
         drawLayer(samples, 'storm', '#D400FF', spacing);
         drawLayer(samples, 'hail', '#FFD400', spacing);
       }
@@ -458,8 +498,28 @@
       }
 
       function drawMorphLayer(samples, key, color, coarseSpacing, fineSpacing, progress) {
-        ctx.fillStyle = color;
         ctx.globalAlpha = 1;
+
+        if (typeof color === 'function') {
+          for (const sample of samples) {
+            const parentIntensity = sample.parentValue[key];
+            const childIntensity = sample.childValue[key];
+            const parentRadius = intensityToRadius(parentIntensity, coarseSpacing, key);
+            const childRadius = intensityToRadius(childIntensity, fineSpacing, key);
+            const radius = mix(parentRadius, childRadius, progress);
+            if (radius <= 0) continue;
+
+            const x = mix(sample.parentSx, sample.childSx, progress);
+            const y = mix(sample.parentSy, sample.childSy, progress);
+            ctx.fillStyle = color(mix(parentIntensity, childIntensity, progress));
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          return;
+        }
+
+        ctx.fillStyle = color;
         ctx.beginPath();
 
         for (const sample of samples) {
@@ -511,7 +571,7 @@
 
         const progress = smoothstep(0, 1, clamp(morph.progress));
         // Required order remains rain → thunderstorm → hail; no opacity changes.
-        drawMorphLayer(samples, 'rain', '#0090FF', coarseSpacing, fineSpacing, progress);
+        drawMorphLayer(samples, 'rain', rainColor, coarseSpacing, fineSpacing, progress);
         drawMorphLayer(samples, 'storm', '#D400FF', coarseSpacing, fineSpacing, progress);
         drawMorphLayer(samples, 'hail', '#FFD400', coarseSpacing, fineSpacing, progress);
       }
