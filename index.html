@@ -132,18 +132,19 @@
 
     .render-mode {
       position: absolute;
-      top: 42px;
-      left: 20px;
+      left: 50%;
+      bottom: 86px;
+      transform: translateX(-50%);
       display: grid;
       grid-template-columns: 1fr 1fr;
-      width: 116px;
+      width: 232px;
       margin: 0;
-      padding: 2px;
+      padding: 4px;
       border: 1px solid rgba(176, 193, 220, .16);
-      border-radius: 7px;
+      border-radius: 12px;
       background: rgba(14, 19, 30, .82);
       color: #8794a9;
-      font-size: 11px;
+      font-size: 14px;
       backdrop-filter: blur(8px);
       isolation: isolate;
     }
@@ -152,11 +153,11 @@
       content: '';
       position: absolute;
       z-index: -1;
-      top: 2px;
-      bottom: 2px;
-      left: 2px;
-      width: calc(50% - 2px);
-      border-radius: 5px;
+      top: 4px;
+      bottom: 4px;
+      left: 4px;
+      width: calc(50% - 4px);
+      border-radius: 8px;
       background: #253149;
       box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
       transition: transform 160ms ease;
@@ -178,8 +179,8 @@
     .render-mode label {
       position: relative;
       display: block;
-      padding: 4px 8px;
-      border-radius: 5px;
+      padding: 10px 24px;
+      border-radius: 8px;
       text-align: center;
       cursor: pointer;
       transition: color 160ms ease;
