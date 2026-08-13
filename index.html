@@ -175,9 +175,8 @@
 
     .zoom-controls {
       position: absolute;
-      top: 50%;
+      bottom: 86px;
       right: 20px;
-      transform: translateY(-50%);
       display: grid;
       gap: 8px;
     }
@@ -196,7 +195,9 @@
       height: 42px;
       padding: 0;
       border: 0;
-      border-radius: 8px;
+      border-radius: 0;
+      outline: 0;
+      box-shadow: none;
       background: transparent;
       font-size: 24px;
       line-height: 1;
@@ -206,7 +207,8 @@
       border-top: 1px solid rgba(176, 193, 220, .12);
     }
 
-    .zoom-stepper button:hover { border-color: transparent; background: #253149; }
+    .zoom-stepper button:hover { background: rgba(37, 49, 73, .72); }
+    .zoom-stepper button:focus-visible { color: #fff; background: transparent; }
 
     .zoom-reset {
       width: 54px;
@@ -291,11 +293,11 @@
     </div>
 
     <div class="zoom-controls" role="group" aria-label="Zoom controls">
+      <button id="resetZoom" class="zoom-reset" type="button" aria-label="Reset zoom" hidden>↺</button>
       <div class="zoom-stepper">
         <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
         <button id="zoomOut" type="button" aria-label="Zoom out">−</button>
       </div>
-      <button id="resetZoom" class="zoom-reset" type="button" aria-label="Reset zoom" hidden>↺</button>
     </div>
 
     <section class="controls" aria-label="Playback and timeline controls">
