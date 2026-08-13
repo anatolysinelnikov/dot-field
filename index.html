@@ -77,7 +77,7 @@
       width: calc(100% - 28px);
       transform: translateX(-50%);
       display: grid;
-      grid-template-columns: auto minmax(150px, 1fr) 96px 96px 96px;
+      grid-template-columns: auto auto minmax(150px, 1fr) 96px 96px 96px;
       gap: 8px;
       align-items: center;
       padding: 10px;
@@ -130,6 +130,31 @@
       white-space: nowrap;
     }
 
+    .render-mode {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      padding: 2px;
+      border: 1px solid rgba(176, 193, 220, .18);
+      border-radius: 7px;
+      background: #0e131e;
+    }
+
+    .render-mode button {
+      width: 48px;
+      height: 28px;
+      padding: 0 8px;
+      border: 0;
+      background: transparent;
+      color: #8794a9;
+    }
+
+    .render-mode button:hover { border: 0; background: rgba(176, 193, 220, .08); }
+    .render-mode button[aria-pressed="true"] {
+      background: #253149;
+      color: #f1f5fb;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
+    }
+
     .time-control {
       min-width: 0;
       display: grid;
@@ -164,6 +189,7 @@
       }
       #playPause { grid-column: 1; grid-row: 1; }
       .time-control { grid-column: 2; grid-row: 1; }
+      .render-mode { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
       #zoomIn, #zoomOut, #resetZoom { display: none; }
       .legend { gap: 9px; }
       .readout { top: 42px; left: 20px; right: auto; }
@@ -187,6 +213,10 @@
 
     <section class="controls" aria-label="Playback and zoom controls">
       <button id="playPause" type="button" data-state="playing" aria-label="Pause"></button>
+      <div class="render-mode" role="group" aria-label="Precipitation rendering mode">
+        <button type="button" data-render-mode="dots" aria-pressed="true">Dots</button>
+        <button type="button" data-render-mode="blur" aria-pressed="false">Blur</button>
+      </div>
       <label class="time-control">
         <input id="timeSlider" type="range" min="0" max="1000" step="1" value="0" aria-label="Animation time">
         <span id="timeInline">00:00</span>
@@ -213,9 +243,14 @@
       const RAIN_MODERATE_MAX = 0.55;
       const RAIN_BLUE = '#0090FF';
       const STRONG_PRECIPITATION_BLUE = '#0000FF';
+      const BLUR_RASTER_SCALE = 0.42;
+      const SCALAR_SMOOTH_RADIUS = 4;
+      const SCALAR_SMOOTH_SIGMA = 1.2;
 
       const canvas = document.querySelector('#field');
       const ctx = canvas.getContext('2d', { alpha: false });
+      const precipitationCanvas = document.createElement('canvas');
+      const precipitationCtx = precipitationCanvas.getContext('2d', { alpha: true });
       const playPause = document.querySelector('#playPause');
       const timeSlider = document.querySelector('#timeSlider');
       const timeInline = document.querySelector('#timeInline');
@@ -231,6 +266,7 @@
         dpr: 1,
         lastFrame: performance.now(),
         scrubbing: false,
+        precipitationMode: 'dots',
         lodLevel: null,
         desiredLOD: null,
         lodMorph: null
@@ -504,6 +540,160 @@
         ctx.fill();
       }
 
+      // Blur mode reconstructs precipitation from the fixed base-grid samples.
+      // Smoothing happens on scalar intensities before any color is applied; this
+      // is intentionally independent from the dot-rendering canvas output.
+      function gaussianKernel(radius, sigma) {
+        const kernel = new Float32Array(radius * 2 + 1);
+        let sum = 0;
+        for (let i = -radius; i <= radius; i++) {
+          const weight = Math.exp(-(i * i) / (2 * sigma * sigma));
+          kernel[i + radius] = weight;
+          sum += weight;
+        }
+        for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
+        return kernel;
+      }
+
+      const scalarSmoothKernel = gaussianKernel(SCALAR_SMOOTH_RADIUS, SCALAR_SMOOTH_SIGMA);
+
+      function buildSmoothedRainGrid(bounds, t, travelX) {
+        const step = 1 / BASE_GRID;
+        const padding = SCALAR_SMOOTH_RADIUS + 3;
+        // intensityAt has compact empty-space rejection. Intersecting the visible
+        // world with that support prevents very low zooms from allocating a huge
+        // all-zero lattice while retaining enough padding for both filters.
+        const minX = Math.max(bounds.minX, travelX - 0.92);
+        const maxX = Math.min(bounds.maxX, travelX + 0.92);
+        const minY = Math.max(bounds.minY, -0.26);
+        const maxY = Math.min(bounds.maxY, 1.26);
+        const startI = Math.floor(minX / step - 0.5) - padding;
+        const endI = Math.ceil(maxX / step - 0.5) + padding;
+        const startJ = Math.floor(minY / step - 0.5) - padding;
+        const endJ = Math.ceil(maxY / step - 0.5) + padding;
+        const width = endI - startI + 1;
+        const height = endJ - startJ + 1;
+        const source = new Float32Array(width * height);
+        const horizontal = new Float32Array(source.length);
+        const smoothed = new Float32Array(source.length);
+
+        for (let row = 0; row < height; row++) {
+          const y = (startJ + row + 0.5) * step;
+          const offset = row * width;
+          for (let column = 0; column < width; column++) {
+            const x = (startI + column + 0.5) * step;
+            source[offset + column] = intensityAt(x, y, t, travelX).rain;
+          }
+        }
+
+        for (let row = 0; row < height; row++) {
+          const offset = row * width;
+          for (let column = 0; column < width; column++) {
+            let value = 0;
+            for (let k = -SCALAR_SMOOTH_RADIUS; k <= SCALAR_SMOOTH_RADIUS; k++) {
+              const sampleColumn = clamp(column + k, 0, width - 1);
+              value += source[offset + sampleColumn] * scalarSmoothKernel[k + SCALAR_SMOOTH_RADIUS];
+            }
+            horizontal[offset + column] = value;
+          }
+        }
+
+        for (let row = 0; row < height; row++) {
+          const offset = row * width;
+          for (let column = 0; column < width; column++) {
+            let value = 0;
+            for (let k = -SCALAR_SMOOTH_RADIUS; k <= SCALAR_SMOOTH_RADIUS; k++) {
+              const sampleRow = clamp(row + k, 0, height - 1);
+              value += horizontal[sampleRow * width + column] * scalarSmoothKernel[k + SCALAR_SMOOTH_RADIUS];
+            }
+            smoothed[offset + column] = value;
+          }
+        }
+
+        return { values: smoothed, width, height, startI, startJ, step };
+      }
+
+      function cubicBSplineWeights(t) {
+        const t2 = t * t;
+        const t3 = t2 * t;
+        const mt = 1 - t;
+        return [
+          mt * mt * mt / 6,
+          (3 * t3 - 6 * t2 + 4) / 6,
+          (-3 * t3 + 3 * t2 + 3 * t + 1) / 6,
+          t3 / 6
+        ];
+      }
+
+      function prepareSplineAxis(length, screenLength, center, scale, gridStart, step) {
+        const indices = new Int32Array(length);
+        const weights = new Float32Array(length * 4);
+        for (let pixel = 0; pixel < length; pixel++) {
+          const screenPosition = (pixel + 0.5) / length * screenLength;
+          const world = 0.5 + (screenPosition - center) / scale;
+          const gridPosition = world / step - 0.5 - gridStart;
+          const base = Math.floor(gridPosition);
+          indices[pixel] = base - 1;
+          weights.set(cubicBSplineWeights(gridPosition - base), pixel * 4);
+        }
+        return { indices, weights };
+      }
+
+      function renderBlurredPrecipitation(t, travelX, fieldPixels, centerX, centerY) {
+        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
+        const grid = buildSmoothedRainGrid(bounds, t, travelX);
+        const rasterWidth = Math.max(1, Math.ceil(state.width * BLUR_RASTER_SCALE));
+        const rasterHeight = Math.max(1, Math.ceil(state.height * BLUR_RASTER_SCALE));
+        if (precipitationCanvas.width !== rasterWidth || precipitationCanvas.height !== rasterHeight) {
+          precipitationCanvas.width = rasterWidth;
+          precipitationCanvas.height = rasterHeight;
+        }
+
+        const worldScale = fieldPixels * state.zoom;
+        const xSpline = prepareSplineAxis(rasterWidth, state.width, centerX, worldScale, grid.startI, grid.step);
+        const ySpline = prepareSplineAxis(rasterHeight, state.height, centerY, worldScale, grid.startJ, grid.step);
+        const image = precipitationCtx.createImageData(rasterWidth, rasterHeight);
+        const pixels = image.data;
+
+        for (let py = 0; py < rasterHeight; py++) {
+          const gridY = ySpline.indices[py];
+          const wyOffset = py * 4;
+          for (let px = 0; px < rasterWidth; px++) {
+            const gridX = xSpline.indices[px];
+            const wxOffset = px * 4;
+            let rain = 0;
+
+            for (let ky = 0; ky < 4; ky++) {
+              const sampleY = clamp(gridY + ky, 0, grid.height - 1);
+              const rowOffset = sampleY * grid.width;
+              let rowValue = 0;
+              for (let kx = 0; kx < 4; kx++) {
+                const sampleX = clamp(gridX + kx, 0, grid.width - 1);
+                rowValue += grid.values[rowOffset + sampleX] * xSpline.weights[wxOffset + kx];
+              }
+              rain += rowValue * ySpline.weights[wyOffset + ky];
+            }
+
+            // The alpha ramp supplies the soft support edge. Color follows the
+            // same moderate/strong blue hierarchy as the dot renderer.
+            const opacity = smoothstep(0.008, 0.58, rain);
+            const strong = smoothstep(RAIN_MODERATE_MAX, 0.9, rain);
+            const pixelOffset = (py * rasterWidth + px) * 4;
+            pixels[pixelOffset] = 0;
+            pixels[pixelOffset + 1] = Math.round(mix(144, 0, strong));
+            pixels[pixelOffset + 2] = 255;
+            pixels[pixelOffset + 3] = Math.round(opacity * 255);
+          }
+        }
+
+        precipitationCtx.putImageData(image, 0, 0);
+        ctx.save();
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(precipitationCanvas, 0, 0, state.width, state.height);
+        ctx.restore();
+      }
+
       function renderLOD(lod, t, travelX, fieldPixels, centerX, centerY) {
         const step = Math.pow(2, lod) / BASE_GRID;
         const spacing = step * fieldPixels * state.zoom;
@@ -529,6 +719,31 @@
         // Required order: rain → strong precipitation → composite hazard.
         drawLayer(samples, 'rain', RAIN_BLUE, spacing);
         drawStrongPrecipitationLayer(samples, spacing);
+        drawHazardLayer(samples, spacing);
+      }
+
+      function renderHazardsLOD(lod, t, travelX, fieldPixels, centerX, centerY) {
+        const step = Math.pow(2, lod) / BASE_GRID;
+        const spacing = step * fieldPixels * state.zoom;
+        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
+        const startI = Math.floor(bounds.minX / step) - GRID_OVERSCAN_CELLS;
+        const endI = Math.ceil(bounds.maxX / step) + GRID_OVERSCAN_CELLS;
+        const startJ = Math.floor(bounds.minY / step) - GRID_OVERSCAN_CELLS;
+        const endJ = Math.ceil(bounds.maxY / step) + GRID_OVERSCAN_CELLS;
+        const samples = [];
+
+        for (let j = startJ; j < endJ; j++) {
+          const y = (j + 0.5) * step;
+          for (let i = startI; i < endI; i++) {
+            const x = (i + 0.5) * step;
+            samples.push({
+              sx: centerX + (x - 0.5) * fieldPixels * state.zoom,
+              sy: centerY + (y - 0.5) * fieldPixels * state.zoom,
+              value: sampleField(x, y, t, lod, travelX)
+            });
+          }
+        }
+
         drawHazardLayer(samples, spacing);
       }
 
@@ -674,6 +889,40 @@
         drawHazardMorph(samples, coarseSpacing, fineSpacing, progress);
       }
 
+      function renderHazardsLODMorph(morph, t, travelX, fieldPixels, centerX, centerY) {
+        const fineStep = Math.pow(2, morph.fine) / BASE_GRID;
+        const coarseStep = fineStep * 2;
+        const fineSpacing = fineStep * fieldPixels * state.zoom;
+        const coarseSpacing = coarseStep * fieldPixels * state.zoom;
+        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
+        const startI = Math.floor(bounds.minX / fineStep) - GRID_OVERSCAN_CELLS * 2;
+        const endI = Math.ceil(bounds.maxX / fineStep) + GRID_OVERSCAN_CELLS * 2;
+        const startJ = Math.floor(bounds.minY / fineStep) - GRID_OVERSCAN_CELLS * 2;
+        const endJ = Math.ceil(bounds.maxY / fineStep) + GRID_OVERSCAN_CELLS * 2;
+        const samples = [];
+
+        for (let j = startJ; j < endJ; j++) {
+          const childY = (j + 0.5) * fineStep;
+          const parentJ = Math.floor(j / 2);
+          const parentY = (parentJ + 0.5) * coarseStep;
+          for (let i = startI; i < endI; i++) {
+            const childX = (i + 0.5) * fineStep;
+            const parentI = Math.floor(i / 2);
+            const parentX = (parentI + 0.5) * coarseStep;
+            samples.push({
+              childSx: centerX + (childX - 0.5) * fieldPixels * state.zoom,
+              childSy: centerY + (childY - 0.5) * fieldPixels * state.zoom,
+              parentSx: centerX + (parentX - 0.5) * fieldPixels * state.zoom,
+              parentSy: centerY + (parentY - 0.5) * fieldPixels * state.zoom,
+              childValue: sampleField(childX, childY, t, morph.fine, travelX),
+              parentValue: sampleField(parentX, parentY, t, morph.coarse, travelX)
+            });
+          }
+        }
+
+        drawHazardMorph(samples, coarseSpacing, fineSpacing, smoothstep(0, 1, clamp(morph.progress)));
+      }
+
       function render(delta) {
         ctx.globalAlpha = 1;
         ctx.fillStyle = '#080b12';
@@ -695,7 +944,14 @@
         );
 
         updateLODTransition(delta, desiredLOD);
-        if (state.lodMorph) {
+        if (state.precipitationMode === 'blur') {
+          renderBlurredPrecipitation(t, travelX, fieldPixels, centerX, centerY);
+          if (state.lodMorph) {
+            renderHazardsLODMorph(state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
+          } else {
+            renderHazardsLOD(state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
+          }
+        } else if (state.lodMorph) {
           renderLODMorph(state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
         } else {
           renderLOD(state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
@@ -726,6 +982,15 @@
         state.playing = !state.playing;
         playPause.dataset.state = state.playing ? 'playing' : 'paused';
         playPause.setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
+      });
+
+      document.querySelectorAll('[data-render-mode]').forEach((button) => {
+        button.addEventListener('click', () => {
+          state.precipitationMode = button.dataset.renderMode;
+          document.querySelectorAll('[data-render-mode]').forEach((option) => {
+            option.setAttribute('aria-pressed', String(option === button));
+          });
+        });
       });
 
       timeSlider.addEventListener('pointerdown', () => { state.scrubbing = true; });
