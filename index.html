@@ -10,6 +10,13 @@
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #080b12;
       color: #dce3f0;
+      --control-panel: rgba(14, 19, 30, .88);
+      --control-border: 1px solid rgba(176, 193, 220, .16);
+      --control-radius: 12px;
+      --control-inset-radius: 8px;
+      --control-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+      --control-backdrop: blur(10px);
+      --control-inset: #253149;
     }
 
     * { box-sizing: border-box; }
@@ -77,15 +84,15 @@
       width: calc(100% - 28px);
       transform: translateX(-50%);
       display: grid;
-      grid-template-columns: auto minmax(150px, 1fr) 96px 96px 96px;
+      grid-template-columns: auto minmax(150px, 1fr);
       gap: 8px;
       align-items: center;
-      padding: 10px;
-      border: 1px solid rgba(158, 177, 210, .16);
-      border-radius: 10px;
-      background: rgba(10, 14, 23, .88);
-      box-shadow: 0 12px 32px rgba(0, 0, 0, .32);
-      backdrop-filter: blur(10px);
+      padding: 4px;
+      border: var(--control-border);
+      border-radius: var(--control-radius);
+      background: var(--control-panel);
+      box-shadow: var(--control-shadow);
+      backdrop-filter: var(--control-backdrop);
     }
 
     button {
@@ -104,11 +111,18 @@
     button:active { transform: translateY(1px); }
 
     #playPause {
-      width: 34px;
+      width: 42px;
+      height: 42px;
       padding: 0;
+      border: 0;
+      border-radius: var(--control-inset-radius);
+      background: var(--control-inset);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
       display: grid;
       place-items: center;
     }
+
+    #playPause:hover { border-color: transparent; background: #2d3a55; }
 
     #playPause::before { content: ''; display: block; }
     #playPause[data-state="playing"]::before {
@@ -125,18 +139,122 @@
       border-left: 10px solid currentColor;
     }
 
-    #zoomIn, #zoomOut, #resetZoom {
-      width: 100%;
-      white-space: nowrap;
+    .render-mode {
+      position: absolute;
+      left: 50%;
+      bottom: 82px;
+      transform: translateX(-50%);
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      width: 232px;
+      height: auto;
+      margin: 0;
+      padding: 4px;
+      border: var(--control-border);
+      border-radius: var(--control-radius);
+      background: var(--control-panel);
+      color: #8794a9;
+      font-size: 14px;
+      box-shadow: var(--control-shadow);
+      backdrop-filter: var(--control-backdrop);
+      isolation: isolate;
+      cursor: pointer;
     }
+
+    .render-mode::before {
+      content: '';
+      position: absolute;
+      z-index: -1;
+      top: 4px;
+      bottom: 4px;
+      left: 4px;
+      width: calc(50% - 4px);
+      border-radius: var(--control-inset-radius);
+      background: var(--control-inset);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
+      transition: transform 160ms ease;
+    }
+
+    .render-mode[aria-pressed="true"]::before {
+      transform: translateX(100%);
+    }
+
+    .render-mode span {
+      position: relative;
+      display: block;
+      padding: 10px 24px;
+      border-radius: var(--control-inset-radius);
+      text-align: center;
+      transition: color 160ms ease;
+    }
+
+    .zoom-controls {
+      position: absolute;
+      bottom: 82px;
+      right: 20px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .zoom-stepper {
+      display: grid;
+      gap: 2px;
+      padding: 4px;
+      border: var(--control-border);
+      border-radius: var(--control-radius);
+      background: var(--control-panel);
+      box-shadow: var(--control-shadow);
+      backdrop-filter: var(--control-backdrop);
+    }
+
+    .zoom-stepper button {
+      width: 44px;
+      height: 42px;
+      padding: 0;
+      border: 0;
+      border-radius: var(--control-inset-radius);
+      outline: 0;
+      box-shadow: none;
+      background: transparent;
+      font-size: 24px;
+      line-height: 1;
+    }
+
+    .zoom-stepper button:hover,
+    .zoom-stepper button:focus-visible,
+    .zoom-stepper button:active { background: rgba(37, 49, 73, .72); }
+
+    .zoom-reset {
+      width: 54px;
+      height: 54px;
+      justify-self: end;
+      padding: 0;
+      border: var(--control-border);
+      border-radius: var(--control-radius);
+      background: var(--control-panel);
+      font-size: 22px;
+      line-height: 1;
+      box-shadow: var(--control-shadow);
+      backdrop-filter: var(--control-backdrop);
+    }
+
+    .zoom-reset[hidden] { display: none; }
+
+    .render-mode span:first-child,
+    .render-mode[aria-pressed="true"] span:last-child { color: #f1f5fb; }
+    .render-mode[aria-pressed="true"] span:first-child { color: #8794a9; }
+    .render-mode:hover span { color: #c7d0df; }
+    .render-mode:focus-visible {
+      outline: 2px solid #6aa6ff;
+      outline-offset: 2px;
+    }
+    button.render-mode:active { transform: translateX(-50%); }
 
     .time-control {
       min-width: 0;
-      display: grid;
-      grid-template-columns: minmax(100px, 1fr) 52px;
-      gap: 9px;
+      display: flex;
       align-items: center;
-      padding: 0 4px;
+      padding: 0 8px;
     }
 
     input[type="range"] {
@@ -164,9 +282,8 @@
       }
       #playPause { grid-column: 1; grid-row: 1; }
       .time-control { grid-column: 2; grid-row: 1; }
-      #zoomIn, #zoomOut, #resetZoom { display: none; }
+      .zoom-controls { right: 14px; }
       .legend { gap: 9px; }
-      .readout { top: 42px; left: 20px; right: auto; }
     }
   </style>
 </head>
@@ -180,20 +297,29 @@
       <span class="hail"><i></i>Hail</span>
     </div>
 
+    <button id="renderModeToggle" class="render-mode" type="button" aria-label="Toggle weather rendering mode" aria-pressed="false">
+      <span>Dots</span>
+      <span>Blur</span>
+    </button>
+
     <div class="readout" aria-live="polite">
       <span>zoom <b id="zoomLabel">1.00×</b></span>
       <span>LOD <b id="lodLabel">0</b></span>
     </div>
 
-    <section class="controls" aria-label="Playback and zoom controls">
+    <div class="zoom-controls" role="group" aria-label="Zoom controls">
+      <button id="resetZoom" class="zoom-reset" type="button" aria-label="Reset zoom" hidden>↺</button>
+      <div class="zoom-stepper">
+        <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
+        <button id="zoomOut" type="button" aria-label="Zoom out">−</button>
+      </div>
+    </div>
+
+    <section class="controls" aria-label="Playback and timeline controls">
       <button id="playPause" type="button" data-state="playing" aria-label="Pause"></button>
       <label class="time-control">
         <input id="timeSlider" type="range" min="0" max="1000" step="1" value="0" aria-label="Animation time">
-        <span id="timeInline">00:00</span>
       </label>
-      <button id="zoomIn" type="button" aria-label="Zoom in">Zoom In</button>
-      <button id="zoomOut" type="button" aria-label="Zoom out">Zoom Out</button>
-      <button id="resetZoom" type="button">Reset</button>
     </section>
   </main>
 
@@ -213,14 +339,20 @@
       const RAIN_MODERATE_MAX = 0.55;
       const RAIN_BLUE = '#0090FF';
       const STRONG_PRECIPITATION_BLUE = '#0000FF';
+      const BLUR_RASTER_SCALE = 0.42;
+      const SCALAR_SMOOTH_RADIUS = 4;
+      const SCALAR_SMOOTH_SIGMA = 1.2;
 
       const canvas = document.querySelector('#field');
       const ctx = canvas.getContext('2d', { alpha: false });
+      const precipitationCanvas = document.createElement('canvas');
+      const precipitationCtx = precipitationCanvas.getContext('2d', { alpha: true });
       const playPause = document.querySelector('#playPause');
+      const renderModeToggle = document.querySelector('#renderModeToggle');
       const timeSlider = document.querySelector('#timeSlider');
-      const timeInline = document.querySelector('#timeInline');
       const zoomLabel = document.querySelector('#zoomLabel');
       const lodLabel = document.querySelector('#lodLabel');
+      const resetZoom = document.querySelector('#resetZoom');
 
       const state = {
         playing: true,
@@ -231,6 +363,7 @@
         dpr: 1,
         lastFrame: performance.now(),
         scrubbing: false,
+        renderMode: 'dots',
         lodLevel: null,
         desiredLOD: null,
         lodMorph: null
@@ -504,6 +637,205 @@
         ctx.fill();
       }
 
+      // Blur modes reconstruct continuous fields from fixed base-grid samples.
+      // Smoothing happens on scalar intensities before any color is applied; this
+      // is intentionally independent from the marker-rendering canvas output.
+      function gaussianKernel(radius, sigma) {
+        const kernel = new Float32Array(radius * 2 + 1);
+        let sum = 0;
+        for (let i = -radius; i <= radius; i++) {
+          const weight = Math.exp(-(i * i) / (2 * sigma * sigma));
+          kernel[i + radius] = weight;
+          sum += weight;
+        }
+        for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
+        return kernel;
+      }
+
+      const scalarSmoothKernel = gaussianKernel(SCALAR_SMOOTH_RADIUS, SCALAR_SMOOTH_SIGMA);
+
+      function smoothScalarGrid(source, width, height) {
+        const horizontal = new Float32Array(source.length);
+        const smoothed = new Float32Array(source.length);
+
+        for (let row = 0; row < height; row++) {
+          const offset = row * width;
+          for (let column = 0; column < width; column++) {
+            let value = 0;
+            for (let k = -SCALAR_SMOOTH_RADIUS; k <= SCALAR_SMOOTH_RADIUS; k++) {
+              const sampleColumn = clamp(column + k, 0, width - 1);
+              value += source[offset + sampleColumn] * scalarSmoothKernel[k + SCALAR_SMOOTH_RADIUS];
+            }
+            horizontal[offset + column] = value;
+          }
+        }
+
+        for (let row = 0; row < height; row++) {
+          const offset = row * width;
+          for (let column = 0; column < width; column++) {
+            let value = 0;
+            for (let k = -SCALAR_SMOOTH_RADIUS; k <= SCALAR_SMOOTH_RADIUS; k++) {
+              const sampleRow = clamp(row + k, 0, height - 1);
+              value += horizontal[sampleRow * width + column] * scalarSmoothKernel[k + SCALAR_SMOOTH_RADIUS];
+            }
+            smoothed[offset + column] = value;
+          }
+        }
+
+        return smoothed;
+      }
+
+      function buildSmoothedWeatherGrid(bounds, t, travelX) {
+        const step = 1 / BASE_GRID;
+        const padding = SCALAR_SMOOTH_RADIUS + 3;
+        // intensityAt has compact empty-space rejection. Intersecting the visible
+        // world with that support prevents very low zooms from allocating a huge
+        // all-zero lattice while retaining enough padding for both filters.
+        const minX = Math.max(bounds.minX, travelX - 0.92);
+        const maxX = Math.min(bounds.maxX, travelX + 0.92);
+        const minY = Math.max(bounds.minY, -0.26);
+        const maxY = Math.min(bounds.maxY, 1.26);
+        const startI = Math.floor(minX / step - 0.5) - padding;
+        const endI = Math.ceil(maxX / step - 0.5) + padding;
+        const startJ = Math.floor(minY / step - 0.5) - padding;
+        const endJ = Math.ceil(maxY / step - 0.5) + padding;
+        const width = endI - startI + 1;
+        const height = endJ - startJ + 1;
+        const rainSource = new Float32Array(width * height);
+        const stormSource = new Float32Array(rainSource.length);
+        const hailSource = new Float32Array(rainSource.length);
+
+        for (let row = 0; row < height; row++) {
+          const y = (startJ + row + 0.5) * step;
+          const offset = row * width;
+          for (let column = 0; column < width; column++) {
+            const x = (startI + column + 0.5) * step;
+            const value = intensityAt(x, y, t, travelX);
+            const index = offset + column;
+            rainSource[index] = value.rain;
+            stormSource[index] = value.storm;
+            hailSource[index] = value.hail;
+          }
+        }
+
+        return {
+          rain: smoothScalarGrid(rainSource, width, height),
+          storm: smoothScalarGrid(stormSource, width, height),
+          hail: smoothScalarGrid(hailSource, width, height),
+          width,
+          height,
+          startI,
+          startJ,
+          step
+        };
+      }
+
+      function cubicBSplineWeights(t) {
+        const t2 = t * t;
+        const t3 = t2 * t;
+        const mt = 1 - t;
+        return [
+          mt * mt * mt / 6,
+          (3 * t3 - 6 * t2 + 4) / 6,
+          (-3 * t3 + 3 * t2 + 3 * t + 1) / 6,
+          t3 / 6
+        ];
+      }
+
+      function prepareSplineAxis(length, screenLength, center, scale, gridStart, step) {
+        const indices = new Int32Array(length);
+        const weights = new Float32Array(length * 4);
+        for (let pixel = 0; pixel < length; pixel++) {
+          const screenPosition = (pixel + 0.5) / length * screenLength;
+          const world = 0.5 + (screenPosition - center) / scale;
+          const gridPosition = world / step - 0.5 - gridStart;
+          const base = Math.floor(gridPosition);
+          indices[pixel] = base - 1;
+          weights.set(cubicBSplineWeights(gridPosition - base), pixel * 4);
+        }
+        return { indices, weights };
+      }
+
+      function compositeField(color, opacity, pixel) {
+        if (opacity <= 0) return pixel;
+        const outputAlpha = opacity + pixel.a * (1 - opacity);
+        return {
+          r: (color[0] * opacity + pixel.r * pixel.a * (1 - opacity)) / outputAlpha,
+          g: (color[1] * opacity + pixel.g * pixel.a * (1 - opacity)) / outputAlpha,
+          b: (color[2] * opacity + pixel.b * pixel.a * (1 - opacity)) / outputAlpha,
+          a: outputAlpha
+        };
+      }
+
+      function renderBlurredFields(t, travelX, fieldPixels, centerX, centerY) {
+        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
+        const grid = buildSmoothedWeatherGrid(bounds, t, travelX);
+        const rasterWidth = Math.max(1, Math.ceil(state.width * BLUR_RASTER_SCALE));
+        const rasterHeight = Math.max(1, Math.ceil(state.height * BLUR_RASTER_SCALE));
+        if (precipitationCanvas.width !== rasterWidth || precipitationCanvas.height !== rasterHeight) {
+          precipitationCanvas.width = rasterWidth;
+          precipitationCanvas.height = rasterHeight;
+        }
+
+        const worldScale = fieldPixels * state.zoom;
+        const xSpline = prepareSplineAxis(rasterWidth, state.width, centerX, worldScale, grid.startI, grid.step);
+        const ySpline = prepareSplineAxis(rasterHeight, state.height, centerY, worldScale, grid.startJ, grid.step);
+        const image = precipitationCtx.createImageData(rasterWidth, rasterHeight);
+        const pixels = image.data;
+
+        for (let py = 0; py < rasterHeight; py++) {
+          const gridY = ySpline.indices[py];
+          const wyOffset = py * 4;
+          for (let px = 0; px < rasterWidth; px++) {
+            const gridX = xSpline.indices[px];
+            const wxOffset = px * 4;
+            let rain = 0;
+            let storm = 0;
+            let hail = 0;
+
+            for (let ky = 0; ky < 4; ky++) {
+              const sampleY = clamp(gridY + ky, 0, grid.height - 1);
+              const rowOffset = sampleY * grid.width;
+              let rainRow = 0;
+              let stormRow = 0;
+              let hailRow = 0;
+              for (let kx = 0; kx < 4; kx++) {
+                const sampleX = clamp(gridX + kx, 0, grid.width - 1);
+                const sampleIndex = rowOffset + sampleX;
+                const weight = xSpline.weights[wxOffset + kx];
+                rainRow += grid.rain[sampleIndex] * weight;
+                stormRow += grid.storm[sampleIndex] * weight;
+                hailRow += grid.hail[sampleIndex] * weight;
+              }
+              const yWeight = ySpline.weights[wyOffset + ky];
+              rain += rainRow * yWeight;
+              storm += stormRow * yWeight;
+              hail += hailRow * yWeight;
+            }
+
+            // The alpha ramp supplies the soft support edge. Color follows the
+            // same moderate/strong blue hierarchy as the dot renderer.
+            const rainOpacity = smoothstep(0.008, 0.58, rain);
+            const strong = smoothstep(RAIN_MODERATE_MAX, 0.9, rain);
+            let pixel = { r: 0, g: mix(144, 0, strong), b: 255, a: rainOpacity };
+            pixel = compositeField([255, 0, 255], smoothstep(0.012, 0.72, storm), pixel);
+            pixel = compositeField([255, 212, 0], smoothstep(0.018, 0.62, hail), pixel);
+            const pixelOffset = (py * rasterWidth + px) * 4;
+            pixels[pixelOffset] = Math.round(pixel.r);
+            pixels[pixelOffset + 1] = Math.round(pixel.g);
+            pixels[pixelOffset + 2] = Math.round(pixel.b);
+            pixels[pixelOffset + 3] = Math.round(pixel.a * 255);
+          }
+        }
+
+        precipitationCtx.putImageData(image, 0, 0);
+        ctx.save();
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(precipitationCanvas, 0, 0, state.width, state.height);
+        ctx.restore();
+      }
+
       function renderLOD(lod, t, travelX, fieldPixels, centerX, centerY) {
         const step = Math.pow(2, lod) / BASE_GRID;
         const spacing = step * fieldPixels * state.zoom;
@@ -695,17 +1027,15 @@
         );
 
         updateLODTransition(delta, desiredLOD);
-        if (state.lodMorph) {
+        if (state.renderMode === 'blur') {
+          renderBlurredFields(t, travelX, fieldPixels, centerX, centerY);
+        } else if (state.lodMorph) {
           renderLODMorph(state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
         } else {
           renderLOD(state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
         }
 
         ctx.globalAlpha = 1;
-        const minutes = Math.floor(state.time);
-        const seconds = Math.floor((state.time - minutes) * 60);
-        const timeText = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-        timeInline.textContent = timeText;
         zoomLabel.textContent = `${state.zoom.toFixed(2)}×`;
         lodLabel.textContent = state.lodMorph
           ? `${state.lodMorph.coarse}→${state.lodMorph.fine}`
@@ -728,6 +1058,11 @@
         playPause.setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
       });
 
+      renderModeToggle.addEventListener('click', () => {
+        state.renderMode = state.renderMode === 'dots' ? 'blur' : 'dots';
+        renderModeToggle.setAttribute('aria-pressed', String(state.renderMode === 'blur'));
+      });
+
       timeSlider.addEventListener('pointerdown', () => { state.scrubbing = true; });
       timeSlider.addEventListener('input', () => {
         state.time = Number(timeSlider.value) / 1000 * LOOP_SECONDS;
@@ -739,11 +1074,12 @@
       // ── Zoom controls ─────────────────────────────────────────────────────────
       function setZoom(next) {
         state.zoom = clamp(next, MIN_ZOOM, MAX_ZOOM);
+        resetZoom.hidden = state.zoom.toFixed(2) === '1.00';
       }
 
       document.querySelector('#zoomIn').addEventListener('click', () => setZoom(state.zoom * 1.28));
       document.querySelector('#zoomOut').addEventListener('click', () => setZoom(state.zoom / 1.28));
-      document.querySelector('#resetZoom').addEventListener('click', () => setZoom(1));
+      resetZoom.addEventListener('click', () => setZoom(1));
       canvas.addEventListener('wheel', (event) => {
         event.preventDefault();
         setZoom(state.zoom * Math.exp(-event.deltaY * 0.00125));
