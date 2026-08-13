@@ -61,8 +61,9 @@
     .rain-base { background: #0090FF; }
     .rain-strong { background: #0000FF; }
     .storm i {
-      background: #BB00FF;
-      clip-path: polygon(50% 0, 61% 39%, 100% 50%, 61% 61%, 50% 100%, 39% 61%, 0 50%, 39% 39%);
+      background: #FF00FF;
+      clip-path: polygon(50% 0, 63.5% 36.5%, 100% 50%, 63.5% 63.5%, 50% 100%, 36.5% 63.5%, 0 50%, 36.5% 36.5%);
+      transform: scale(1.18);
     }
     .hail i {
       background: #FFD400;
@@ -101,6 +102,28 @@
 
     button:hover { background: #1c2434; border-color: rgba(176, 193, 220, .32); }
     button:active { transform: translateY(1px); }
+
+    #playPause {
+      width: 34px;
+      padding: 0;
+      display: grid;
+      place-items: center;
+    }
+
+    #playPause::before { content: ''; display: block; }
+    #playPause[data-state="playing"]::before {
+      width: 10px;
+      height: 12px;
+      background: linear-gradient(to right, currentColor 0 3px, transparent 3px 7px, currentColor 7px 10px);
+    }
+    #playPause[data-state="paused"]::before {
+      width: 0;
+      height: 0;
+      margin-left: 2px;
+      border-top: 6px solid transparent;
+      border-bottom: 6px solid transparent;
+      border-left: 10px solid currentColor;
+    }
 
     #zoomIn, #zoomOut, #resetZoom {
       width: 100%;
@@ -158,13 +181,12 @@
     </div>
 
     <div class="readout" aria-live="polite">
-      <span>time <b id="timeLabel">00:00</b></span>
       <span>zoom <b id="zoomLabel">1.00×</b></span>
       <span>LOD <b id="lodLabel">0</b></span>
     </div>
 
     <section class="controls" aria-label="Playback and zoom controls">
-      <button id="playPause" type="button">Pause</button>
+      <button id="playPause" type="button" data-state="playing" aria-label="Pause"></button>
       <label class="time-control">
         <input id="timeSlider" type="range" min="0" max="1000" step="1" value="0" aria-label="Animation time">
         <span id="timeInline">00:00</span>
@@ -196,7 +218,6 @@
       const ctx = canvas.getContext('2d', { alpha: false });
       const playPause = document.querySelector('#playPause');
       const timeSlider = document.querySelector('#timeSlider');
-      const timeLabel = document.querySelector('#timeLabel');
       const timeInline = document.querySelector('#timeInline');
       const zoomLabel = document.querySelector('#zoomLabel');
       const lodLabel = document.querySelector('#lodLabel');
@@ -378,31 +399,48 @@
         // Adjust thresholds and radius mapping here. Rain intentionally overlaps most.
         const thresholds = { rain: 0.045, storm: 0.075, hail: 0.11 };
         // Ease through the visibility floor instead of switching a dot on abruptly.
-        const normalized = smoothstep(thresholds[layer] * 0.45, 0.93, intensity);
+        const normalized = intensityToStrength(intensity, layer, thresholds);
         const overlap = layer === 'rain' ? 0.86 : layer === 'storm' ? 0.72 : 0.59;
         return spacing * overlap * Math.pow(normalized, layer === 'rain' ? 0.47 : 0.56);
+      }
+
+      function intensityToStrength(intensity, layer, thresholds = { rain: 0.045, storm: 0.075, hail: 0.11 }) {
+        return smoothstep(thresholds[layer] * 0.45, 0.93, intensity);
       }
 
       function strongPrecipitationIntensity(rainIntensity) {
         return clamp((rainIntensity - RAIN_MODERATE_MAX) / (1 - RAIN_MODERATE_MAX));
       }
 
-      function appendMarkerPath(x, y, radius, layer) {
-        if (layer === 'storm') {
-          const innerRadius = radius * 0.38;
-          for (let point = 0; point < 8; point++) {
-            const angle = -Math.PI / 2 + point * Math.PI / 4;
-            const pointRadius = point % 2 === 0 ? radius : innerRadius;
-            const px = x + Math.cos(angle) * pointRadius;
-            const py = y + Math.sin(angle) * pointRadius;
-            if (point === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-          }
-          ctx.closePath();
-          return;
+      function resolveHazardState(value) {
+        const stormStrength = intensityToStrength(value.storm, 'storm');
+        const hailStrength = intensityToStrength(value.hail, 'hail');
+        if (hailStrength > 0) return 3 + Math.max(1, Math.ceil(hailStrength * 3));
+        if (stormStrength > 0) return Math.max(1, Math.ceil(stormStrength * 3));
+        return 0;
+      }
+
+      function hazardStateAppearance(value, hazardState, spacing) {
+        if (hazardState <= 0) return { radius: 0, type: 'storm', color: '#FF00FF' };
+        if (hazardState <= 3) {
+          const strength = intensityToStrength(value.storm, 'storm');
+          return {
+            radius: spacing * mix(0.30, 0.72, Math.pow(strength, 0.47)),
+            type: 'storm',
+            color: '#FF00FF'
+          };
         }
 
-        if (layer === 'hail') {
+        const strength = intensityToStrength(value.hail, 'hail');
+        return {
+          radius: spacing * mix(0.34, 1.0, Math.pow(strength, 0.47)),
+          type: 'hail',
+          color: '#FFD400'
+        };
+      }
+
+      function appendHazardPath(x, y, radius, type) {
+        if (type === 'hail') {
           for (let point = 0; point < 6; point++) {
             const angle = -Math.PI / 2 + point * Math.PI / 3;
             const px = x + Math.cos(angle) * radius;
@@ -414,8 +452,16 @@
           return;
         }
 
-        ctx.moveTo(x + radius, y);
-        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        const innerRadius = radius * 0.38;
+        for (let point = 0; point < 8; point++) {
+          const angle = -Math.PI / 2 + point * Math.PI / 4;
+          const pointRadius = point % 2 === 0 ? radius : innerRadius;
+          const px = x + Math.cos(angle) * pointRadius;
+          const py = y + Math.sin(angle) * pointRadius;
+          if (point === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
       }
 
       function drawLayer(samples, key, color, spacing) {
@@ -425,9 +471,23 @@
         for (const sample of samples) {
           const radius = intensityToRadius(sample.value[key], spacing, key);
           if (radius <= 0) continue;
-          appendMarkerPath(sample.sx, sample.sy, radius, key);
+          ctx.moveTo(sample.sx + radius, sample.sy);
+          ctx.arc(sample.sx, sample.sy, radius, 0, Math.PI * 2);
         }
         ctx.fill();
+      }
+
+      function drawHazardLayer(samples, spacing) {
+        ctx.globalAlpha = 1;
+        for (const sample of samples) {
+          const hazardState = resolveHazardState(sample.value);
+          const appearance = hazardStateAppearance(sample.value, hazardState, spacing);
+          if (appearance.radius <= 0) continue;
+          ctx.fillStyle = appearance.color;
+          ctx.beginPath();
+          appendHazardPath(sample.sx, sample.sy, appearance.radius, appearance.type);
+          ctx.fill();
+        }
       }
 
       function drawStrongPrecipitationLayer(samples, spacing) {
@@ -466,11 +526,10 @@
           }
         }
 
-        // Required order: rain → strong precipitation → thunderstorm → hail.
+        // Required order: rain → strong precipitation → composite hazard.
         drawLayer(samples, 'rain', RAIN_BLUE, spacing);
         drawStrongPrecipitationLayer(samples, spacing);
-        drawLayer(samples, 'storm', '#BB00FF', spacing);
-        drawLayer(samples, 'hail', '#FFD400', spacing);
+        drawHazardLayer(samples, spacing);
       }
 
       function updateLODTransition(delta, desiredLOD) {
@@ -529,10 +588,29 @@
 
           const x = mix(sample.parentSx, sample.childSx, progress);
           const y = mix(sample.parentSy, sample.childSy, progress);
-          appendMarkerPath(x, y, radius, key);
+          ctx.moveTo(x + radius, y);
+          ctx.arc(x, y, radius, 0, Math.PI * 2);
         }
 
         ctx.fill();
+      }
+
+      function drawHazardMorph(samples, coarseSpacing, fineSpacing, progress) {
+        ctx.globalAlpha = 1;
+        for (const sample of samples) {
+          const hazardState = resolveHazardState(sample.childValue);
+          const parent = hazardStateAppearance(sample.childValue, hazardState, coarseSpacing);
+          const child = hazardStateAppearance(sample.childValue, hazardState, fineSpacing);
+          const radius = mix(parent.radius, child.radius, progress);
+          if (radius <= 0) continue;
+
+          const x = mix(sample.parentSx, sample.childSx, progress);
+          const y = mix(sample.parentSy, sample.childSy, progress);
+          ctx.fillStyle = child.color;
+          ctx.beginPath();
+          appendHazardPath(x, y, radius, child.type);
+          ctx.fill();
+        }
       }
 
       function drawStrongPrecipitationMorph(samples, coarseSpacing, fineSpacing, progress) {
@@ -590,11 +668,10 @@
         }
 
         const progress = smoothstep(0, 1, clamp(morph.progress));
-        // Required order remains rain → strong precipitation → thunderstorm → hail.
+        // Required order remains rain → strong precipitation → composite hazard.
         drawMorphLayer(samples, 'rain', RAIN_BLUE, coarseSpacing, fineSpacing, progress);
         drawStrongPrecipitationMorph(samples, coarseSpacing, fineSpacing, progress);
-        drawMorphLayer(samples, 'storm', '#BB00FF', coarseSpacing, fineSpacing, progress);
-        drawMorphLayer(samples, 'hail', '#FFD400', coarseSpacing, fineSpacing, progress);
+        drawHazardMorph(samples, coarseSpacing, fineSpacing, progress);
       }
 
       function render(delta) {
@@ -628,7 +705,6 @@
         const minutes = Math.floor(state.time);
         const seconds = Math.floor((state.time - minutes) * 60);
         const timeText = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-        timeLabel.textContent = timeText;
         timeInline.textContent = timeText;
         zoomLabel.textContent = `${state.zoom.toFixed(2)}×`;
         lodLabel.textContent = state.lodMorph
@@ -648,7 +724,8 @@
       // ── Player controls ───────────────────────────────────────────────────────
       playPause.addEventListener('click', () => {
         state.playing = !state.playing;
-        playPause.textContent = state.playing ? 'Pause' : 'Play';
+        playPause.dataset.state = state.playing ? 'playing' : 'paused';
+        playPause.setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
       });
 
       timeSlider.addEventListener('pointerdown', () => { state.scrubbing = true; });
