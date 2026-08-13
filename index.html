@@ -60,8 +60,14 @@
     .legend i { width: 7px; height: 7px; border-radius: 50%; display: block; }
     .rain-base { background: #0090FF; }
     .rain-strong { background: #0000FF; }
-    .storm i { background: #BB00FF; }
-    .hail i { background: #FFD400; }
+    .storm i {
+      background: #BB00FF;
+      clip-path: polygon(50% 0, 61% 39%, 100% 50%, 61% 61%, 50% 100%, 39% 61%, 0 50%, 39% 39%);
+    }
+    .hail i {
+      background: #FFD400;
+      clip-path: polygon(50% 0, 93.3% 25%, 93.3% 75%, 50% 100%, 6.7% 75%, 6.7% 25%);
+    }
 
     .controls {
       position: absolute;
@@ -381,6 +387,37 @@
         return clamp((rainIntensity - RAIN_MODERATE_MAX) / (1 - RAIN_MODERATE_MAX));
       }
 
+      function appendMarkerPath(x, y, radius, layer) {
+        if (layer === 'storm') {
+          const innerRadius = radius * 0.38;
+          for (let point = 0; point < 8; point++) {
+            const angle = -Math.PI / 2 + point * Math.PI / 4;
+            const pointRadius = point % 2 === 0 ? radius : innerRadius;
+            const px = x + Math.cos(angle) * pointRadius;
+            const py = y + Math.sin(angle) * pointRadius;
+            if (point === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          return;
+        }
+
+        if (layer === 'hail') {
+          for (let point = 0; point < 6; point++) {
+            const angle = -Math.PI / 2 + point * Math.PI / 3;
+            const px = x + Math.cos(angle) * radius;
+            const py = y + Math.sin(angle) * radius;
+            if (point === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          return;
+        }
+
+        ctx.moveTo(x + radius, y);
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+      }
+
       function drawLayer(samples, key, color, spacing) {
         ctx.fillStyle = color;
         ctx.globalAlpha = 1;
@@ -388,8 +425,7 @@
         for (const sample of samples) {
           const radius = intensityToRadius(sample.value[key], spacing, key);
           if (radius <= 0) continue;
-          ctx.moveTo(sample.sx + radius, sample.sy);
-          ctx.arc(sample.sx, sample.sy, radius, 0, Math.PI * 2);
+          appendMarkerPath(sample.sx, sample.sy, radius, key);
         }
         ctx.fill();
       }
@@ -493,8 +529,7 @@
 
           const x = mix(sample.parentSx, sample.childSx, progress);
           const y = mix(sample.parentSy, sample.childSy, progress);
-          ctx.moveTo(x + radius, y);
-          ctx.arc(x, y, radius, 0, Math.PI * 2);
+          appendMarkerPath(x, y, radius, key);
         }
 
         ctx.fill();
