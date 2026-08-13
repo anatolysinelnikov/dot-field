@@ -58,8 +58,9 @@
 
     .legend span { display: inline-flex; align-items: center; gap: 6px; }
     .legend i { width: 7px; height: 7px; border-radius: 50%; display: block; }
-    .rain i { background: #0090FF; }
-    .storm i { background: #D400FF; }
+    .rain-base { background: #0090FF; }
+    .rain-strong { background: #0000FF; }
+    .storm i { background: #BB00FF; }
     .hail i { background: #FFD400; }
 
     .controls {
@@ -145,7 +146,7 @@
     <canvas id="field" aria-label="Animated fixed-grid rain, thunderstorm, and hail intensity field"></canvas>
 
     <div class="legend" aria-hidden="true">
-      <span class="rain"><i></i>Rain</span>
+      <span class="rain"><i class="rain-base"></i><i class="rain-strong"></i>Rain</span>
       <span class="storm"><i></i>Thunderstorm</span>
       <span class="hail"><i></i>Hail</span>
     </div>
@@ -181,6 +182,9 @@
       const LOD_MORPH_SECONDS = 0.2;   // Adjust geometric split / merge duration here.
       const GRID_OVERSCAN_CELLS = 4;   // Render fixed-grid samples beyond every viewport edge.
       const WEATHER_MARGIN_WORLD = 0.72; // Keeps the full system off-screen at loop endpoints.
+      const RAIN_MODERATE_MAX = 0.55;
+      const RAIN_BLUE = '#0090FF';
+      const STRONG_PRECIPITATION_BLUE = '#0000FF';
 
       const canvas = document.querySelector('#field');
       const ctx = canvas.getContext('2d', { alpha: false });
@@ -369,8 +373,12 @@
         const thresholds = { rain: 0.045, storm: 0.075, hail: 0.11 };
         // Ease through the visibility floor instead of switching a dot on abruptly.
         const normalized = smoothstep(thresholds[layer] * 0.45, 0.93, intensity);
-        const overlap = layer === 'rain' ? 0.91 : layer === 'storm' ? 0.72 : 0.59;
+        const overlap = layer === 'rain' ? 0.86 : layer === 'storm' ? 0.72 : 0.59;
         return spacing * overlap * Math.pow(normalized, layer === 'rain' ? 0.47 : 0.56);
+      }
+
+      function strongPrecipitationIntensity(rainIntensity) {
+        return clamp((rainIntensity - RAIN_MODERATE_MAX) / (1 - RAIN_MODERATE_MAX));
       }
 
       function drawLayer(samples, key, color, spacing) {
@@ -379,6 +387,20 @@
         ctx.beginPath();
         for (const sample of samples) {
           const radius = intensityToRadius(sample.value[key], spacing, key);
+          if (radius <= 0) continue;
+          ctx.moveTo(sample.sx + radius, sample.sy);
+          ctx.arc(sample.sx, sample.sy, radius, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
+
+      function drawStrongPrecipitationLayer(samples, spacing) {
+        ctx.fillStyle = STRONG_PRECIPITATION_BLUE;
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+        for (const sample of samples) {
+          const intensity = strongPrecipitationIntensity(sample.value.rain);
+          const radius = intensityToRadius(intensity, spacing, 'rain');
           if (radius <= 0) continue;
           ctx.moveTo(sample.sx + radius, sample.sy);
           ctx.arc(sample.sx, sample.sy, radius, 0, Math.PI * 2);
@@ -408,9 +430,10 @@
           }
         }
 
-        // Required order: rain → thunderstorm → hail.
-        drawLayer(samples, 'rain', '#0090FF', spacing);
-        drawLayer(samples, 'storm', '#D400FF', spacing);
+        // Required order: rain → strong precipitation → thunderstorm → hail.
+        drawLayer(samples, 'rain', RAIN_BLUE, spacing);
+        drawStrongPrecipitationLayer(samples, spacing);
+        drawLayer(samples, 'storm', '#BB00FF', spacing);
         drawLayer(samples, 'hail', '#FFD400', spacing);
       }
 
@@ -477,6 +500,28 @@
         ctx.fill();
       }
 
+      function drawStrongPrecipitationMorph(samples, coarseSpacing, fineSpacing, progress) {
+        ctx.fillStyle = STRONG_PRECIPITATION_BLUE;
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+
+        for (const sample of samples) {
+          const parentIntensity = strongPrecipitationIntensity(sample.parentValue.rain);
+          const childIntensity = strongPrecipitationIntensity(sample.childValue.rain);
+          const parentRadius = intensityToRadius(parentIntensity, coarseSpacing, 'rain');
+          const childRadius = intensityToRadius(childIntensity, fineSpacing, 'rain');
+          const radius = mix(parentRadius, childRadius, progress);
+          if (radius <= 0) continue;
+
+          const x = mix(sample.parentSx, sample.childSx, progress);
+          const y = mix(sample.parentSy, sample.childSy, progress);
+          ctx.moveTo(x + radius, y);
+          ctx.arc(x, y, radius, 0, Math.PI * 2);
+        }
+
+        ctx.fill();
+      }
+
       function renderLODMorph(morph, t, travelX, fieldPixels, centerX, centerY) {
         const fineStep = Math.pow(2, morph.fine) / BASE_GRID;
         const coarseStep = fineStep * 2;
@@ -510,9 +555,10 @@
         }
 
         const progress = smoothstep(0, 1, clamp(morph.progress));
-        // Required order remains rain → thunderstorm → hail; no opacity changes.
-        drawMorphLayer(samples, 'rain', '#0090FF', coarseSpacing, fineSpacing, progress);
-        drawMorphLayer(samples, 'storm', '#D400FF', coarseSpacing, fineSpacing, progress);
+        // Required order remains rain → strong precipitation → thunderstorm → hail.
+        drawMorphLayer(samples, 'rain', RAIN_BLUE, coarseSpacing, fineSpacing, progress);
+        drawStrongPrecipitationMorph(samples, coarseSpacing, fineSpacing, progress);
+        drawMorphLayer(samples, 'storm', '#BB00FF', coarseSpacing, fineSpacing, progress);
         drawMorphLayer(samples, 'hail', '#FFD400', coarseSpacing, fineSpacing, progress);
       }
 
