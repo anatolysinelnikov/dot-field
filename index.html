@@ -198,6 +198,7 @@
 
     .zoom-stepper {
       display: grid;
+      gap: 2px;
       padding: 4px;
       border: var(--control-border);
       border-radius: var(--control-radius);
@@ -211,7 +212,7 @@
       height: 42px;
       padding: 0;
       border: 0;
-      border-radius: 0;
+      border-radius: var(--control-inset-radius);
       outline: 0;
       box-shadow: none;
       background: transparent;
@@ -219,16 +220,14 @@
       line-height: 1;
     }
 
-    .zoom-stepper button + button {
-      border-top: 1px solid rgba(176, 193, 220, .12);
-    }
-
-    .zoom-stepper button:hover { background: rgba(37, 49, 73, .72); }
-    .zoom-stepper button:focus-visible { color: #fff; background: transparent; }
+    .zoom-stepper button:hover,
+    .zoom-stepper button:focus-visible,
+    .zoom-stepper button:active { background: rgba(37, 49, 73, .72); }
 
     .zoom-reset {
-      width: 54px;
+      width: 42px;
       height: 42px;
+      justify-self: end;
       padding: 0;
       border: var(--control-border);
       border-radius: var(--control-radius);
