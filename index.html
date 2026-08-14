@@ -476,7 +476,7 @@
       function selectLOD(zoom, fieldPixels) {
         const baseCellPixels = fieldPixels * zoom / BASE_GRID;
         const continuous = Math.log2(TARGET_SPACING / Math.max(baseCellPixels, 0.001));
-        return clamp(continuous, -2, 4);
+        return clamp(continuous, 0, 5);
       }
 
       function sampleField(x, y, t, lod, travelX) {
