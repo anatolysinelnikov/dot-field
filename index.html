@@ -523,8 +523,8 @@
         ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
       }
 
-      function getVisibleWorldBounds(fieldPixels, centerX, centerY) {
-        const scale = fieldPixels * state.zoom;
+      function getVisibleWorldBounds(fieldPixels, centerX, centerY, zoom = state.zoom) {
+        const scale = fieldPixels * zoom;
         return {
           minX: 0.5 - centerX / scale,
           maxX: 0.5 + (state.width - centerX) / scale,
@@ -1022,12 +1022,13 @@
         const continuousLOD = selectLOD(state.zoom, fieldPixels);
         const desiredLOD = Math.round(continuousLOD);
         const t = state.time / LOOP_SECONDS;
-        const bounds = getVisibleWorldBounds(fieldPixels, centerX, centerY);
-        // Keep the synchronized system in the middle third of the viewport.
+        // Keep the animation path in canonical world coordinates. Zoom only
+        // changes the camera scale, so values remain attached to the same lattice points.
+        const travelBounds = getVisibleWorldBounds(fieldPixels, centerX, centerY, 1);
         const travelProgress = smoothstep(0, 1, t);
         const travelX = mix(
-          mix(bounds.minX, bounds.maxX, 0.33),
-          mix(bounds.minX, bounds.maxX, 0.67),
+          mix(travelBounds.minX, travelBounds.maxX, 0.33),
+          mix(travelBounds.minX, travelBounds.maxX, 0.67),
           travelProgress
         );
 
