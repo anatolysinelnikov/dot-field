@@ -558,6 +558,25 @@
         return 0;
       }
 
+      function resolveLODGroupHazardState(x, y, t, lod, travelX) {
+        if (lod <= 0) return resolveHazardState(intensityAt(x, y, t, travelX));
+
+        const childStep = Math.pow(2, lod - 1) / BASE_GRID;
+        const childOffset = childStep * 0.5;
+        let hasThunder = false;
+
+        for (const offsetY of [-childOffset, childOffset]) {
+          for (const offsetX of [-childOffset, childOffset]) {
+            const childValue = sampleField(x + offsetX, y + offsetY, t, lod - 1, travelX);
+            const childHazardState = resolveHazardState(childValue);
+            if (childHazardState > 3) return 4;
+            if (childHazardState > 0) hasThunder = true;
+          }
+        }
+
+        return hasThunder ? 1 : 0;
+      }
+
       function hazardStateAppearance(value, hazardState, spacing) {
         if (hazardState <= 0) return { radius: 0, type: 'storm', color: '#FF00FF' };
         if (hazardState <= 3) {
@@ -618,8 +637,7 @@
       function drawHazardLayer(samples, spacing) {
         ctx.globalAlpha = 1;
         for (const sample of samples) {
-          const hazardState = resolveHazardState(sample.value);
-          const appearance = hazardStateAppearance(sample.value, hazardState, spacing);
+          const appearance = hazardStateAppearance(sample.value, sample.hazardState, spacing);
           if (appearance.radius <= 0) continue;
           ctx.fillStyle = appearance.color;
           ctx.beginPath();
@@ -859,7 +877,11 @@
             const x = (i + 0.5) * step;
             const sx = centerX + (x - 0.5) * fieldPixels * state.zoom;
             const sy = centerY + (y - 0.5) * fieldPixels * state.zoom;
-            samples.push({ sx, sy, value: sampleField(x, y, t, lod, travelX) });
+            const value = sampleField(x, y, t, lod, travelX);
+            const hazardState = lod > 0
+              ? resolveLODGroupHazardState(x, y, t, lod, travelX)
+              : resolveHazardState(value);
+            samples.push({ sx, sy, value, hazardState });
           }
         }
 
