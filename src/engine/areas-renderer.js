@@ -2,9 +2,90 @@ import { AREA_CONTOUR_SUBDIVISIONS, AREA_PRECIPITATION_BANDS, BASE_GRID, GRID_OV
 import { clamp, smoothstep } from './math.js';
 import { sampleField, resolveHazardState, resolveLODGroupHazardState } from './lod.js';
 import { drawHazardLayer, drawHazardMorph } from './hazard-renderer.js';
-import { buildSmoothedWeatherGrid, interpolateSplineScalarAt } from './scalar-reconstruction.js';
+import { buildSmoothedWeatherGrid, createBoxBlurBuffers, fastBoxBlurScalarGrid, interpolateSplineScalarAt } from './scalar-reconstruction.js';
 
 const RAIN_LAYER = ['rain'];
+const AREA_GENERALIZATION_RADIUS = 6;
+const AREA_GENERALIZATION_PASSES = 3;
+const AREA_COVERAGE_HISTOGRAM_BINS = 1024;
+const AREA_THRESHOLD_GAP = 1e-5;
+const AREA_REFERENCE_THRESHOLDS = AREA_PRECIPITATION_BANDS.map(band => band.threshold);
+let areaGeneralizationBuffers = null;
+const generalizedHistogram = new Uint32Array(AREA_COVERAGE_HISTOGRAM_BINS);
+const referenceCoverage = new Uint32Array(AREA_PRECIPITATION_BANDS.length);
+const effectiveThresholds = new Float32Array(AREA_PRECIPITATION_BANDS.length);
+
+function getAreaGeneralizationBuffers(length) {
+  if (!areaGeneralizationBuffers || areaGeneralizationBuffers.length !== length) {
+    areaGeneralizationBuffers = { length, buffers: createBoxBlurBuffers(length) };
+  }
+  return areaGeneralizationBuffers.buffers;
+}
+
+function histogramBin(value) {
+  return Math.min(AREA_COVERAGE_HISTOGRAM_BINS - 1,
+    Math.max(0, Math.floor(clamp(value, 0, 1) * AREA_COVERAGE_HISTOGRAM_BINS)));
+}
+
+function thresholdForCoverage(histogram, targetCoverage) {
+  if (targetCoverage <= 0) return 1;
+  let covered = 0;
+  for (let bin = AREA_COVERAGE_HISTOGRAM_BINS - 1; bin >= 0; bin--) {
+    const count = histogram[bin];
+    if (covered + count >= targetCoverage) {
+      const fraction = (targetCoverage - covered) / count;
+      return (bin + 1 - fraction) / AREA_COVERAGE_HISTOGRAM_BINS;
+    }
+    covered += count;
+  }
+  return 0;
+}
+
+function getCoverageBounds(grid, bounds) {
+  const minI = Math.ceil(bounds.minX / grid.step - 0.5);
+  const maxI = Math.floor(bounds.maxX / grid.step - 0.5);
+  const minJ = Math.ceil(bounds.minY / grid.step - 0.5);
+  const maxJ = Math.floor(bounds.maxY / grid.step - 0.5);
+  return {
+    startColumn: Math.max(0, minI - grid.startI),
+    endColumn: Math.min(grid.width - 1, maxI - grid.startI),
+    startRow: Math.max(0, minJ - grid.startJ),
+    endRow: Math.min(grid.height - 1, maxJ - grid.startJ)
+  };
+}
+
+function remapCoverageThresholds(grid, originalRain, generalizedRain, bounds) {
+  generalizedHistogram.fill(0);
+  referenceCoverage.fill(0);
+  const coverageBounds = getCoverageBounds(grid, bounds);
+
+  // This fixed support lattice excludes filter padding. Areas preserves visual
+  // intensity coverage after generalization; reconsider this quantile remap if
+  // bands later gain absolute meteorological meaning.
+  for (let row = coverageBounds.startRow; row <= coverageBounds.endRow; row++) {
+    const offset = row * grid.width;
+    for (let column = coverageBounds.startColumn; column <= coverageBounds.endColumn; column++) {
+      const index = offset + column;
+      const original = originalRain[index];
+      generalizedHistogram[histogramBin(generalizedRain[index])]++;
+      for (let band = 0; band < AREA_REFERENCE_THRESHOLDS.length; band++) {
+        if (original >= AREA_REFERENCE_THRESHOLDS[band]) referenceCoverage[band]++;
+      }
+    }
+  }
+
+  for (let band = 0; band < effectiveThresholds.length; band++) {
+    const lowerBound = band === 0 ? 0 : effectiveThresholds[band - 1] + AREA_THRESHOLD_GAP;
+    const upperBound = 1 - (effectiveThresholds.length - 1 - band) * AREA_THRESHOLD_GAP;
+    effectiveThresholds[band] = clamp(
+      thresholdForCoverage(generalizedHistogram, referenceCoverage[band]),
+      lowerBound,
+      upperBound
+    );
+  }
+
+  return effectiveThresholds;
+}
 
 function appendContourSegment(segments, a, b, ax, ay, bx, by) {
   segments.push({ a, b, ax, ay, bx, by });
@@ -108,7 +189,7 @@ function buildContourPath(segments) {
   return path;
 }
 
-function buildPrecipitationContours(grid, travelX) {
+function buildPrecipitationContours(grid, travelX, thresholds) {
   const contourStep = grid.step / AREA_CONTOUR_SUBDIVISIONS;
   // Extract complete closed loops from weather support, not just the viewport.
   // This keeps fills stable when zooming into the middle of an active region.
@@ -143,7 +224,7 @@ function buildPrecipitationContours(grid, travelX) {
       const c = bottomValues[column + 1];
       const d = bottomValues[column];
       for (let band = 0; band < AREA_PRECIPITATION_BANDS.length; band++) {
-        appendContourCell(bandSegments[band], i, row, contourStep, a, b, c, d, AREA_PRECIPITATION_BANDS[band].threshold);
+        appendContourCell(bandSegments[band], i, row, contourStep, a, b, c, d, thresholds[band]);
       }
     }
 
@@ -157,8 +238,21 @@ function buildPrecipitationContours(grid, travelX) {
 
 export function renderPrecipitationAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY) {
   const supportBounds = { minX: travelX - 0.92, maxX: travelX + 0.92, minY: -0.26, maxY: 1.26 };
-  const grid = buildSmoothedWeatherGrid(supportBounds, t, travelX, RAIN_LAYER);
-  const bandPaths = buildPrecipitationContours(grid, travelX);
+  const grid = buildSmoothedWeatherGrid(
+    supportBounds, t, travelX, RAIN_LAYER, AREA_GENERALIZATION_RADIUS * AREA_GENERALIZATION_PASSES
+  );
+  const originalRain = grid.rain;
+  const generalizedRain = fastBoxBlurScalarGrid(
+    originalRain,
+    grid.width,
+    grid.height,
+    AREA_GENERALIZATION_RADIUS,
+    AREA_GENERALIZATION_PASSES,
+    getAreaGeneralizationBuffers(originalRain.length)
+  );
+  const thresholds = remapCoverageThresholds(grid, originalRain, generalizedRain, supportBounds);
+  grid.rain = generalizedRain;
+  const bandPaths = buildPrecipitationContours(grid, travelX, thresholds);
   const worldScale = fieldPixels * viewport.zoom;
   ctx.save();
   ctx.translate(centerX - worldScale * 0.5, centerY - worldScale * 0.5);

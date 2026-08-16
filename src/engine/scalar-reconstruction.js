@@ -48,9 +48,64 @@ function smoothScalarGrid(source, width, height) {
   return smoothed;
 }
 
-export function buildSmoothedWeatherGrid(bounds, t, travelX, layers = DEFAULT_LAYERS) {
+export function createBoxBlurBuffers(length) {
+  return {
+    horizontal: new Float32Array(length),
+    first: new Float32Array(length),
+    second: new Float32Array(length)
+  };
+}
+
+function boxBlurHorizontal(source, target, width, height, radius) {
+  const windowSize = radius * 2 + 1;
+  for (let row = 0; row < height; row++) {
+    const offset = row * width;
+    let sum = source[offset] * (radius + 1);
+    for (let column = 1; column <= radius; column++) {
+      sum += source[offset + Math.min(column, width - 1)];
+    }
+    for (let column = 0; column < width; column++) {
+      target[offset + column] = sum / windowSize;
+      const removed = Math.max(0, column - radius);
+      const added = Math.min(width - 1, column + radius + 1);
+      sum += source[offset + added] - source[offset + removed];
+    }
+  }
+}
+
+function boxBlurVertical(source, target, width, height, radius) {
+  const windowSize = radius * 2 + 1;
+  for (let column = 0; column < width; column++) {
+    let sum = source[column] * (radius + 1);
+    for (let row = 1; row <= radius; row++) {
+      sum += source[Math.min(row, height - 1) * width + column];
+    }
+    for (let row = 0; row < height; row++) {
+      target[row * width + column] = sum / windowSize;
+      const removed = Math.max(0, row - radius);
+      const added = Math.min(height - 1, row + radius + 1);
+      sum += source[added * width + column] - source[removed * width + column];
+    }
+  }
+}
+
+// A fixed number of separable box passes approximates a smooth low-pass
+// while using running sums, so work does not grow with the requested radius.
+export function fastBoxBlurScalarGrid(source, width, height, radius, passes, buffers) {
+  if (radius <= 0 || passes <= 0) return source;
+  let current = source;
+  for (let pass = 0; pass < passes; pass++) {
+    boxBlurHorizontal(current, buffers.horizontal, width, height, radius);
+    const target = pass % 2 === 0 ? buffers.first : buffers.second;
+    boxBlurVertical(buffers.horizontal, target, width, height, radius);
+    current = target;
+  }
+  return current;
+}
+
+export function buildSmoothedWeatherGrid(bounds, t, travelX, layers = DEFAULT_LAYERS, extraPadding = 0) {
   const step = 1 / BASE_GRID;
-  const padding = SCALAR_SMOOTH_RADIUS + 3;
+  const padding = SCALAR_SMOOTH_RADIUS + 3 + extraPadding;
   // intensityAt has compact empty-space rejection. Intersecting the visible
   // world with that support prevents very low zooms from allocating a huge
   // all-zero lattice while retaining enough padding for both filters.
