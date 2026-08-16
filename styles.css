@@ -287,6 +287,11 @@ input[type="range"] {
   }
   #playPause { grid-column: 1; grid-row: 1; }
   .time-control { grid-column: 2; grid-row: 1; }
-  .zoom-controls { right: 14px; }
+  .zoom-controls {
+    top: 42px;
+    right: 14px;
+    bottom: auto;
+  }
+  .zoom-stepper { display: none; }
   .legend { gap: 9px; }
 }
