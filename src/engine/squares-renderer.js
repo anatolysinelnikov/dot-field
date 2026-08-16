@@ -31,33 +31,33 @@ function colorString(color) {
   return `rgb(${color[0]} ${color[1]} ${color[2]})`;
 }
 
-function precipitationColor(color, radius, spacing, brightnessGain = 1) {
+function precipitationColor(color, radius, spacing, rainCurve = 1) {
   if (radius < MIN_VISIBLE_DOT_RADIUS_PX) return BACKGROUND;
   // Dots' maximum rain radius is its normal-rain overlap times this sample's
   // projected spacing, so full cell brightness follows the same geometry.
   const fullRadius = intensityToRadius(1, spacing, 'rain');
   const baseWeight = smoothstep(MIN_VISIBLE_DOT_RADIUS_PX, fullRadius, radius);
-  return mixColor(BACKGROUND, color, clamp(baseWeight * brightnessGain, 0, 1));
+  return mixColor(BACKGROUND, color, Math.pow(baseWeight, rainCurve));
 }
 
-function rainColor(intensity, spacing, brightnessGain) {
+function rainColor(intensity, spacing, rainCurve) {
   // Mirror Dots' base-rain layer and its normalized strong-rain overlay.
   const strongIntensity = strongPrecipitationIntensity(intensity);
   const strongRadius = intensityToRadius(strongIntensity, spacing, 'rain');
   if (strongRadius >= MIN_VISIBLE_DOT_RADIUS_PX) {
     return STRONG_RAIN;
   }
-  return precipitationColor(RAIN, intensityToRadius(intensity, spacing, 'rain'), brightnessGain);
+  return precipitationColor(RAIN, intensityToRadius(intensity, spacing, 'rain'), rainCurve);
 }
 
-function squareColor(value, hazardState, spacing, rainBrightnessGain) {
+function squareColor(value, hazardState, spacing, rainCurve) {
   if (hazardState > 3) {
     return HAIL;
   }
   if (hazardState > 0) {
     return STORM;
   }
-  return rainColor(value.rain, spacing, rainBrightnessGain);
+  return rainColor(value.rain, spacing, rainCurve);
 }
 
 function hazardStateAt(x, y, t, lod, travelX, value) {
@@ -74,7 +74,7 @@ function drawSquare(ctx, sx, sy, spacing, color) {
   ctx.fillRect(sx - spacing / 2, sy - spacing / 2, spacing + 0.5, spacing + 0.5);
 }
 
-export function renderSquares(ctx, viewport, lod, t, travelX, fieldPixels, centerX, centerY, rainBrightnessGain) {
+export function renderSquares(ctx, viewport, lod, t, travelX, fieldPixels, centerX, centerY, rainCurve) {
   const step = Math.pow(2, lod) / BASE_GRID;
   const spacing = step * fieldPixels * viewport.zoom;
   const { minX, maxX, minY, maxY } = viewport.bounds;
@@ -90,12 +90,12 @@ export function renderSquares(ctx, viewport, lod, t, travelX, fieldPixels, cente
       const x = (i + 0.5) * step;
       const value = sampleField(x, y, t, lod, travelX);
       drawSquare(ctx, centerX + (x - 0.5) * fieldPixels * viewport.zoom, sy, spacing,
-        squareColor(value, hazardStateAt(x, y, t, lod, travelX, value), spacing, rainBrightnessGain));
+        squareColor(value, hazardStateAt(x, y, t, lod, travelX, value), spacing, rainCurve));
     }
   }
 }
 
-export function renderSquaresMorph(ctx, viewport, morph, t, travelX, fieldPixels, centerX, centerY, rainBrightnessGain) {
+export function renderSquaresMorph(ctx, viewport, morph, t, travelX, fieldPixels, centerX, centerY, rainCurve) {
   const fineStep = Math.pow(2, morph.fine) / BASE_GRID;
   const coarseStep = fineStep * 2;
   const spacing = fineStep * fieldPixels * viewport.zoom;
@@ -117,9 +117,9 @@ export function renderSquaresMorph(ctx, viewport, morph, t, travelX, fieldPixels
       const childValue = sampleField(childX, childY, t, morph.fine, travelX);
       const parentValue = sampleField(parentX, parentY, t, morph.coarse, travelX);
       const parentColor = squareColor(parentValue,
-        hazardStateAt(parentX, parentY, t, morph.coarse, travelX, parentValue), coarseSpacing, rainBrightnessGain);
+        hazardStateAt(parentX, parentY, t, morph.coarse, travelX, parentValue), coarseSpacing, rainCurve);
       const childColor = squareColor(childValue,
-        hazardStateAt(childX, childY, t, morph.fine, travelX, childValue), spacing, rainBrightnessGain);
+        hazardStateAt(childX, childY, t, morph.fine, travelX, childValue), spacing, rainCurve);
       drawSquare(ctx, centerX + (childX - 0.5) * fieldPixels * viewport.zoom, sy, spacing,
         mixColor(parentColor, childColor, progress));
     }
