@@ -2,6 +2,7 @@ import { LOOP_SECONDS, LOD_MORPH_SECONDS, MAX_ZOOM, MIN_ZOOM } from './engine/co
 import { clamp, mix, smoothstep } from './engine/math.js';
 import { selectLOD } from './engine/lod.js';
 import { renderLOD, renderLODMorph } from './engine/dots-renderer.js';
+import { renderSquares, renderSquaresMorph } from './engine/squares-renderer.js';
 import { renderBlurredFields } from './engine/blur-renderer.js';
 import { renderAreaHazardMorph, renderAreaHazards, renderPrecipitationAreas } from './engine/areas-renderer.js';
 
@@ -16,10 +17,13 @@ const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
 const lodLabel = document.querySelector('#lodLabel');
 const resetZoom = document.querySelector('#resetZoom');
+const squaresRainTuning = document.querySelector('#squaresRainTuning');
+const squaresRainBrightness = document.querySelector('#squaresRainBrightness');
+const squaresRainBrightnessValue = document.querySelector('#squaresRainBrightnessValue');
 
 const state = { playing: true, time: 0, zoom: 1, width: 1, height: 1, dpr: 1,
   lastFrame: performance.now(), scrubbing: false, renderMode: 'dots', lodLevel: null,
-  desiredLOD: null, lodMorph: null };
+  desiredLOD: null, lodMorph: null, squaresRainBrightness: 1 };
 
 function resizeCanvas() {
   state.dpr = window.devicePixelRatio || 1;
@@ -76,6 +80,9 @@ function render(delta) {
     renderPrecipitationAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY);
     if (state.lodMorph) renderAreaHazardMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
     else renderAreaHazards(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
+  } else if (state.renderMode === 'squares') {
+    if (state.lodMorph) renderSquaresMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY, state.squaresRainBrightness);
+    else renderSquares(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY, state.squaresRainBrightness);
   } else if (state.lodMorph) {
     renderLODMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
   } else {
@@ -106,10 +113,15 @@ playPause.addEventListener('click', () => {
 function setRenderMode(mode) {
   state.renderMode = mode;
   renderModeSelector.dataset.mode = mode;
+  squaresRainTuning.hidden = mode !== 'squares';
   for (const button of renderModeButtons) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
   }
 }
+squaresRainBrightness.addEventListener('input', () => {
+  state.squaresRainBrightness = Number(squaresRainBrightness.value);
+  squaresRainBrightnessValue.value = `${state.squaresRainBrightness.toFixed(2)}×`;
+});
 for (const button of renderModeButtons) {
   button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
 }
