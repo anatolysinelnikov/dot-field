@@ -143,8 +143,8 @@ button:active { transform: translateY(1px); }
   bottom: 82px;
   transform: translateX(-50%);
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  width: 232px;
+  grid-template-columns: repeat(3, 1fr);
+  width: min(326px, calc(100% - 28px));
   height: auto;
   margin: 0;
   padding: 4px;
@@ -156,7 +156,6 @@ button:active { transform: translateY(1px); }
   box-shadow: var(--control-shadow);
   backdrop-filter: var(--control-backdrop);
   isolation: isolate;
-  cursor: pointer;
 }
 
 .render-mode::before {
@@ -166,22 +165,31 @@ button:active { transform: translateY(1px); }
   top: 4px;
   bottom: 4px;
   left: 4px;
-  width: calc(50% - 4px);
+  width: calc(33.333% - 4px);
   border-radius: var(--control-inset-radius);
   background: var(--control-inset);
   box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
   transition: transform 160ms ease;
 }
 
-.render-mode[aria-pressed="true"]::before {
+.render-mode[data-mode="areas"]::before {
   transform: translateX(100%);
 }
 
-.render-mode span {
+.render-mode[data-mode="blur"]::before {
+  transform: translateX(200%);
+}
+
+.render-mode button {
   position: relative;
   display: block;
+  height: auto;
   padding: 10px 24px;
+  border: 0;
   border-radius: var(--control-inset-radius);
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
   text-align: center;
   transition: color 160ms ease;
 }
@@ -238,15 +246,14 @@ button:active { transform: translateY(1px); }
 
 .zoom-reset[hidden] { display: none; }
 
-.render-mode span:first-child,
-.render-mode[aria-pressed="true"] span:last-child { color: #f1f5fb; }
-.render-mode[aria-pressed="true"] span:first-child { color: #8794a9; }
-.render-mode:hover span { color: #c7d0df; }
-.render-mode:focus-visible {
+.render-mode button[aria-checked="true"] { color: #f1f5fb; }
+.render-mode:hover button { color: #c7d0df; }
+.render-mode:hover button[aria-checked="true"] { color: #f1f5fb; }
+.render-mode button:focus-visible {
   outline: 2px solid #6aa6ff;
   outline-offset: 2px;
 }
-button.render-mode:active { transform: translateX(-50%); }
+.render-mode button:active { transform: none; }
 
 .time-control {
   min-width: 0;

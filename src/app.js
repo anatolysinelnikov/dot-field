@@ -3,13 +3,15 @@ import { clamp, mix, smoothstep } from './engine/math.js';
 import { selectLOD } from './engine/lod.js';
 import { renderLOD, renderLODMorph } from './engine/dots-renderer.js';
 import { renderBlurredFields } from './engine/blur-renderer.js';
+import { renderAreaHazardMorph, renderAreaHazards, renderPrecipitationAreas } from './engine/areas-renderer.js';
 
 const canvas = document.querySelector('#field');
 const ctx = canvas.getContext('2d', { alpha: false });
 const precipitationCanvas = document.createElement('canvas');
 const precipitationCtx = precipitationCanvas.getContext('2d', { alpha: true });
 const playPause = document.querySelector('#playPause');
-const renderModeToggle = document.querySelector('#renderModeToggle');
+const renderModeSelector = document.querySelector('#renderModeSelector');
+const renderModeButtons = [...renderModeSelector.querySelectorAll('[data-render-mode]')];
 const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
 const lodLabel = document.querySelector('#lodLabel');
@@ -68,9 +70,17 @@ function render(delta) {
   const viewport = { width: state.width, height: state.height, zoom: state.zoom,
     bounds: getVisibleWorldBounds(fieldPixels, centerX, centerY) };
   updateLODTransition(delta, desiredLOD);
-  if (state.renderMode === 'blur') renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, viewport, t, travelX, fieldPixels, centerX, centerY);
-  else if (state.lodMorph) renderLODMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
-  else renderLOD(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
+  if (state.renderMode === 'blur') {
+    renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, viewport, t, travelX, fieldPixels, centerX, centerY);
+  } else if (state.renderMode === 'areas') {
+    renderPrecipitationAreas(ctx, precipitationCanvas, precipitationCtx, viewport, t, travelX, fieldPixels, centerX, centerY);
+    if (state.lodMorph) renderAreaHazardMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
+    else renderAreaHazards(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
+  } else if (state.lodMorph) {
+    renderLODMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
+  } else {
+    renderLOD(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
+  }
   ctx.globalAlpha = 1;
   zoomLabel.textContent = `${state.zoom.toFixed(2)}×`;
   lodLabel.textContent = state.lodMorph ? `${state.lodMorph.coarse}→${state.lodMorph.fine}` : String(state.lodLevel);
@@ -90,10 +100,16 @@ playPause.addEventListener('click', () => {
   playPause.dataset.state = state.playing ? 'playing' : 'paused';
   playPause.setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
 });
-renderModeToggle.addEventListener('click', () => {
-  state.renderMode = state.renderMode === 'dots' ? 'blur' : 'dots';
-  renderModeToggle.setAttribute('aria-pressed', String(state.renderMode === 'blur'));
-});
+function setRenderMode(mode) {
+  state.renderMode = mode;
+  renderModeSelector.dataset.mode = mode;
+  for (const button of renderModeButtons) {
+    button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
+  }
+}
+for (const button of renderModeButtons) {
+  button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
+}
 timeSlider.addEventListener('pointerdown', () => { state.scrubbing = true; });
 timeSlider.addEventListener('input', () => { state.time = Number(timeSlider.value) / 1000 * LOOP_SECONDS; });
 const endScrub = () => { state.scrubbing = false; };
