@@ -97,8 +97,6 @@ function drawStrongPrecipitationLayer(ctx, samples, spacing) {
   ctx.fill();
 }
 
-// Blur modes reconstruct continuous fields from fixed base-grid samples.
-// Smoothing happens on scalar intensities before any color is applied; this
 export function renderLOD(ctx, viewport, lod, t, travelX, fieldPixels, centerX, centerY) {
   const step = Math.pow(2, lod) / BASE_GRID;
   const spacing = step * fieldPixels * viewport.zoom;
