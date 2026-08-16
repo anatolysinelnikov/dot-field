@@ -73,7 +73,7 @@ function render(delta) {
   if (state.renderMode === 'blur') {
     renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, viewport, t, travelX, fieldPixels, centerX, centerY);
   } else if (state.renderMode === 'areas') {
-    renderPrecipitationAreas(ctx, precipitationCanvas, precipitationCtx, viewport, t, travelX, fieldPixels, centerX, centerY);
+    renderPrecipitationAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY);
     if (state.lodMorph) renderAreaHazardMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
     else renderAreaHazards(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
   } else if (state.lodMorph) {

@@ -135,3 +135,42 @@ export function interpolateSplineScalar(source, grid, gridX, gridY, xWeights, xO
   }
   return value;
 }
+
+// World-space sampling keeps contour geometry independent of the viewport
+// raster and the adaptive dot LOD.
+export function interpolateSplineScalarAt(source, grid, x, y) {
+  const gridX = x / grid.step - 0.5 - grid.startI;
+  const gridY = y / grid.step - 0.5 - grid.startJ;
+  const baseX = Math.floor(gridX);
+  const baseY = Math.floor(gridY);
+  const tx = gridX - baseX;
+  const ty = gridY - baseY;
+  const tx2 = tx * tx;
+  const tx3 = tx2 * tx;
+  const ty2 = ty * ty;
+  const ty3 = ty2 * ty;
+  const x0 = (1 - tx) * (1 - tx) * (1 - tx) / 6;
+  const x1 = (3 * tx3 - 6 * tx2 + 4) / 6;
+  const x2 = (-3 * tx3 + 3 * tx2 + 3 * tx + 1) / 6;
+  const x3 = tx3 / 6;
+  const y0 = (1 - ty) * (1 - ty) * (1 - ty) / 6;
+  const y1 = (3 * ty3 - 6 * ty2 + 4) / 6;
+  const y2 = (-3 * ty3 + 3 * ty2 + 3 * ty + 1) / 6;
+  const y3 = ty3 / 6;
+  let value = 0;
+
+  for (let ky = 0; ky < 4; ky++) {
+    const sampleY = clamp(baseY - 1 + ky, 0, grid.height - 1);
+    const rowOffset = sampleY * grid.width;
+    const yWeight = ky === 0 ? y0 : ky === 1 ? y1 : ky === 2 ? y2 : y3;
+    let row = 0;
+    for (let kx = 0; kx < 4; kx++) {
+      const sampleX = clamp(baseX - 1 + kx, 0, grid.width - 1);
+      const xWeight = kx === 0 ? x0 : kx === 1 ? x1 : kx === 2 ? x2 : x3;
+      row += source[rowOffset + sampleX] * xWeight;
+    }
+    value += row * yWeight;
+  }
+
+  return value;
+}
