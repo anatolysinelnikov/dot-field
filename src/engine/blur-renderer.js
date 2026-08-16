@@ -13,6 +13,14 @@ function compositeField(color, opacity, pixel) {
   };
 }
 
+// Preserve a soft zero edge while making the scalar field perceptible near
+// the same low-strength regions where Dots begins drawing substantial marks.
+// The fractional exponent gives the ramp a faster early buildup without
+// flattening it into a threshold or changing the reconstructed field itself.
+function visibleFieldOpacity(value, onset, core, exponent) {
+  return Math.pow(smoothstep(onset, core, value), exponent);
+}
+
 export function renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, viewport, t, travelX, fieldPixels, centerX, centerY) {
   const bounds = viewport.bounds;
   const grid = buildSmoothedWeatherGrid(bounds, t, travelX);
@@ -41,11 +49,11 @@ export function renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, 
 
       // The alpha ramp supplies the soft support edge. Color follows the
       // same moderate/strong blue hierarchy as the dot renderer.
-      const rainOpacity = smoothstep(0.008, 0.58, rain);
+      const rainOpacity = visibleFieldOpacity(rain, 0.006, 0.52, 0.66);
       const strong = smoothstep(RAIN_MODERATE_MAX, 0.9, rain);
       let pixel = { r: 0, g: mix(144, 0, strong), b: 255, a: rainOpacity };
-      pixel = compositeField([255, 0, 255], smoothstep(0.012, 0.72, storm), pixel);
-      pixel = compositeField([255, 212, 0], smoothstep(0.018, 0.62, hail), pixel);
+      pixel = compositeField([255, 0, 255], visibleFieldOpacity(storm, 0.006, 0.54, 0.52), pixel);
+      pixel = compositeField([255, 212, 0], visibleFieldOpacity(hail, 0.010, 0.44, 0.5), pixel);
       const pixelOffset = (py * rasterWidth + px) * 4;
       pixels[pixelOffset] = Math.round(pixel.r);
       pixels[pixelOffset + 1] = Math.round(pixel.g);
