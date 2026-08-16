@@ -18,12 +18,12 @@ const zoomLabel = document.querySelector('#zoomLabel');
 const lodLabel = document.querySelector('#lodLabel');
 const resetZoom = document.querySelector('#resetZoom');
 const squaresRainTuning = document.querySelector('#squaresRainTuning');
-const squaresRainCurve = document.querySelector('#squaresRainCurve');
-const squaresRainCurveValue = document.querySelector('#squaresRainCurveValue');
+const squaresBoundaryRainBrightness = document.querySelector('#squaresBoundaryRainBrightness');
+const squaresBoundaryRainBrightnessValue = document.querySelector('#squaresBoundaryRainBrightnessValue');
 
 const state = { playing: true, time: 0, zoom: 1, width: 1, height: 1, dpr: 1,
   lastFrame: performance.now(), scrubbing: false, renderMode: 'dots', lodLevel: null,
-  desiredLOD: null, lodMorph: null, squaresRainCurve: 1 };
+  desiredLOD: null, lodMorph: null, boundaryRainBrightness: 0.1 };
 
 function resizeCanvas() {
   state.dpr = window.devicePixelRatio || 1;
@@ -81,8 +81,8 @@ function render(delta) {
     if (state.lodMorph) renderAreaHazardMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
     else renderAreaHazards(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
   } else if (state.renderMode === 'squares') {
-    if (state.lodMorph) renderSquaresMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY, state.squaresRainCurve);
-    else renderSquares(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY, state.squaresRainCurve);
+    if (state.lodMorph) renderSquaresMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY, state.boundaryRainBrightness);
+    else renderSquares(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY, state.boundaryRainBrightness);
   } else if (state.lodMorph) {
     renderLODMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
   } else {
@@ -118,9 +118,9 @@ function setRenderMode(mode) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
   }
 }
-squaresRainCurve.addEventListener('input', () => {
-  state.squaresRainCurve = Number(squaresRainCurve.value);
-  squaresRainCurveValue.value = state.squaresRainCurve.toFixed(2);
+squaresBoundaryRainBrightness.addEventListener('input', () => {
+  state.boundaryRainBrightness = Number(squaresBoundaryRainBrightness.value);
+  squaresBoundaryRainBrightnessValue.value = state.boundaryRainBrightness.toFixed(2);
 });
 for (const button of renderModeButtons) {
   button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
