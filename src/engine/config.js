@@ -1,0 +1,14 @@
+export const BASE_GRID = 128;           // Adjust underlying grid resolution here.
+export const LOOP_SECONDS = 18;         // Adjust animation loop length / speed here.
+export const MIN_ZOOM = 0.1;
+export const MAX_ZOOM = 5.5;
+export const TARGET_SPACING = 11.5;     // Desired approximate distance between dots in px.
+export const LOD_MORPH_SECONDS = 0.2;   // Adjust geometric split / merge duration here.
+export const GRID_OVERSCAN_CELLS = 4;   // Render fixed-grid samples beyond every viewport edge.
+export const WEATHER_MARGIN_WORLD = 0.72; // Keeps the full system off-screen at loop endpoints.
+export const RAIN_MODERATE_MAX = 0.55;
+export const RAIN_BLUE = '#0090FF';
+export const STRONG_PRECIPITATION_BLUE = '#0000FF';
+export const BLUR_RASTER_SCALE = 0.42;
+export const SCALAR_SMOOTH_RADIUS = 4;
+export const SCALAR_SMOOTH_SIGMA = 1.2;
