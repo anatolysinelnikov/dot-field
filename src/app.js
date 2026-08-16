@@ -95,10 +95,13 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-playPause.addEventListener('click', () => {
-  state.playing = !state.playing;
+function setPlaying(playing) {
+  state.playing = playing;
   playPause.dataset.state = state.playing ? 'playing' : 'paused';
   playPause.setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
+}
+playPause.addEventListener('click', () => {
+  setPlaying(!state.playing);
 });
 function setRenderMode(mode) {
   state.renderMode = mode;
@@ -110,9 +113,32 @@ function setRenderMode(mode) {
 for (const button of renderModeButtons) {
   button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
 }
-timeSlider.addEventListener('pointerdown', () => { state.scrubbing = true; });
+let scrubbingPointerId = null;
+function updateTimelineFromPointer(clientX) {
+  const rect = timeSlider.getBoundingClientRect();
+  const min = Number(timeSlider.min);
+  const max = Number(timeSlider.max);
+  const value = clamp(min + (clientX - rect.left) / rect.width * (max - min), min, max);
+  timeSlider.value = String(value);
+  state.time = Number(timeSlider.value) / 1000 * LOOP_SECONDS;
+}
+timeSlider.addEventListener('pointerdown', (event) => {
+  if (state.playing) setPlaying(false);
+  updateTimelineFromPointer(event.clientX);
+  state.scrubbing = true;
+  scrubbingPointerId = event.pointerId;
+  timeSlider.setPointerCapture(event.pointerId);
+});
+timeSlider.addEventListener('pointermove', (event) => {
+  if (event.pointerId === scrubbingPointerId) updateTimelineFromPointer(event.clientX);
+});
 timeSlider.addEventListener('input', () => { state.time = Number(timeSlider.value) / 1000 * LOOP_SECONDS; });
-const endScrub = () => { state.scrubbing = false; };
+const endScrub = (event) => {
+  if (event.pointerId !== scrubbingPointerId) return;
+  state.scrubbing = false;
+  if (timeSlider.hasPointerCapture(event.pointerId)) timeSlider.releasePointerCapture(event.pointerId);
+  scrubbingPointerId = null;
+};
 timeSlider.addEventListener('pointerup', endScrub);
 timeSlider.addEventListener('pointercancel', endScrub);
 
