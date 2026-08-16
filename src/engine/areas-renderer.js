@@ -1,4 +1,4 @@
-import { AREA_CONTOUR_SUBDIVISIONS, AREA_RAIN_CONTOUR_THRESHOLD, BASE_GRID, GRID_OVERSCAN_CELLS, RAIN_BLUE, RAIN_MODERATE_MAX, STRONG_PRECIPITATION_BLUE } from './config.js';
+import { AREA_CONTOUR_SUBDIVISIONS, AREA_PRECIPITATION_BANDS, BASE_GRID, GRID_OVERSCAN_CELLS } from './config.js';
 import { clamp, smoothstep } from './math.js';
 import { sampleField, resolveHazardState, resolveLODGroupHazardState } from './lod.js';
 import { drawHazardLayer, drawHazardMorph } from './hazard-renderer.js';
@@ -124,8 +124,7 @@ function buildPrecipitationContours(grid, travelX) {
   const columns = endI - startI + 1;
   let topValues = new Float32Array(columns);
   let bottomValues = new Float32Array(columns);
-  const rainSegments = [];
-  const strongSegments = [];
+  const bandSegments = AREA_PRECIPITATION_BANDS.map(() => []);
 
   for (let column = 0; column < columns; column++) {
     topValues[column] = interpolateSplineScalarAt(grid.rain, grid, (startI + column) * contourStep, startJ * contourStep);
@@ -143,8 +142,9 @@ function buildPrecipitationContours(grid, travelX) {
       const b = topValues[column + 1];
       const c = bottomValues[column + 1];
       const d = bottomValues[column];
-      appendContourCell(rainSegments, i, row, contourStep, a, b, c, d, AREA_RAIN_CONTOUR_THRESHOLD);
-      appendContourCell(strongSegments, i, row, contourStep, a, b, c, d, RAIN_MODERATE_MAX);
+      for (let band = 0; band < AREA_PRECIPITATION_BANDS.length; band++) {
+        appendContourCell(bandSegments[band], i, row, contourStep, a, b, c, d, AREA_PRECIPITATION_BANDS[band].threshold);
+      }
     }
 
     const previousTop = topValues;
@@ -152,21 +152,21 @@ function buildPrecipitationContours(grid, travelX) {
     bottomValues = previousTop;
   }
 
-  return { rainPath: buildContourPath(rainSegments), strongPath: buildContourPath(strongSegments) };
+  return bandSegments.map(buildContourPath);
 }
 
 export function renderPrecipitationAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY) {
   const supportBounds = { minX: travelX - 0.92, maxX: travelX + 0.92, minY: -0.26, maxY: 1.26 };
   const grid = buildSmoothedWeatherGrid(supportBounds, t, travelX, RAIN_LAYER);
-  const { rainPath, strongPath } = buildPrecipitationContours(grid, travelX);
+  const bandPaths = buildPrecipitationContours(grid, travelX);
   const worldScale = fieldPixels * viewport.zoom;
   ctx.save();
   ctx.translate(centerX - worldScale * 0.5, centerY - worldScale * 0.5);
   ctx.scale(worldScale, worldScale);
-  ctx.fillStyle = RAIN_BLUE;
-  ctx.fill(rainPath, 'evenodd');
-  ctx.fillStyle = STRONG_PRECIPITATION_BLUE;
-  ctx.fill(strongPath, 'evenodd');
+  for (let band = 0; band < AREA_PRECIPITATION_BANDS.length; band++) {
+    ctx.fillStyle = AREA_PRECIPITATION_BANDS[band].color;
+    ctx.fill(bandPaths[band], 'evenodd');
+  }
   ctx.restore();
 }
 
