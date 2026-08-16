@@ -10,5 +10,14 @@ export const RAIN_MODERATE_MAX = 0.55;
 export const RAIN_BLUE = '#0090FF';
 export const STRONG_PRECIPITATION_BLUE = '#0000FF';
 export const BLUR_RASTER_SCALE = 0.42;
+export const AREA_RAIN_CONTOUR_THRESHOLD = 0.027;
+export const AREA_CONTOUR_SUBDIVISIONS = 3;
+export const AREA_PRECIPITATION_BANDS = [
+  { threshold: AREA_RAIN_CONTOUR_THRESHOLD, color: RAIN_BLUE },
+  { threshold: 0.12, color: '#0078FF' },
+  { threshold: 0.25, color: '#005EFF' },
+  { threshold: 0.40, color: '#003CFF' },
+  { threshold: RAIN_MODERATE_MAX, color: STRONG_PRECIPITATION_BLUE }
+];
 export const SCALAR_SMOOTH_RADIUS = 4;
 export const SCALAR_SMOOTH_SIGMA = 1.2;

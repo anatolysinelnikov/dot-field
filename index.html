@@ -16,10 +16,11 @@
       <span class="hail"><i></i>Hail</span>
     </div>
 
-    <button id="renderModeToggle" class="render-mode" type="button" aria-label="Toggle weather rendering mode" aria-pressed="false">
-      <span>Dots</span>
-      <span>Blur</span>
-    </button>
+    <div id="renderModeSelector" class="render-mode" role="radiogroup" aria-label="Weather rendering mode" data-mode="dots">
+      <button type="button" role="radio" aria-checked="true" data-render-mode="dots">Dots</button>
+      <button type="button" role="radio" aria-checked="false" data-render-mode="areas">Areas</button>
+      <button type="button" role="radio" aria-checked="false" data-render-mode="blur">Blur</button>
+    </div>
 
     <div class="readout" aria-live="polite">
       <span>zoom <b id="zoomLabel">1.00×</b></span>
