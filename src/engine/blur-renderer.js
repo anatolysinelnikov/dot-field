@@ -24,11 +24,11 @@ function visibleFieldOpacity(value, onset, core, exponent) {
 // Keep the reconstructed hazard fields continuous while matching the two
 // Dots/Squares visibility milestones. Each smooth segment has zero slope at
 // its joins, preserving the soft edge without producing anchor contours.
-function visibleHazardOpacity(value, onset, visibleOnset, strongAnchor, core) {
+function visibleHazardOpacity(value, onset, visibleOnset, strongAnchor, core, tailExponent = 0.68) {
   const visibleOpacity = 0.4;
   const strongOpacity = 0.65;
   if (value < visibleOnset) {
-    return visibleOpacity * Math.pow(smoothstep(onset, visibleOnset, value), 0.68);
+    return visibleOpacity * Math.pow(smoothstep(onset, visibleOnset, value), tailExponent);
   }
   if (value < strongAnchor) {
     return mix(visibleOpacity, strongOpacity, smoothstep(visibleOnset, strongAnchor, value));
@@ -67,8 +67,12 @@ export function renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, 
       const rainOpacity = visibleFieldOpacity(rain, 0.006, 0.52, 0.66);
       const strong = smoothstep(RAIN_MODERATE_MAX, 0.9, rain);
       let pixel = { r: 0, g: mix(144, 0, strong), b: 255, a: rainOpacity };
-      pixel = compositeField([255, 0, 255], visibleHazardOpacity(storm, 0.006, 0.03375, 0.075, 0.54), pixel);
-      pixel = compositeField([255, 212, 0], visibleHazardOpacity(hail, 0.010, 0.0495, 0.11, 0.44), pixel);
+      const stormOpacity = visibleHazardOpacity(storm, 0.006, 0.03375, 0.075, 0.54, 0.76);
+      const hailOpacity = visibleHazardOpacity(hail, 0.010, 0.0495, 0.11, 0.44);
+      // Fade storm continuously beneath hail so its magenta cannot tint the
+      // low-opacity yellow edge, while hail remains the topmost layer.
+      pixel = compositeField([255, 0, 255], stormOpacity * Math.pow(1 - hailOpacity, 2), pixel);
+      pixel = compositeField([255, 212, 0], hailOpacity, pixel);
       const pixelOffset = (py * rasterWidth + px) * 4;
       pixels[pixelOffset] = Math.round(pixel.r);
       pixels[pixelOffset + 1] = Math.round(pixel.g);
