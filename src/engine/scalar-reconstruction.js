@@ -17,9 +17,9 @@ function gaussianKernel(radius, sigma) {
 const scalarSmoothKernel = gaussianKernel(SCALAR_SMOOTH_RADIUS, SCALAR_SMOOTH_SIGMA);
 const DEFAULT_LAYERS = ['rain', 'storm', 'hail'];
 
-function smoothScalarGrid(source, width, height) {
-  const horizontal = new Float32Array(source.length);
-  const smoothed = new Float32Array(source.length);
+function smoothScalarGrid(source, width, height, buffers) {
+  const horizontal = buffers.horizontal;
+  const smoothed = buffers.smoothed;
 
   for (let row = 0; row < height; row++) {
     const offset = row * width;
@@ -46,6 +46,27 @@ function smoothScalarGrid(source, width, height) {
   }
 
   return smoothed;
+}
+
+const weatherGridBuffers = new Map();
+
+function getWeatherGridBuffers(width, height, includeStorm, includeHail) {
+  const key = `${width}:${height}:${includeStorm ? 1 : 0}:${includeHail ? 1 : 0}`;
+  let buffers = weatherGridBuffers.get(key);
+  if (buffers) return buffers;
+  const length = width * height;
+  const createChannel = () => ({
+    source: new Float32Array(length),
+    horizontal: new Float32Array(length),
+    smoothed: new Float32Array(length)
+  });
+  buffers = {
+    rain: createChannel(),
+    storm: includeStorm ? createChannel() : null,
+    hail: includeHail ? createChannel() : null
+  };
+  weatherGridBuffers.set(key, buffers);
+  return buffers;
 }
 
 export function createBoxBlurBuffers(length) {
@@ -119,11 +140,12 @@ export function buildSmoothedWeatherGrid(bounds, t, travelX, layers = DEFAULT_LA
   const endJ = Math.ceil(maxY / step - 0.5) + padding;
   const width = endI - startI + 1;
   const height = endJ - startJ + 1;
-  const rainSource = new Float32Array(width * height);
   const includeStorm = layers.includes('storm');
   const includeHail = layers.includes('hail');
-  const stormSource = includeStorm ? new Float32Array(rainSource.length) : null;
-  const hailSource = includeHail ? new Float32Array(rainSource.length) : null;
+  const buffers = getWeatherGridBuffers(width, height, includeStorm, includeHail);
+  const rainSource = buffers.rain.source;
+  const stormSource = includeStorm ? buffers.storm.source : null;
+  const hailSource = includeHail ? buffers.hail.source : null;
 
   for (let row = 0; row < height; row++) {
     const y = (startJ + row + 0.5) * step;
@@ -139,9 +161,9 @@ export function buildSmoothedWeatherGrid(bounds, t, travelX, layers = DEFAULT_LA
   }
 
   return {
-    rain: smoothScalarGrid(rainSource, width, height),
-    storm: stormSource ? smoothScalarGrid(stormSource, width, height) : null,
-    hail: hailSource ? smoothScalarGrid(hailSource, width, height) : null,
+    rain: smoothScalarGrid(rainSource, width, height, buffers.rain),
+    storm: stormSource ? smoothScalarGrid(stormSource, width, height, buffers.storm) : null,
+    hail: hailSource ? smoothScalarGrid(hailSource, width, height, buffers.hail) : null,
     width,
     height,
     startI,
@@ -271,5 +293,125 @@ export function interpolateSplineScalarsAt(sources, grid, x, y, target) {
     const value3 = source[row3 + sampleX0] * x0 + source[row3 + sampleX1] * x1
       + source[row3 + sampleX2] * x2 + source[row3 + sampleX3] * x3;
     target[sourceIndex] = value0 * y0 + value1 * y1 + value2 * y2 + value3 * y3;
+  }
+}
+
+// The Areas contour lattice is regular. Precompute its repeated coordinate
+// and weight work once per axis, while retaining the same cubic B-spline math.
+export function prepareWorldSplineAxis(start, length, worldStep, gridStart, gridStep, gridLength) {
+  const samples = new Int32Array(length * 4);
+  const weights = new Float64Array(length * 4);
+  for (let position = 0; position < length; position++) {
+    const gridPosition = (start + position) * worldStep / gridStep - 0.5 - gridStart;
+    const base = Math.floor(gridPosition);
+    const sampleOffset = position * 4;
+    for (let sample = 0; sample < 4; sample++) samples[sampleOffset + sample] = clamp(base - 1 + sample, 0, gridLength - 1);
+    const t = gridPosition - base;
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const offset = position * 4;
+    weights[offset] = (1 - t) * (1 - t) * (1 - t) / 6;
+    weights[offset + 1] = (3 * t3 - 6 * t2 + 4) / 6;
+    weights[offset + 2] = (-3 * t3 + 3 * t2 + 3 * t + 1) / 6;
+    weights[offset + 3] = t3 / 6;
+  }
+  return { samples, weights };
+}
+
+let contourLatticeBuffers = null;
+
+function getContourLatticeBuffers(sourceCount, gridHeight, columns, rows) {
+  const horizontalLength = sourceCount * gridHeight * columns;
+  const valueLength = sourceCount * (rows + 1) * columns;
+  if (!contourLatticeBuffers
+    || contourLatticeBuffers.sourceCount !== sourceCount
+    || contourLatticeBuffers.gridHeight !== gridHeight
+    || contourLatticeBuffers.columns !== columns
+    || contourLatticeBuffers.rows !== rows) {
+    contourLatticeBuffers = {
+      sourceCount,
+      gridHeight,
+      columns,
+      rows,
+      horizontal: new Float64Array(horizontalLength),
+      values: Array.from({ length: sourceCount }, () => new Float32Array(valueLength / sourceCount))
+    };
+  }
+  return contourLatticeBuffers;
+}
+
+// Evaluate the regular contour lattice separably. Horizontal four-tap values
+// are shared by every vertical B-spline combination that uses the same row.
+export function interpolateSplineScalarsOnLattice(sources, grid, xAxis, yAxis, columns, rows) {
+  const buffers = getContourLatticeBuffers(sources.length, grid.height, columns, rows);
+  const horizontal = buffers.horizontal;
+
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+    const source = sources[sourceIndex];
+    const sourceOffset = sourceIndex * grid.height * columns;
+    for (let gridRow = 0; gridRow < grid.height; gridRow++) {
+      const rowOffset = gridRow * grid.width;
+      const horizontalRow = sourceOffset + gridRow * columns;
+      for (let column = 0; column < columns; column++) {
+        const xOffset = column * 4;
+        const x0 = xAxis.samples[xOffset];
+        const x1 = xAxis.samples[xOffset + 1];
+        const x2 = xAxis.samples[xOffset + 2];
+        const x3 = xAxis.samples[xOffset + 3];
+        horizontal[horizontalRow + column] = source[rowOffset + x0] * xAxis.weights[xOffset]
+          + source[rowOffset + x1] * xAxis.weights[xOffset + 1]
+          + source[rowOffset + x2] * xAxis.weights[xOffset + 2]
+          + source[rowOffset + x3] * xAxis.weights[xOffset + 3];
+      }
+    }
+  }
+
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+    const sourceOffset = sourceIndex * grid.height * columns;
+    const target = buffers.values[sourceIndex];
+    const yWeights = yAxis.weights;
+    for (let row = 0; row <= rows; row++) {
+      const yOffset = row * 4;
+      const row0 = yAxis.samples[yOffset] * columns;
+      const row1 = yAxis.samples[yOffset + 1] * columns;
+      const row2 = yAxis.samples[yOffset + 2] * columns;
+      const row3 = yAxis.samples[yOffset + 3] * columns;
+      const targetOffset = row * columns;
+      for (let column = 0; column < columns; column++) {
+        target[targetOffset + column] = horizontal[sourceOffset + row0 + column] * yWeights[yOffset]
+          + horizontal[sourceOffset + row1 + column] * yWeights[yOffset + 1]
+          + horizontal[sourceOffset + row2 + column] * yWeights[yOffset + 2]
+          + horizontal[sourceOffset + row3 + column] * yWeights[yOffset + 3];
+      }
+    }
+  }
+
+  return buffers.values;
+}
+
+export function interpolateSplineScalarsAtAxes(sources, grid, xAxis, xPosition, yAxis, yPosition, target) {
+  const xOffset = xPosition * 4;
+  const yOffset = yPosition * 4;
+  const x0 = xAxis.samples[xOffset];
+  const x1 = xAxis.samples[xOffset + 1];
+  const x2 = xAxis.samples[xOffset + 2];
+  const x3 = xAxis.samples[xOffset + 3];
+  const row0 = yAxis.samples[yOffset] * grid.width;
+  const row1 = yAxis.samples[yOffset + 1] * grid.width;
+  const row2 = yAxis.samples[yOffset + 2] * grid.width;
+  const row3 = yAxis.samples[yOffset + 3] * grid.width;
+
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+    const source = sources[sourceIndex];
+    const value0 = source[row0 + x0] * xAxis.weights[xOffset] + source[row0 + x1] * xAxis.weights[xOffset + 1]
+      + source[row0 + x2] * xAxis.weights[xOffset + 2] + source[row0 + x3] * xAxis.weights[xOffset + 3];
+    const value1 = source[row1 + x0] * xAxis.weights[xOffset] + source[row1 + x1] * xAxis.weights[xOffset + 1]
+      + source[row1 + x2] * xAxis.weights[xOffset + 2] + source[row1 + x3] * xAxis.weights[xOffset + 3];
+    const value2 = source[row2 + x0] * xAxis.weights[xOffset] + source[row2 + x1] * xAxis.weights[xOffset + 1]
+      + source[row2 + x2] * xAxis.weights[xOffset + 2] + source[row2 + x3] * xAxis.weights[xOffset + 3];
+    const value3 = source[row3 + x0] * xAxis.weights[xOffset] + source[row3 + x1] * xAxis.weights[xOffset + 1]
+      + source[row3 + x2] * xAxis.weights[xOffset + 2] + source[row3 + x3] * xAxis.weights[xOffset + 3];
+    target[sourceIndex] = value0 * yAxis.weights[yOffset] + value1 * yAxis.weights[yOffset + 1]
+      + value2 * yAxis.weights[yOffset + 2] + value3 * yAxis.weights[yOffset + 3];
   }
 }

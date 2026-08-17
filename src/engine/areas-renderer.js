@@ -1,6 +1,12 @@
 import { AREA_CONTOUR_SUBDIVISIONS, AREA_PRECIPITATION_BANDS } from './config.js';
 import { clamp } from './math.js';
-import { buildSmoothedWeatherGrid, createBoxBlurBuffers, fastBoxBlurScalarGrid, interpolateSplineScalarsAt } from './scalar-reconstruction.js';
+import {
+  buildSmoothedWeatherGrid,
+  createBoxBlurBuffers,
+  fastBoxBlurScalarGrid,
+  interpolateSplineScalarsOnLattice,
+  prepareWorldSplineAxis
+} from './scalar-reconstruction.js';
 
 const AREA_GENERALIZATION_RADIUS = 6;
 const AREA_GENERALIZATION_PASSES = 3;
@@ -12,6 +18,7 @@ const AREA_REFERENCE_THRESHOLDS = AREA_PRECIPITATION_BANDS.map(band => band.thre
 const STORM_PRESENCE_THRESHOLD = 0.075 * 0.45;
 const HAIL_PRESENCE_THRESHOLD = 0.11 * 0.45;
 let areaGeneralizationBuffers = null;
+let areaGeometryCache = null;
 const generalizedHistogram = new Uint32Array(AREA_COVERAGE_HISTOGRAM_BINS);
 const referenceCoverage = new Uint32Array(AREA_PRECIPITATION_BANDS.length);
 const effectiveThresholds = new Float32Array(AREA_PRECIPITATION_BANDS.length);
@@ -113,10 +120,10 @@ function remapCoverageThreshold(grid, original, generalized, bounds, referenceTh
 }
 
 function appendContourSegment(segments, a, b, ax, ay, bx, by) {
-  segments.push({ a, b, ax, ay, bx, by });
+  segments.push(a, b, ax, ay, bx, by);
 }
 
-function appendContourCell(segments, i, j, step, a, b, c, d, threshold) {
+function appendContourCell(segments, column, row, columns, horizontalCount, x, y, step, a, b, c, d, threshold) {
   const index = (a >= threshold ? 1 : 0)
     | (b >= threshold ? 2 : 0)
     | (c >= threshold ? 4 : 0)
@@ -124,89 +131,166 @@ function appendContourCell(segments, i, j, step, a, b, c, d, threshold) {
 
   if (index === 0 || index === 15) return;
 
-  const x = i * step;
-  const y = j * step;
   const right = x + step;
   const bottom = y + step;
-  const topX = x + (threshold - a) / (b - a) * step;
-  const rightY = y + (threshold - b) / (c - b) * step;
-  const bottomX = x + (threshold - d) / (c - d) * step;
-  const leftY = y + (threshold - a) / (d - a) * step;
-  const top = `h:${i}:${j}`;
-  const rightEdge = `v:${i + 1}:${j}`;
-  const bottomEdge = `h:${i}:${j + 1}`;
-  const left = `v:${i}:${j}`;
+  const top = row * (columns - 1) + column;
+  const rightEdge = horizontalCount + row * columns + column + 1;
+  const bottomEdge = (row + 1) * (columns - 1) + column;
+  const left = horizontalCount + row * columns + column;
 
   switch (index) {
-    case 1: appendContourSegment(segments, top, left, topX, y, x, leftY); break;
-    case 2: appendContourSegment(segments, rightEdge, top, right, rightY, topX, y); break;
-    case 3: appendContourSegment(segments, rightEdge, left, right, rightY, x, leftY); break;
-    case 4: appendContourSegment(segments, bottomEdge, rightEdge, bottomX, bottom, right, rightY); break;
+    case 1: {
+      const topX = x + (threshold - a) / (b - a) * step;
+      const leftY = y + (threshold - a) / (d - a) * step;
+      appendContourSegment(segments, top, left, topX, y, x, leftY);
+      break;
+    }
+    case 2: {
+      const rightY = y + (threshold - b) / (c - b) * step;
+      const topX = x + (threshold - a) / (b - a) * step;
+      appendContourSegment(segments, rightEdge, top, right, rightY, topX, y);
+      break;
+    }
+    case 3: {
+      const rightY = y + (threshold - b) / (c - b) * step;
+      const leftY = y + (threshold - a) / (d - a) * step;
+      appendContourSegment(segments, rightEdge, left, right, rightY, x, leftY);
+      break;
+    }
+    case 4: {
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      const rightY = y + (threshold - b) / (c - b) * step;
+      appendContourSegment(segments, bottomEdge, rightEdge, bottomX, bottom, right, rightY);
+      break;
+    }
     case 5:
       // Resolve saddle cells from the scalar value at the cell center.
       if ((a + b + c + d) * 0.25 >= threshold) {
+        const topX = x + (threshold - a) / (b - a) * step;
+        const rightY = y + (threshold - b) / (c - b) * step;
+        const bottomX = x + (threshold - d) / (c - d) * step;
+        const leftY = y + (threshold - a) / (d - a) * step;
         appendContourSegment(segments, top, rightEdge, topX, y, right, rightY);
         appendContourSegment(segments, bottomEdge, left, bottomX, bottom, x, leftY);
       } else {
+        const topX = x + (threshold - a) / (b - a) * step;
+        const rightY = y + (threshold - b) / (c - b) * step;
+        const bottomX = x + (threshold - d) / (c - d) * step;
+        const leftY = y + (threshold - a) / (d - a) * step;
         appendContourSegment(segments, top, left, topX, y, x, leftY);
         appendContourSegment(segments, rightEdge, bottomEdge, right, rightY, bottomX, bottom);
       }
       break;
-    case 6: appendContourSegment(segments, bottomEdge, top, bottomX, bottom, topX, y); break;
-    case 7: appendContourSegment(segments, bottomEdge, left, bottomX, bottom, x, leftY); break;
-    case 8: appendContourSegment(segments, left, bottomEdge, x, leftY, bottomX, bottom); break;
-    case 9: appendContourSegment(segments, top, bottomEdge, topX, y, bottomX, bottom); break;
+    case 6: {
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      const topX = x + (threshold - a) / (b - a) * step;
+      appendContourSegment(segments, bottomEdge, top, bottomX, bottom, topX, y);
+      break;
+    }
+    case 7: {
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      const leftY = y + (threshold - a) / (d - a) * step;
+      appendContourSegment(segments, bottomEdge, left, bottomX, bottom, x, leftY);
+      break;
+    }
+    case 8: {
+      const leftY = y + (threshold - a) / (d - a) * step;
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      appendContourSegment(segments, left, bottomEdge, x, leftY, bottomX, bottom);
+      break;
+    }
+    case 9: {
+      const topX = x + (threshold - a) / (b - a) * step;
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      appendContourSegment(segments, top, bottomEdge, topX, y, bottomX, bottom);
+      break;
+    }
     case 10:
       if ((a + b + c + d) * 0.25 >= threshold) {
+        const topX = x + (threshold - a) / (b - a) * step;
+        const rightY = y + (threshold - b) / (c - b) * step;
+        const bottomX = x + (threshold - d) / (c - d) * step;
+        const leftY = y + (threshold - a) / (d - a) * step;
         appendContourSegment(segments, top, left, topX, y, x, leftY);
         appendContourSegment(segments, rightEdge, bottomEdge, right, rightY, bottomX, bottom);
       } else {
+        const topX = x + (threshold - a) / (b - a) * step;
+        const rightY = y + (threshold - b) / (c - b) * step;
+        const bottomX = x + (threshold - d) / (c - d) * step;
+        const leftY = y + (threshold - a) / (d - a) * step;
         appendContourSegment(segments, top, rightEdge, topX, y, right, rightY);
         appendContourSegment(segments, bottomEdge, left, bottomX, bottom, x, leftY);
       }
       break;
-    case 11: appendContourSegment(segments, rightEdge, bottomEdge, right, rightY, bottomX, bottom); break;
-    case 12: appendContourSegment(segments, left, rightEdge, x, leftY, right, rightY); break;
-    case 13: appendContourSegment(segments, top, rightEdge, topX, y, right, rightY); break;
-    case 14: appendContourSegment(segments, left, top, x, leftY, topX, y); break;
+    case 11: {
+      const rightY = y + (threshold - b) / (c - b) * step;
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      appendContourSegment(segments, rightEdge, bottomEdge, right, rightY, bottomX, bottom);
+      break;
+    }
+    case 12: {
+      const leftY = y + (threshold - a) / (d - a) * step;
+      const rightY = y + (threshold - b) / (c - b) * step;
+      appendContourSegment(segments, left, rightEdge, x, leftY, right, rightY);
+      break;
+    }
+    case 13: {
+      const topX = x + (threshold - a) / (b - a) * step;
+      const rightY = y + (threshold - b) / (c - b) * step;
+      appendContourSegment(segments, top, rightEdge, topX, y, right, rightY);
+      break;
+    }
+    case 14: {
+      const leftY = y + (threshold - a) / (d - a) * step;
+      const topX = x + (threshold - a) / (b - a) * step;
+      appendContourSegment(segments, left, top, x, leftY, topX, y);
+      break;
+    }
   }
 }
 
 function buildContourPath(segments) {
   const adjacency = new Map();
-  for (let index = 0; index < segments.length; index++) {
-    const segment = segments[index];
-    const from = adjacency.get(segment.a) || [];
-    from.push(index);
-    adjacency.set(segment.a, from);
-    const to = adjacency.get(segment.b) || [];
-    to.push(index);
-    adjacency.set(segment.b, to);
+  for (let index = 0, segmentIndex = 0; index < segments.length; index += 6, segmentIndex++) {
+    const a = segments[index];
+    const b = segments[index + 1];
+    const from = adjacency.get(a) || [];
+    from.push(segmentIndex);
+    adjacency.set(a, from);
+    const to = adjacency.get(b) || [];
+    to.push(segmentIndex);
+    adjacency.set(b, to);
   }
 
-  const used = new Uint8Array(segments.length);
+  const used = new Uint8Array(segments.length / 6);
   const path = new Path2D();
-  for (let index = 0; index < segments.length; index++) {
-    if (used[index]) continue;
-    const first = segments[index];
-    const start = first.a;
-    let current = first.b;
-    path.moveTo(first.ax, first.ay);
-    path.lineTo(first.bx, first.by);
-    used[index] = 1;
+  for (let segmentIndex = 0; segmentIndex < used.length; segmentIndex++) {
+    if (used[segmentIndex]) continue;
+    let offset = segmentIndex * 6;
+    const start = segments[offset];
+    let current = segments[offset + 1];
+    path.moveTo(segments[offset + 2], segments[offset + 3]);
+    path.lineTo(segments[offset + 4], segments[offset + 5]);
+    used[segmentIndex] = 1;
 
     while (current !== start) {
       const connected = adjacency.get(current);
-      const nextIndex = connected.find(candidate => !used[candidate]);
+      let nextIndex;
+      for (let candidate = 0; candidate < connected.length; candidate++) {
+        if (!used[connected[candidate]]) {
+          nextIndex = connected[candidate];
+          break;
+        }
+      }
       if (nextIndex === undefined) break;
-      const next = segments[nextIndex];
+      offset = nextIndex * 6;
       used[nextIndex] = 1;
-      if (next.a === current) {
-        path.lineTo(next.bx, next.by);
-        current = next.b;
+      if (segments[offset] === current) {
+        path.lineTo(segments[offset + 4], segments[offset + 5]);
+        current = segments[offset + 1];
       } else {
-        path.lineTo(next.ax, next.ay);
-        current = next.a;
+        path.lineTo(segments[offset + 2], segments[offset + 3]);
+        current = segments[offset];
       }
     }
     path.closePath();
@@ -228,34 +312,45 @@ function buildContours(grid, contourSets, travelX) {
   const startJ = Math.floor(minY / contourStep);
   const endJ = Math.ceil(maxY / contourStep);
   const columns = endI - startI + 1;
+  const rows = endJ - startJ;
   let topValues = contourSets.map(() => new Float32Array(columns));
   let bottomValues = contourSets.map(() => new Float32Array(columns));
-  const sampleValues = new Float32Array(contourSets.length);
   const sources = contourSets.map(set => set.scalar);
   const bandSegments = contourSets.map(set => Array.from(set.thresholds, () => []));
+  const xAxis = prepareWorldSplineAxis(startI, columns, contourStep, grid.startI, grid.step, grid.width);
+  const yAxis = prepareWorldSplineAxis(startJ, rows + 1, contourStep, grid.startJ, grid.step, grid.height);
+  const contourValues = interpolateSplineScalarsOnLattice(sources, grid, xAxis, yAxis, columns, rows);
 
   for (let column = 0; column < columns; column++) {
-    interpolateSplineScalarsAt(sources, grid, (startI + column) * contourStep, startJ * contourStep, sampleValues);
-    for (let set = 0; set < contourSets.length; set++) topValues[set][column] = sampleValues[set];
+    for (let set = 0; set < contourSets.length; set++) topValues[set][column] = contourValues[set][column];
   }
 
-  for (let row = startJ; row < endJ; row++) {
-    const bottomY = (row + 1) * contourStep;
+  const horizontalCount = (rows + 1) * (columns - 1);
+  for (let row = 0; row < rows; row++) {
+    const valueOffset = (row + 1) * columns;
     for (let column = 0; column < columns; column++) {
-      interpolateSplineScalarsAt(sources, grid, (startI + column) * contourStep, bottomY, sampleValues);
-      for (let set = 0; set < contourSets.length; set++) bottomValues[set][column] = sampleValues[set];
+      for (let set = 0; set < contourSets.length; set++) bottomValues[set][column] = contourValues[set][valueOffset + column];
     }
 
     for (let column = 0; column < columns - 1; column++) {
-      const i = startI + column;
       for (let set = 0; set < contourSets.length; set++) {
         const thresholds = contourSets[set].thresholds;
         const a = topValues[set][column];
         const b = topValues[set][column + 1];
         const c = bottomValues[set][column + 1];
         const d = bottomValues[set][column];
+        const minValue = Math.min(a, b, c, d);
+        const maxValue = Math.max(a, b, c, d);
+        const x = (startI + column) * contourStep;
+        const y = (startJ + row) * contourStep;
         for (let band = 0; band < thresholds.length; band++) {
-          appendContourCell(bandSegments[set][band], i, row, contourStep, a, b, c, d, thresholds[band]);
+          const threshold = thresholds[band];
+          if (threshold > maxValue) break;
+          if (threshold <= minValue) continue;
+          appendContourCell(
+            bandSegments[set][band], column, row, columns, horizontalCount,
+            x, y, contourStep, a, b, c, d, threshold
+          );
         }
       }
     }
@@ -269,45 +364,54 @@ function buildContours(grid, contourSets, travelX) {
 }
 
 export function renderAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY, smooth = false) {
-  const supportBounds = { minX: travelX - 0.92, maxX: travelX + 0.92, minY: -0.26, maxY: 1.26 };
-  const grid = buildSmoothedWeatherGrid(
-    supportBounds, t, travelX, undefined,
-    smooth ? AREA_GENERALIZATION_RADIUS * AREA_GENERALIZATION_PASSES : 0
-  );
-  let rain = grid.rain;
-  let storm = grid.storm;
-  let hail = grid.hail;
-  let rainThresholds = AREA_REFERENCE_THRESHOLDS;
-  let stormThreshold = STORM_PRESENCE_THRESHOLD;
-  let hailThreshold = HAIL_PRESENCE_THRESHOLD;
+  const cacheMatches = areaGeometryCache
+    && areaGeometryCache.t === t
+    && areaGeometryCache.travelX === travelX
+    && areaGeometryCache.smooth === smooth;
+  if (!cacheMatches) {
+    const supportBounds = { minX: travelX - 0.92, maxX: travelX + 0.92, minY: -0.26, maxY: 1.26 };
+    const grid = buildSmoothedWeatherGrid(
+      supportBounds, t, travelX, undefined,
+      smooth ? AREA_GENERALIZATION_RADIUS * AREA_GENERALIZATION_PASSES : 0
+    );
+    let rain = grid.rain;
+    let storm = grid.storm;
+    let hail = grid.hail;
+    let rainThresholds = AREA_REFERENCE_THRESHOLDS;
+    let stormThreshold = STORM_PRESENCE_THRESHOLD;
+    let hailThreshold = HAIL_PRESENCE_THRESHOLD;
 
-  if (smooth) {
-    rain = fastBoxBlurScalarGrid(
-      grid.rain,
-      grid.width,
-      grid.height,
-      AREA_GENERALIZATION_RADIUS,
-      AREA_GENERALIZATION_PASSES,
-      getAreaGeneralizationBuffers(grid.rain.length, 'rain')
-    );
-    storm = fastBoxBlurScalarGrid(
-      grid.storm, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
-      getAreaGeneralizationBuffers(grid.storm.length, 'storm')
-    );
-    hail = fastBoxBlurScalarGrid(
-      grid.hail, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
-      getAreaGeneralizationBuffers(grid.hail.length, 'hail')
-    );
-    rainThresholds = remapCoverageThresholds(grid, grid.rain, rain, supportBounds);
-    stormThreshold = remapCoverageThreshold(grid, grid.storm, storm, supportBounds, STORM_PRESENCE_THRESHOLD);
-    hailThreshold = remapCoverageThreshold(grid, grid.hail, hail, supportBounds, HAIL_PRESENCE_THRESHOLD);
+    if (smooth) {
+      rain = fastBoxBlurScalarGrid(
+        grid.rain,
+        grid.width,
+        grid.height,
+        AREA_GENERALIZATION_RADIUS,
+        AREA_GENERALIZATION_PASSES,
+        getAreaGeneralizationBuffers(grid.rain.length, 'rain')
+      );
+      storm = fastBoxBlurScalarGrid(
+        grid.storm, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
+        getAreaGeneralizationBuffers(grid.storm.length, 'storm')
+      );
+      hail = fastBoxBlurScalarGrid(
+        grid.hail, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
+        getAreaGeneralizationBuffers(grid.hail.length, 'hail')
+      );
+      rainThresholds = remapCoverageThresholds(grid, grid.rain, rain, supportBounds);
+      stormThreshold = remapCoverageThreshold(grid, grid.storm, storm, supportBounds, STORM_PRESENCE_THRESHOLD);
+      hailThreshold = remapCoverageThreshold(grid, grid.hail, hail, supportBounds, HAIL_PRESENCE_THRESHOLD);
+    }
+
+    const [rainPaths, [stormPath], [hailPath]] = buildContours(grid, [
+      { scalar: rain, thresholds: rainThresholds },
+      { scalar: storm, thresholds: [stormThreshold] },
+      { scalar: hail, thresholds: [hailThreshold] }
+    ], travelX);
+    areaGeometryCache = { t, travelX, smooth, rainPaths, stormPath, hailPath };
   }
 
-  const [rainPaths, [stormPath], [hailPath]] = buildContours(grid, [
-    { scalar: rain, thresholds: rainThresholds },
-    { scalar: storm, thresholds: [stormThreshold] },
-    { scalar: hail, thresholds: [hailThreshold] }
-  ], travelX);
+  const { rainPaths, stormPath, hailPath } = areaGeometryCache;
   const worldScale = fieldPixels * viewport.zoom;
 
   ctx.save();
