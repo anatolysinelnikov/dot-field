@@ -13,6 +13,8 @@ const precipitationCtx = precipitationCanvas.getContext('2d', { alpha: true });
 const playPause = document.querySelector('#playPause');
 const renderModeSelector = document.querySelector('#renderModeSelector');
 const renderModeButtons = [...renderModeSelector.querySelectorAll('[data-render-mode]')];
+const areaSmoothControl = document.querySelector('#areaSmoothControl');
+const areaSmooth = document.querySelector('#areaSmooth');
 const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
 const lodLabel = document.querySelector('#lodLabel');
@@ -20,7 +22,7 @@ const resetZoom = document.querySelector('#resetZoom');
 
 const state = { playing: true, time: 0, zoom: 1, width: 1, height: 1, dpr: 1,
   lastFrame: performance.now(), scrubbing: false, renderMode: 'dots', lodLevel: null,
-  desiredLOD: null, lodMorph: null };
+  desiredLOD: null, lodMorph: null, areaSmooth: false };
 
 function resizeCanvas() {
   state.dpr = window.devicePixelRatio || 1;
@@ -74,7 +76,7 @@ function render(delta) {
   if (state.renderMode === 'blur') {
     renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, viewport, t, travelX, fieldPixels, centerX, centerY);
   } else if (state.renderMode === 'areas') {
-    renderAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY);
+    renderAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY, state.areaSmooth);
   } else if (state.renderMode === 'squares') {
     if (state.lodMorph) renderSquaresMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
     else renderSquares(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
@@ -108,6 +110,7 @@ playPause.addEventListener('click', () => {
 function setRenderMode(mode) {
   state.renderMode = mode;
   renderModeSelector.dataset.mode = mode;
+  areaSmoothControl.hidden = mode !== 'areas';
   for (const button of renderModeButtons) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
   }
@@ -115,6 +118,7 @@ function setRenderMode(mode) {
 for (const button of renderModeButtons) {
   button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
 }
+areaSmooth.addEventListener('change', () => { state.areaSmooth = areaSmooth.checked; });
 let scrubbingPointerId = null;
 function updateTimelineFromPointer(clientX) {
   const rect = timeSlider.getBoundingClientRect();

@@ -268,33 +268,43 @@ function buildContours(grid, contourSets, travelX) {
   return bandSegments.map(segments => segments.map(buildContourPath));
 }
 
-export function renderAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY) {
+export function renderAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY, smooth = false) {
   const supportBounds = { minX: travelX - 0.92, maxX: travelX + 0.92, minY: -0.26, maxY: 1.26 };
   const grid = buildSmoothedWeatherGrid(
-    supportBounds, t, travelX, undefined, AREA_GENERALIZATION_RADIUS * AREA_GENERALIZATION_PASSES
+    supportBounds, t, travelX, undefined,
+    smooth ? AREA_GENERALIZATION_RADIUS * AREA_GENERALIZATION_PASSES : 0
   );
-  const originalRain = grid.rain;
-  const generalizedRain = fastBoxBlurScalarGrid(
-    originalRain,
-    grid.width,
-    grid.height,
-    AREA_GENERALIZATION_RADIUS,
-    AREA_GENERALIZATION_PASSES,
-    getAreaGeneralizationBuffers(originalRain.length, 'rain')
-  );
-  const storm = fastBoxBlurScalarGrid(
-    grid.storm, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
-    getAreaGeneralizationBuffers(grid.storm.length, 'storm')
-  );
-  const hail = fastBoxBlurScalarGrid(
-    grid.hail, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
-    getAreaGeneralizationBuffers(grid.hail.length, 'hail')
-  );
-  const rainThresholds = remapCoverageThresholds(grid, originalRain, generalizedRain, supportBounds);
-  const stormThreshold = remapCoverageThreshold(grid, grid.storm, storm, supportBounds, STORM_PRESENCE_THRESHOLD);
-  const hailThreshold = remapCoverageThreshold(grid, grid.hail, hail, supportBounds, HAIL_PRESENCE_THRESHOLD);
+  let rain = grid.rain;
+  let storm = grid.storm;
+  let hail = grid.hail;
+  let rainThresholds = AREA_REFERENCE_THRESHOLDS;
+  let stormThreshold = STORM_PRESENCE_THRESHOLD;
+  let hailThreshold = HAIL_PRESENCE_THRESHOLD;
+
+  if (smooth) {
+    rain = fastBoxBlurScalarGrid(
+      grid.rain,
+      grid.width,
+      grid.height,
+      AREA_GENERALIZATION_RADIUS,
+      AREA_GENERALIZATION_PASSES,
+      getAreaGeneralizationBuffers(grid.rain.length, 'rain')
+    );
+    storm = fastBoxBlurScalarGrid(
+      grid.storm, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
+      getAreaGeneralizationBuffers(grid.storm.length, 'storm')
+    );
+    hail = fastBoxBlurScalarGrid(
+      grid.hail, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
+      getAreaGeneralizationBuffers(grid.hail.length, 'hail')
+    );
+    rainThresholds = remapCoverageThresholds(grid, grid.rain, rain, supportBounds);
+    stormThreshold = remapCoverageThreshold(grid, grid.storm, storm, supportBounds, STORM_PRESENCE_THRESHOLD);
+    hailThreshold = remapCoverageThreshold(grid, grid.hail, hail, supportBounds, HAIL_PRESENCE_THRESHOLD);
+  }
+
   const [rainPaths, [stormPath], [hailPath]] = buildContours(grid, [
-    { scalar: generalizedRain, thresholds: rainThresholds },
+    { scalar: rain, thresholds: rainThresholds },
     { scalar: storm, thresholds: [stormThreshold] },
     { scalar: hail, thresholds: [hailThreshold] }
   ], travelX);

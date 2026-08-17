@@ -137,14 +137,23 @@ button:active { transform: translateY(1px); }
   border-left: 10px solid currentColor;
 }
 
-.render-mode {
+.render-mode-controls {
   position: absolute;
   left: 50%;
   bottom: 82px;
   transform: translateX(-50%);
+  width: min(408px, calc(100% - 28px));
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.render-mode {
+  position: relative;
+  flex: 0 0 100%;
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  width: min(408px, calc(100% - 28px));
+  width: 100%;
   height: auto;
   margin: 0;
   padding: 4px;
@@ -259,6 +268,43 @@ button:active { transform: translateY(1px); }
 }
 .render-mode button:active { transform: none; }
 
+.area-smooth {
+  flex: 0 0 auto;
+  display: flex;
+  padding: 4px;
+  border: var(--control-border);
+  border-radius: var(--control-radius);
+  background: var(--control-panel);
+  box-shadow: var(--control-shadow);
+  backdrop-filter: var(--control-backdrop);
+  color: #c7d0df;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.area-smooth[hidden] { display: none; }
+
+.area-smooth-content {
+  flex: 0 0 100px;
+  width: 100px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border-radius: var(--control-inset-radius);
+}
+
+.area-smooth:hover .area-smooth-content,
+.area-smooth:has(input:checked) .area-smooth-content { background: var(--control-inset); }
+
+.area-smooth input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #6aa6ff;
+  cursor: pointer;
+}
+
 .time-control {
   min-width: 0;
   display: flex;
@@ -328,6 +374,15 @@ input[type="range"]::-moz-range-thumb {
 
 .readout b { color: #dce3f0; font-weight: 500; }
 
+@media (max-width: 900px) {
+  .area-smooth {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    height: 100%;
+  }
+}
+
 @media (max-width: 680px) {
   .controls {
     grid-template-columns: auto minmax(0, 1fr);
@@ -341,4 +396,10 @@ input[type="range"]::-moz-range-thumb {
   }
   .zoom-stepper { display: none; }
   .legend { gap: 9px; }
+  .area-smooth {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    height: 100%;
+  }
 }
