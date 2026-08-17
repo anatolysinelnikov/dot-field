@@ -21,6 +21,17 @@ function visibleFieldOpacity(value, onset, core, exponent) {
   return Math.pow(smoothstep(onset, core, value), exponent);
 }
 
+// Keep the reconstructed hazard fields continuous, but give their nominal
+// Dots/Squares activation levels a clearly visible opacity. The two smooth
+// segments meet with zero slope, preserving the soft outer edge without
+// creating a contour at the anchor.
+function visibleHazardOpacity(value, onset, activation, core, activationOpacity) {
+  if (value < activation) {
+    return activationOpacity * Math.pow(smoothstep(onset, activation, value), 0.68);
+  }
+  return mix(activationOpacity, 1, smoothstep(activation, core, value));
+}
+
 export function renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, viewport, t, travelX, fieldPixels, centerX, centerY) {
   const bounds = viewport.bounds;
   const grid = buildSmoothedWeatherGrid(bounds, t, travelX);
@@ -52,8 +63,8 @@ export function renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, 
       const rainOpacity = visibleFieldOpacity(rain, 0.006, 0.52, 0.66);
       const strong = smoothstep(RAIN_MODERATE_MAX, 0.9, rain);
       let pixel = { r: 0, g: mix(144, 0, strong), b: 255, a: rainOpacity };
-      pixel = compositeField([255, 0, 255], visibleFieldOpacity(storm, 0.006, 0.54, 0.52), pixel);
-      pixel = compositeField([255, 212, 0], visibleFieldOpacity(hail, 0.010, 0.44, 0.5), pixel);
+      pixel = compositeField([255, 0, 255], visibleHazardOpacity(storm, 0.006, 0.075, 0.54, 0.36), pixel);
+      pixel = compositeField([255, 212, 0], visibleHazardOpacity(hail, 0.010, 0.11, 0.44, 0.42), pixel);
       const pixelOffset = (py * rasterWidth + px) * 4;
       pixels[pixelOffset] = Math.round(pixel.r);
       pixels[pixelOffset + 1] = Math.round(pixel.g);
