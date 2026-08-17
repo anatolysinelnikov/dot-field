@@ -4,7 +4,7 @@ import {
   buildSmoothedWeatherGrid,
   createBoxBlurBuffers,
   fastBoxBlurScalarGrid,
-  interpolateSplineScalarsAtAxes,
+  interpolateSplineScalarsOnLattice,
   prepareWorldSplineAxis
 } from './scalar-reconstruction.js';
 
@@ -315,22 +315,21 @@ function buildContours(grid, contourSets, travelX) {
   const rows = endJ - startJ;
   let topValues = contourSets.map(() => new Float32Array(columns));
   let bottomValues = contourSets.map(() => new Float32Array(columns));
-  const sampleValues = new Float32Array(contourSets.length);
   const sources = contourSets.map(set => set.scalar);
   const bandSegments = contourSets.map(set => Array.from(set.thresholds, () => []));
   const xAxis = prepareWorldSplineAxis(startI, columns, contourStep, grid.startI, grid.step, grid.width);
   const yAxis = prepareWorldSplineAxis(startJ, rows + 1, contourStep, grid.startJ, grid.step, grid.height);
+  const contourValues = interpolateSplineScalarsOnLattice(sources, grid, xAxis, yAxis, columns, rows);
 
   for (let column = 0; column < columns; column++) {
-    interpolateSplineScalarsAtAxes(sources, grid, xAxis, column, yAxis, 0, sampleValues);
-    for (let set = 0; set < contourSets.length; set++) topValues[set][column] = sampleValues[set];
+    for (let set = 0; set < contourSets.length; set++) topValues[set][column] = contourValues[set][column];
   }
 
   const horizontalCount = (rows + 1) * (columns - 1);
   for (let row = 0; row < rows; row++) {
+    const valueOffset = (row + 1) * columns;
     for (let column = 0; column < columns; column++) {
-      interpolateSplineScalarsAtAxes(sources, grid, xAxis, column, yAxis, row + 1, sampleValues);
-      for (let set = 0; set < contourSets.length; set++) bottomValues[set][column] = sampleValues[set];
+      for (let set = 0; set < contourSets.length; set++) bottomValues[set][column] = contourValues[set][valueOffset + column];
     }
 
     for (let column = 0; column < columns - 1; column++) {

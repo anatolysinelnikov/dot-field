@@ -318,6 +318,77 @@ export function prepareWorldSplineAxis(start, length, worldStep, gridStart, grid
   return { samples, weights };
 }
 
+let contourLatticeBuffers = null;
+
+function getContourLatticeBuffers(sourceCount, gridHeight, columns, rows) {
+  const horizontalLength = sourceCount * gridHeight * columns;
+  const valueLength = sourceCount * (rows + 1) * columns;
+  if (!contourLatticeBuffers
+    || contourLatticeBuffers.sourceCount !== sourceCount
+    || contourLatticeBuffers.gridHeight !== gridHeight
+    || contourLatticeBuffers.columns !== columns
+    || contourLatticeBuffers.rows !== rows) {
+    contourLatticeBuffers = {
+      sourceCount,
+      gridHeight,
+      columns,
+      rows,
+      horizontal: new Float64Array(horizontalLength),
+      values: Array.from({ length: sourceCount }, () => new Float32Array(valueLength / sourceCount))
+    };
+  }
+  return contourLatticeBuffers;
+}
+
+// Evaluate the regular contour lattice separably. Horizontal four-tap values
+// are shared by every vertical B-spline combination that uses the same row.
+export function interpolateSplineScalarsOnLattice(sources, grid, xAxis, yAxis, columns, rows) {
+  const buffers = getContourLatticeBuffers(sources.length, grid.height, columns, rows);
+  const horizontal = buffers.horizontal;
+
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+    const source = sources[sourceIndex];
+    const sourceOffset = sourceIndex * grid.height * columns;
+    for (let gridRow = 0; gridRow < grid.height; gridRow++) {
+      const rowOffset = gridRow * grid.width;
+      const horizontalRow = sourceOffset + gridRow * columns;
+      for (let column = 0; column < columns; column++) {
+        const xOffset = column * 4;
+        const x0 = xAxis.samples[xOffset];
+        const x1 = xAxis.samples[xOffset + 1];
+        const x2 = xAxis.samples[xOffset + 2];
+        const x3 = xAxis.samples[xOffset + 3];
+        horizontal[horizontalRow + column] = source[rowOffset + x0] * xAxis.weights[xOffset]
+          + source[rowOffset + x1] * xAxis.weights[xOffset + 1]
+          + source[rowOffset + x2] * xAxis.weights[xOffset + 2]
+          + source[rowOffset + x3] * xAxis.weights[xOffset + 3];
+      }
+    }
+  }
+
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+    const sourceOffset = sourceIndex * grid.height * columns;
+    const target = buffers.values[sourceIndex];
+    const yWeights = yAxis.weights;
+    for (let row = 0; row <= rows; row++) {
+      const yOffset = row * 4;
+      const row0 = yAxis.samples[yOffset] * columns;
+      const row1 = yAxis.samples[yOffset + 1] * columns;
+      const row2 = yAxis.samples[yOffset + 2] * columns;
+      const row3 = yAxis.samples[yOffset + 3] * columns;
+      const targetOffset = row * columns;
+      for (let column = 0; column < columns; column++) {
+        target[targetOffset + column] = horizontal[sourceOffset + row0 + column] * yWeights[yOffset]
+          + horizontal[sourceOffset + row1 + column] * yWeights[yOffset + 1]
+          + horizontal[sourceOffset + row2 + column] * yWeights[yOffset + 2]
+          + horizontal[sourceOffset + row3 + column] * yWeights[yOffset + 3];
+      }
+    }
+  }
+
+  return buffers.values;
+}
+
 export function interpolateSplineScalarsAtAxes(sources, grid, xAxis, xPosition, yAxis, yPosition, target) {
   const xOffset = xPosition * 4;
   const yOffset = yPosition * 4;
