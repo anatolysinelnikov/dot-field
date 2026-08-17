@@ -292,7 +292,7 @@ Its main responsibilities are:
 
 ### B-spline reconstruction
 
-Two forms exist:
+Three forms exist:
 
 - screen/raster-oriented precomputed-axis sampling for Blur;
 - direct world-space sampling (`interpolateSplineScalarAt` / `interpolateSplineScalarsAt`) for general consumers;
