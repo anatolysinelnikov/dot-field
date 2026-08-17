@@ -3,8 +3,8 @@
 ## Document status
 
 - Repository: `anatolysinelnikov/dot-field`
-- Analyzed branch: `main`
-- Analyzed commit: `ac42b4098c983f382897b51df175df3708a427d3` (`Fix responsive Smooth segment width`)
+- Analyzed branch: `experiment/areas-performance`
+- Analyzed commit: `a1c0ebaa7c0e88651b90cc2dc4742ba742340b1b` (feature branch after merging `origin/main`)
 - Snapshot date: 2026-08-17
 
 This file is maintained architectural context, not implementation authority. For implementation-dependent work, inspect the current requested branch and relevant files first. If code and this document disagree, the code wins and this file should be updated.
@@ -277,7 +277,8 @@ Its main responsibilities are:
 1. sample `intensityAt()` on the deterministic `BASE_GRID` lattice;
 2. apply separable Gaussian smoothing to requested weather channels;
 3. provide reusable fast separable box-blur helpers;
-4. provide cubic B-spline reconstruction for both raster and world-space sampling.
+4. provide reusable reconstruction buffers keyed by grid dimensions and channels;
+5. provide cubic B-spline reconstruction for both raster and world-space sampling.
 
 ### Base reconstructed grid
 
@@ -294,7 +295,10 @@ Its main responsibilities are:
 Two forms exist:
 
 - screen/raster-oriented precomputed-axis sampling for Blur;
-- direct world-space sampling (`interpolateSplineScalarAt` / `interpolateSplineScalarsAt`) for Areas contours.
+- direct world-space sampling (`interpolateSplineScalarAt` / `interpolateSplineScalarsAt`) for general consumers;
+- separable regular-lattice sampling (`interpolateSplineScalarsOnLattice`) for Areas contours. It computes and reuses horizontal four-tap values before applying vertical four-tap combinations, preserving the same cubic B-spline arithmetic while avoiding repeated coordinate/index/weight work.
+
+Weather-grid buffers are reused when width, height, and requested channels are unchanged. Areas contour-lattice horizontal and output buffers are likewise reused when source count and lattice dimensions are unchanged. These caches are implementation-level storage reuse; they do not change grid anchoring, reconstruction values, or world-space coordinates.
 
 This separation is important: Areas geometry is not tied to a viewport raster, while Blur intentionally samples a screen raster.
 
@@ -358,6 +362,8 @@ field.intensityAt()
 -> nested rain fills + storm/hail contours
 ```
 
+For a changed weather state, the reconstructed contour paths are cached as world-space geometry using `(t, travelX, smooth)` as the cache identity. Repeated paused renders and camera zoom changes reuse those paths; zoom only changes the Canvas transform and is intentionally not a geometry-cache key. A new contour build occurs when the weather time, weather travel position, or Smooth state changes.
+
 Rain uses the configured precipitation band thresholds directly. Storm and hail use presence thresholds aligned with the lower visibility edges used by shared hazard semantics.
 
 ### Smooth Areas
@@ -381,7 +387,7 @@ grid.step / AREA_CONTOUR_SUBDIVISIONS
 
 with `AREA_CONTOUR_SUBDIVISIONS = 3`.
 
-Marching Squares segments are generated for every threshold and connected into closed `Path2D` loops. Saddle cases are resolved using the scalar value at the cell center.
+Marching Squares segments are stored in flat numeric segment arrays and connected into closed `Path2D` loops. Each cell first computes its scalar corner minimum and maximum; sorted thresholds outside that range are rejected before case processing. For non-empty cases, only the edge intersections required by that case are interpolated. These are equivalent hot-loop optimizations: threshold comparisons retain the existing `>= threshold` semantics, and saddle cases are still resolved using the scalar value at the cell center.
 
 Contour support is based on the complete synthetic weather support plus overscan rather than only the visible viewport. This prevents geometry from changing merely because the camera clips into the middle of an active system.
 
