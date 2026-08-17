@@ -1,7 +1,8 @@
 # Dot Field
 
 Экспериментальный прототип визуализации осадков, грозы и града:
-https://anatolysinelnikov.github.io/dot-field/
+
+🔗 [anatolysinelnikov.github.io/dot-field](https://anatolysinelnikov.github.io/dot-field/)
 
 В основе — детерминированное пространственное поле и стабильная сетка данных. Прототип позволяет сравнить четыре способа представления одной и той же погодной ситуации.
 
@@ -17,4 +18,4 @@ https://anatolysinelnikov.github.io/dot-field/
 
 ![Dot Field](assets/dot-field.jpg)
 
-Техническое устройство проекта описано в [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Техническое устройство проекта описано в [`ARCHITECTURE.md`](ARCHITECTURE.md)
