@@ -263,11 +263,11 @@ button:active { transform: translateY(1px); }
   position: absolute;
   left: 50%;
   bottom: 138px;
-  width: min(280px, calc(100% - 28px));
+  width: min(300px, calc(100% - 28px));
   transform: translateX(-50%);
   display: grid;
-  gap: 2px;
-  padding: 7px 10px 5px;
+  gap: 5px;
+  padding: 8px 10px 7px;
   border: var(--control-border);
   border-radius: var(--control-radius);
   background: var(--control-panel);
@@ -278,6 +278,7 @@ button:active { transform: translateY(1px); }
 }
 
 .squares-tuning[hidden] { display: none; }
+.squares-tuning-control { display: grid; gap: 1px; }
 .squares-tuning span { display: flex; justify-content: space-between; }
 .squares-tuning output { color: #f1f5fb; font-variant-numeric: tabular-nums; }
 .squares-tuning input[type="range"] { height: 28px; }

@@ -1,6 +1,6 @@
 import { BASE_GRID, GRID_OVERSCAN_CELLS, RAIN_BLUE, RAIN_MODERATE_MAX, STRONG_PRECIPITATION_BLUE } from './config.js';
 import { clamp, mix, smoothstep } from './math.js';
-import { resolveHazardState, resolveLODGroupHazardState, sampleField } from './lod.js';
+import { intensityToStrength, resolveHazardState, resolveLODGroupHazardState, sampleField } from './lod.js';
 import { intensityToRadius, strongPrecipitationIntensity } from './dots-renderer.js';
 
 const BACKGROUND = [8, 11, 18];
@@ -8,7 +8,8 @@ const STORM = [255, 0, 255];
 const HAIL = [255, 212, 0];
 const RAIN = hexToRgb(RAIN_BLUE);
 const STRONG_RAIN = hexToRgb(STRONG_PRECIPITATION_BLUE);
-const MIN_VISIBLE_DOT_RADIUS_PX = 0.4;
+const RAIN_BRIGHTNESS_ANCHOR_RADIUS_PX = 0.4;
+const STRONG_VISIBILITY_RADIUS_PX = RAIN_BRIGHTNESS_ANCHOR_RADIUS_PX;
 
 function hexToRgb(hex) {
   return [
@@ -32,12 +33,17 @@ function colorString(color) {
 }
 
 function precipitationColor(color, radius, spacing, boundaryRainBrightness) {
-  if (radius < MIN_VISIBLE_DOT_RADIUS_PX) return BACKGROUND;
+  if (radius <= 0) return BACKGROUND;
+  if (radius <= RAIN_BRIGHTNESS_ANCHOR_RADIUS_PX) {
+    return mixColor(BACKGROUND, color,
+      boundaryRainBrightness * radius / RAIN_BRIGHTNESS_ANCHOR_RADIUS_PX);
+  }
   // RAIN_MODERATE_MAX is Dots' established upper edge for light-blue rain;
   // use its projected marker radius as the full-brightness anchor.
   const fullBrightnessRadius = intensityToRadius(RAIN_MODERATE_MAX, spacing, 'rain');
   const position = clamp(
-    (radius - MIN_VISIBLE_DOT_RADIUS_PX) / (fullBrightnessRadius - MIN_VISIBLE_DOT_RADIUS_PX),
+    (radius - RAIN_BRIGHTNESS_ANCHOR_RADIUS_PX)
+      / (fullBrightnessRadius - RAIN_BRIGHTNESS_ANCHOR_RADIUS_PX),
     0,
     1
   );
@@ -45,24 +51,36 @@ function precipitationColor(color, radius, spacing, boundaryRainBrightness) {
   return mixColor(BACKGROUND, color, brightness);
 }
 
-function rainColor(intensity, spacing, boundaryRainBrightness) {
-  // Mirror Dots' base-rain layer and its normalized strong-rain overlay.
-  const strongIntensity = strongPrecipitationIntensity(intensity);
-  const strongRadius = intensityToRadius(strongIntensity, spacing, 'rain');
-  if (strongRadius >= MIN_VISIBLE_DOT_RADIUS_PX) {
-    return STRONG_RAIN;
-  }
-  return precipitationColor(RAIN, intensityToRadius(intensity, spacing, 'rain'), spacing, boundaryRainBrightness);
+function applyPhenomenonGradient(underlyingColor, phenomenonColor, boundaryMix, progress) {
+  return mixColor(underlyingColor, phenomenonColor, mix(boundaryMix, 1, progress));
 }
 
-function squareColor(value, hazardState, spacing, boundaryRainBrightness) {
+function rainColor(intensity, spacing, tuning) {
+  // Mirror Dots' base-rain layer and its normalized strong-rain overlay.
+  let color = precipitationColor(RAIN, intensityToRadius(intensity, spacing, 'rain'), spacing,
+    tuning.boundaryRainBrightness);
+  const strongIntensity = strongPrecipitationIntensity(intensity);
+  const strongRadius = intensityToRadius(strongIntensity, spacing, 'rain');
+  if (strongRadius >= STRONG_VISIBILITY_RADIUS_PX) {
+    const strongProgress = Math.pow(intensityToStrength(strongIntensity, 'rain'), 0.47);
+    color = applyPhenomenonGradient(color, STRONG_RAIN, tuning.strongBoundaryMix, strongProgress);
+  }
+  return color;
+}
+
+function squareColor(value, hazardState, spacing, tuning) {
+  let color = rainColor(value.rain, spacing, tuning);
+  const stormProgress = Math.pow(intensityToStrength(value.storm, 'storm'), 0.47);
+  // A sampled storm remains a meaningful underlay for a hail cell, while the
+  // group hazard state preserves the existing coarse-LOD hazard support.
+  if ((hazardState > 0 && hazardState <= 3) || stormProgress > 0) {
+    color = applyPhenomenonGradient(color, STORM, tuning.stormBoundaryMix, stormProgress);
+  }
   if (hazardState > 3) {
-    return HAIL;
+    const hailProgress = Math.pow(intensityToStrength(value.hail, 'hail'), 0.47);
+    color = applyPhenomenonGradient(color, HAIL, tuning.hailBoundaryMix, hailProgress);
   }
-  if (hazardState > 0) {
-    return STORM;
-  }
-  return rainColor(value.rain, spacing, boundaryRainBrightness);
+  return color;
 }
 
 function hazardStateAt(x, y, t, lod, travelX, value) {
@@ -79,7 +97,7 @@ function drawSquare(ctx, sx, sy, spacing, color) {
   ctx.fillRect(sx - spacing / 2, sy - spacing / 2, spacing + 0.5, spacing + 0.5);
 }
 
-export function renderSquares(ctx, viewport, lod, t, travelX, fieldPixels, centerX, centerY, boundaryRainBrightness) {
+export function renderSquares(ctx, viewport, lod, t, travelX, fieldPixels, centerX, centerY, tuning) {
   const step = Math.pow(2, lod) / BASE_GRID;
   const spacing = step * fieldPixels * viewport.zoom;
   const { minX, maxX, minY, maxY } = viewport.bounds;
@@ -95,12 +113,12 @@ export function renderSquares(ctx, viewport, lod, t, travelX, fieldPixels, cente
       const x = (i + 0.5) * step;
       const value = sampleField(x, y, t, lod, travelX);
       drawSquare(ctx, centerX + (x - 0.5) * fieldPixels * viewport.zoom, sy, spacing,
-        squareColor(value, hazardStateAt(x, y, t, lod, travelX, value), spacing, boundaryRainBrightness));
+        squareColor(value, hazardStateAt(x, y, t, lod, travelX, value), spacing, tuning));
     }
   }
 }
 
-export function renderSquaresMorph(ctx, viewport, morph, t, travelX, fieldPixels, centerX, centerY, boundaryRainBrightness) {
+export function renderSquaresMorph(ctx, viewport, morph, t, travelX, fieldPixels, centerX, centerY, tuning) {
   const fineStep = Math.pow(2, morph.fine) / BASE_GRID;
   const coarseStep = fineStep * 2;
   const spacing = fineStep * fieldPixels * viewport.zoom;
@@ -122,9 +140,9 @@ export function renderSquaresMorph(ctx, viewport, morph, t, travelX, fieldPixels
       const childValue = sampleField(childX, childY, t, morph.fine, travelX);
       const parentValue = sampleField(parentX, parentY, t, morph.coarse, travelX);
       const parentColor = squareColor(parentValue,
-        hazardStateAt(parentX, parentY, t, morph.coarse, travelX, parentValue), coarseSpacing, boundaryRainBrightness);
+        hazardStateAt(parentX, parentY, t, morph.coarse, travelX, parentValue), coarseSpacing, tuning);
       const childColor = squareColor(childValue,
-        hazardStateAt(childX, childY, t, morph.fine, travelX, childValue), spacing, boundaryRainBrightness);
+        hazardStateAt(childX, childY, t, morph.fine, travelX, childValue), spacing, tuning);
       drawSquare(ctx, centerX + (childX - 0.5) * fieldPixels * viewport.zoom, sy, spacing,
         mixColor(parentColor, childColor, progress));
     }

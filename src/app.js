@@ -20,10 +20,21 @@ const resetZoom = document.querySelector('#resetZoom');
 const squaresRainTuning = document.querySelector('#squaresRainTuning');
 const squaresBoundaryRainBrightness = document.querySelector('#squaresBoundaryRainBrightness');
 const squaresBoundaryRainBrightnessValue = document.querySelector('#squaresBoundaryRainBrightnessValue');
+const squaresStrongBoundaryMix = document.querySelector('#squaresStrongBoundaryMix');
+const squaresStrongBoundaryMixValue = document.querySelector('#squaresStrongBoundaryMixValue');
+const squaresStormBoundaryMix = document.querySelector('#squaresStormBoundaryMix');
+const squaresStormBoundaryMixValue = document.querySelector('#squaresStormBoundaryMixValue');
+const squaresHailBoundaryMix = document.querySelector('#squaresHailBoundaryMix');
+const squaresHailBoundaryMixValue = document.querySelector('#squaresHailBoundaryMixValue');
 
 const state = { playing: true, time: 0, zoom: 1, width: 1, height: 1, dpr: 1,
   lastFrame: performance.now(), scrubbing: false, renderMode: 'dots', lodLevel: null,
-  desiredLOD: null, lodMorph: null, boundaryRainBrightness: 0.02 };
+  desiredLOD: null, lodMorph: null, squaresTuning: {
+    boundaryRainBrightness: 0.00,
+    strongBoundaryMix: 0.00,
+    stormBoundaryMix: 0.45,
+    hailBoundaryMix: 0.50
+  } };
 
 function resizeCanvas() {
   state.dpr = window.devicePixelRatio || 1;
@@ -81,8 +92,8 @@ function render(delta) {
     if (state.lodMorph) renderAreaHazardMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
     else renderAreaHazards(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
   } else if (state.renderMode === 'squares') {
-    if (state.lodMorph) renderSquaresMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY, state.boundaryRainBrightness);
-    else renderSquares(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY, state.boundaryRainBrightness);
+    if (state.lodMorph) renderSquaresMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY, state.squaresTuning);
+    else renderSquares(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY, state.squaresTuning);
   } else if (state.lodMorph) {
     renderLODMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
   } else {
@@ -118,10 +129,16 @@ function setRenderMode(mode) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
   }
 }
-squaresBoundaryRainBrightness.addEventListener('input', () => {
-  state.boundaryRainBrightness = Number(squaresBoundaryRainBrightness.value);
-  squaresBoundaryRainBrightnessValue.value = state.boundaryRainBrightness.toFixed(2);
-});
+function bindSquaresTuning(input, output, key) {
+  input.addEventListener('input', () => {
+    state.squaresTuning[key] = Number(input.value);
+    output.value = state.squaresTuning[key].toFixed(2);
+  });
+}
+bindSquaresTuning(squaresBoundaryRainBrightness, squaresBoundaryRainBrightnessValue, 'boundaryRainBrightness');
+bindSquaresTuning(squaresStrongBoundaryMix, squaresStrongBoundaryMixValue, 'strongBoundaryMix');
+bindSquaresTuning(squaresStormBoundaryMix, squaresStormBoundaryMixValue, 'stormBoundaryMix');
+bindSquaresTuning(squaresHailBoundaryMix, squaresHailBoundaryMixValue, 'hailBoundaryMix');
 for (const button of renderModeButtons) {
   button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
 }
