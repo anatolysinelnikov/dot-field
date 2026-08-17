@@ -4,7 +4,7 @@ import { selectLOD } from './engine/lod.js';
 import { renderLOD, renderLODMorph } from './engine/dots-renderer.js';
 import { renderSquares, renderSquaresMorph } from './engine/squares-renderer.js';
 import { renderBlurredFields } from './engine/blur-renderer.js';
-import { renderAreaHazardMorph, renderAreaHazards, renderPrecipitationAreas } from './engine/areas-renderer.js';
+import { renderAreas } from './engine/areas-renderer.js';
 
 const canvas = document.querySelector('#field');
 const ctx = canvas.getContext('2d', { alpha: false });
@@ -74,9 +74,7 @@ function render(delta) {
   if (state.renderMode === 'blur') {
     renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, viewport, t, travelX, fieldPixels, centerX, centerY);
   } else if (state.renderMode === 'areas') {
-    renderPrecipitationAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY);
-    if (state.lodMorph) renderAreaHazardMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
-    else renderAreaHazards(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
+    renderAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY);
   } else if (state.renderMode === 'squares') {
     if (state.lodMorph) renderSquaresMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
     else renderSquares(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);

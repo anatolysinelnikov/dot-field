@@ -1,25 +1,33 @@
-import { AREA_CONTOUR_SUBDIVISIONS, AREA_PRECIPITATION_BANDS, BASE_GRID, GRID_OVERSCAN_CELLS } from './config.js';
-import { clamp, smoothstep } from './math.js';
-import { sampleField, resolveHazardState, resolveLODGroupHazardState } from './lod.js';
-import { drawHazardLayer, drawHazardMorph } from './hazard-renderer.js';
-import { buildSmoothedWeatherGrid, createBoxBlurBuffers, fastBoxBlurScalarGrid, interpolateSplineScalarAt } from './scalar-reconstruction.js';
+import { AREA_CONTOUR_SUBDIVISIONS, AREA_PRECIPITATION_BANDS } from './config.js';
+import { clamp } from './math.js';
+import { buildSmoothedWeatherGrid, createBoxBlurBuffers, fastBoxBlurScalarGrid, interpolateSplineScalarsAt } from './scalar-reconstruction.js';
 
-const RAIN_LAYER = ['rain'];
 const AREA_GENERALIZATION_RADIUS = 6;
 const AREA_GENERALIZATION_PASSES = 3;
 const AREA_COVERAGE_HISTOGRAM_BINS = 1024;
 const AREA_THRESHOLD_GAP = 1e-5;
 const AREA_REFERENCE_THRESHOLDS = AREA_PRECIPITATION_BANDS.map(band => band.threshold);
+// These are the lower smoothstep edges used by resolveHazardState in lod.js.
+// Matching them keeps the Areas contour support aligned with existing hazards.
+const STORM_PRESENCE_THRESHOLD = 0.075 * 0.45;
+const HAIL_PRESENCE_THRESHOLD = 0.11 * 0.45;
 let areaGeneralizationBuffers = null;
 const generalizedHistogram = new Uint32Array(AREA_COVERAGE_HISTOGRAM_BINS);
 const referenceCoverage = new Uint32Array(AREA_PRECIPITATION_BANDS.length);
 const effectiveThresholds = new Float32Array(AREA_PRECIPITATION_BANDS.length);
 
-function getAreaGeneralizationBuffers(length) {
+function getAreaGeneralizationBuffers(length, channel) {
   if (!areaGeneralizationBuffers || areaGeneralizationBuffers.length !== length) {
-    areaGeneralizationBuffers = { length, buffers: createBoxBlurBuffers(length) };
+    areaGeneralizationBuffers = {
+      length,
+      buffers: {
+        rain: createBoxBlurBuffers(length),
+        storm: createBoxBlurBuffers(length),
+        hail: createBoxBlurBuffers(length)
+      }
+    };
   }
-  return areaGeneralizationBuffers.buffers;
+  return areaGeneralizationBuffers.buffers[channel];
 }
 
 function histogramBin(value) {
@@ -85,6 +93,23 @@ function remapCoverageThresholds(grid, originalRain, generalizedRain, bounds) {
   }
 
   return effectiveThresholds;
+}
+
+function remapCoverageThreshold(grid, original, generalized, bounds, referenceThreshold) {
+  generalizedHistogram.fill(0);
+  let referenceCoverage = 0;
+  const coverageBounds = getCoverageBounds(grid, bounds);
+
+  for (let row = coverageBounds.startRow; row <= coverageBounds.endRow; row++) {
+    const offset = row * grid.width;
+    for (let column = coverageBounds.startColumn; column <= coverageBounds.endColumn; column++) {
+      const index = offset + column;
+      generalizedHistogram[histogramBin(generalized[index])]++;
+      if (original[index] >= referenceThreshold) referenceCoverage++;
+    }
+  }
+
+  return thresholdForCoverage(generalizedHistogram, referenceCoverage);
 }
 
 function appendContourSegment(segments, a, b, ax, ay, bx, by) {
@@ -189,7 +214,7 @@ function buildContourPath(segments) {
   return path;
 }
 
-function buildPrecipitationContours(grid, travelX, thresholds) {
+function buildContours(grid, contourSets, travelX) {
   const contourStep = grid.step / AREA_CONTOUR_SUBDIVISIONS;
   // Extract complete closed loops from weather support, not just the viewport.
   // This keeps fills stable when zooming into the middle of an active region.
@@ -203,28 +228,35 @@ function buildPrecipitationContours(grid, travelX, thresholds) {
   const startJ = Math.floor(minY / contourStep);
   const endJ = Math.ceil(maxY / contourStep);
   const columns = endI - startI + 1;
-  let topValues = new Float32Array(columns);
-  let bottomValues = new Float32Array(columns);
-  const bandSegments = AREA_PRECIPITATION_BANDS.map(() => []);
+  let topValues = contourSets.map(() => new Float32Array(columns));
+  let bottomValues = contourSets.map(() => new Float32Array(columns));
+  const sampleValues = new Float32Array(contourSets.length);
+  const sources = contourSets.map(set => set.scalar);
+  const bandSegments = contourSets.map(set => Array.from(set.thresholds, () => []));
 
   for (let column = 0; column < columns; column++) {
-    topValues[column] = interpolateSplineScalarAt(grid.rain, grid, (startI + column) * contourStep, startJ * contourStep);
+    interpolateSplineScalarsAt(sources, grid, (startI + column) * contourStep, startJ * contourStep, sampleValues);
+    for (let set = 0; set < contourSets.length; set++) topValues[set][column] = sampleValues[set];
   }
 
   for (let row = startJ; row < endJ; row++) {
     const bottomY = (row + 1) * contourStep;
     for (let column = 0; column < columns; column++) {
-      bottomValues[column] = interpolateSplineScalarAt(grid.rain, grid, (startI + column) * contourStep, bottomY);
+      interpolateSplineScalarsAt(sources, grid, (startI + column) * contourStep, bottomY, sampleValues);
+      for (let set = 0; set < contourSets.length; set++) bottomValues[set][column] = sampleValues[set];
     }
 
     for (let column = 0; column < columns - 1; column++) {
       const i = startI + column;
-      const a = topValues[column];
-      const b = topValues[column + 1];
-      const c = bottomValues[column + 1];
-      const d = bottomValues[column];
-      for (let band = 0; band < AREA_PRECIPITATION_BANDS.length; band++) {
-        appendContourCell(bandSegments[band], i, row, contourStep, a, b, c, d, thresholds[band]);
+      for (let set = 0; set < contourSets.length; set++) {
+        const thresholds = contourSets[set].thresholds;
+        const a = topValues[set][column];
+        const b = topValues[set][column + 1];
+        const c = bottomValues[set][column + 1];
+        const d = bottomValues[set][column];
+        for (let band = 0; band < thresholds.length; band++) {
+          appendContourCell(bandSegments[set][band], i, row, contourStep, a, b, c, d, thresholds[band]);
+        }
       }
     }
 
@@ -233,13 +265,13 @@ function buildPrecipitationContours(grid, travelX, thresholds) {
     bottomValues = previousTop;
   }
 
-  return bandSegments.map(buildContourPath);
+  return bandSegments.map(segments => segments.map(buildContourPath));
 }
 
-export function renderPrecipitationAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY) {
+export function renderAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY) {
   const supportBounds = { minX: travelX - 0.92, maxX: travelX + 0.92, minY: -0.26, maxY: 1.26 };
   const grid = buildSmoothedWeatherGrid(
-    supportBounds, t, travelX, RAIN_LAYER, AREA_GENERALIZATION_RADIUS * AREA_GENERALIZATION_PASSES
+    supportBounds, t, travelX, undefined, AREA_GENERALIZATION_RADIUS * AREA_GENERALIZATION_PASSES
   );
   const originalRain = grid.rain;
   const generalizedRain = fastBoxBlurScalarGrid(
@@ -248,78 +280,45 @@ export function renderPrecipitationAreas(ctx, viewport, t, travelX, fieldPixels,
     grid.height,
     AREA_GENERALIZATION_RADIUS,
     AREA_GENERALIZATION_PASSES,
-    getAreaGeneralizationBuffers(originalRain.length)
+    getAreaGeneralizationBuffers(originalRain.length, 'rain')
   );
-  const thresholds = remapCoverageThresholds(grid, originalRain, generalizedRain, supportBounds);
-  grid.rain = generalizedRain;
-  const bandPaths = buildPrecipitationContours(grid, travelX, thresholds);
+  const storm = fastBoxBlurScalarGrid(
+    grid.storm, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
+    getAreaGeneralizationBuffers(grid.storm.length, 'storm')
+  );
+  const hail = fastBoxBlurScalarGrid(
+    grid.hail, grid.width, grid.height, AREA_GENERALIZATION_RADIUS, AREA_GENERALIZATION_PASSES,
+    getAreaGeneralizationBuffers(grid.hail.length, 'hail')
+  );
+  const rainThresholds = remapCoverageThresholds(grid, originalRain, generalizedRain, supportBounds);
+  const stormThreshold = remapCoverageThreshold(grid, grid.storm, storm, supportBounds, STORM_PRESENCE_THRESHOLD);
+  const hailThreshold = remapCoverageThreshold(grid, grid.hail, hail, supportBounds, HAIL_PRESENCE_THRESHOLD);
+  const [rainPaths, [stormPath], [hailPath]] = buildContours(grid, [
+    { scalar: generalizedRain, thresholds: rainThresholds },
+    { scalar: storm, thresholds: [stormThreshold] },
+    { scalar: hail, thresholds: [hailThreshold] }
+  ], travelX);
   const worldScale = fieldPixels * viewport.zoom;
+
   ctx.save();
   ctx.translate(centerX - worldScale * 0.5, centerY - worldScale * 0.5);
   ctx.scale(worldScale, worldScale);
   for (let band = 0; band < AREA_PRECIPITATION_BANDS.length; band++) {
     ctx.fillStyle = AREA_PRECIPITATION_BANDS[band].color;
-    ctx.fill(bandPaths[band], 'evenodd');
+    ctx.fill(rainPaths[band], 'evenodd');
   }
+  ctx.globalAlpha = 0.45;
+  ctx.fillStyle = '#FF00FF';
+  ctx.fill(stormPath, 'evenodd');
+  ctx.globalAlpha = 0.35;
+  ctx.fillStyle = '#FFD400';
+  ctx.fill(hailPath, 'evenodd');
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 1.25 / worldScale;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#FF00FF';
+  ctx.stroke(stormPath);
+  ctx.strokeStyle = '#FFD400';
+  ctx.stroke(hailPath);
   ctx.restore();
-}
-
-export function renderAreaHazards(ctx, viewport, lod, t, travelX, fieldPixels, centerX, centerY) {
-  const step = Math.pow(2, lod) / BASE_GRID;
-  const spacing = step * fieldPixels * viewport.zoom;
-  const { minX, maxX, minY, maxY } = viewport.bounds;
-  const startI = Math.floor(minX / step) - GRID_OVERSCAN_CELLS;
-  const endI = Math.ceil(maxX / step) + GRID_OVERSCAN_CELLS;
-  const startJ = Math.floor(minY / step) - GRID_OVERSCAN_CELLS;
-  const endJ = Math.ceil(maxY / step) + GRID_OVERSCAN_CELLS;
-  const samples = [];
-
-  for (let j = startJ; j < endJ; j++) {
-    const y = (j + 0.5) * step;
-    for (let i = startI; i < endI; i++) {
-      const x = (i + 0.5) * step;
-      const value = sampleField(x, y, t, lod, travelX);
-      samples.push({
-        sx: centerX + (x - 0.5) * fieldPixels * viewport.zoom,
-        sy: centerY + (y - 0.5) * fieldPixels * viewport.zoom,
-        value,
-        hazardState: lod > 0
-          ? resolveLODGroupHazardState(x, y, t, lod, travelX)
-          : resolveHazardState(value)
-      });
-    }
-  }
-
-  drawHazardLayer(ctx, samples, spacing);
-}
-
-export function renderAreaHazardMorph(ctx, viewport, morph, t, travelX, fieldPixels, centerX, centerY) {
-  const fineStep = Math.pow(2, morph.fine) / BASE_GRID;
-  const coarseStep = fineStep * 2;
-  const fineSpacing = fineStep * fieldPixels * viewport.zoom;
-  const coarseSpacing = coarseStep * fieldPixels * viewport.zoom;
-  const { minX, maxX, minY, maxY } = viewport.bounds;
-  const startI = Math.floor(minX / fineStep) - GRID_OVERSCAN_CELLS * 2;
-  const endI = Math.ceil(maxX / fineStep) + GRID_OVERSCAN_CELLS * 2;
-  const startJ = Math.floor(minY / fineStep) - GRID_OVERSCAN_CELLS * 2;
-  const endJ = Math.ceil(maxY / fineStep) + GRID_OVERSCAN_CELLS * 2;
-  const samples = [];
-
-  for (let j = startJ; j < endJ; j++) {
-    const childY = (j + 0.5) * fineStep;
-    const parentY = (Math.floor(j / 2) + 0.5) * coarseStep;
-    for (let i = startI; i < endI; i++) {
-      const childX = (i + 0.5) * fineStep;
-      const parentX = (Math.floor(i / 2) + 0.5) * coarseStep;
-      samples.push({
-        childSx: centerX + (childX - 0.5) * fieldPixels * viewport.zoom,
-        childSy: centerY + (childY - 0.5) * fieldPixels * viewport.zoom,
-        parentSx: centerX + (parentX - 0.5) * fieldPixels * viewport.zoom,
-        parentSy: centerY + (parentY - 0.5) * fieldPixels * viewport.zoom,
-        childValue: sampleField(childX, childY, t, morph.fine, travelX)
-      });
-    }
-  }
-
-  drawHazardMorph(ctx, samples, coarseSpacing, fineSpacing, smoothstep(0, 1, clamp(morph.progress)));
 }

@@ -229,3 +229,47 @@ export function interpolateSplineScalarAt(source, grid, x, y) {
 
   return value;
 }
+
+// Samples multiple channels on the same spline lattice while sharing the
+// world-to-grid coordinate and B-spline weight calculation.
+export function interpolateSplineScalarsAt(sources, grid, x, y, target) {
+  const gridX = x / grid.step - 0.5 - grid.startI;
+  const gridY = y / grid.step - 0.5 - grid.startJ;
+  const baseX = Math.floor(gridX);
+  const baseY = Math.floor(gridY);
+  const tx = gridX - baseX;
+  const ty = gridY - baseY;
+  const tx2 = tx * tx;
+  const tx3 = tx2 * tx;
+  const ty2 = ty * ty;
+  const ty3 = ty2 * ty;
+  const x0 = (1 - tx) * (1 - tx) * (1 - tx) / 6;
+  const x1 = (3 * tx3 - 6 * tx2 + 4) / 6;
+  const x2 = (-3 * tx3 + 3 * tx2 + 3 * tx + 1) / 6;
+  const x3 = tx3 / 6;
+  const y0 = (1 - ty) * (1 - ty) * (1 - ty) / 6;
+  const y1 = (3 * ty3 - 6 * ty2 + 4) / 6;
+  const y2 = (-3 * ty3 + 3 * ty2 + 3 * ty + 1) / 6;
+  const y3 = ty3 / 6;
+  const sampleX0 = clamp(baseX - 1, 0, grid.width - 1);
+  const sampleX1 = clamp(baseX, 0, grid.width - 1);
+  const sampleX2 = clamp(baseX + 1, 0, grid.width - 1);
+  const sampleX3 = clamp(baseX + 2, 0, grid.width - 1);
+  const row0 = clamp(baseY - 1, 0, grid.height - 1) * grid.width;
+  const row1 = clamp(baseY, 0, grid.height - 1) * grid.width;
+  const row2 = clamp(baseY + 1, 0, grid.height - 1) * grid.width;
+  const row3 = clamp(baseY + 2, 0, grid.height - 1) * grid.width;
+
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+    const source = sources[sourceIndex];
+    const value0 = source[row0 + sampleX0] * x0 + source[row0 + sampleX1] * x1
+      + source[row0 + sampleX2] * x2 + source[row0 + sampleX3] * x3;
+    const value1 = source[row1 + sampleX0] * x0 + source[row1 + sampleX1] * x1
+      + source[row1 + sampleX2] * x2 + source[row1 + sampleX3] * x3;
+    const value2 = source[row2 + sampleX0] * x0 + source[row2 + sampleX1] * x1
+      + source[row2 + sampleX2] * x2 + source[row2 + sampleX3] * x3;
+    const value3 = source[row3 + sampleX0] * x0 + source[row3 + sampleX1] * x1
+      + source[row3 + sampleX2] * x2 + source[row3 + sampleX3] * x3;
+    target[sourceIndex] = value0 * y0 + value1 * y1 + value2 * y2 + value3 * y3;
+  }
+}
