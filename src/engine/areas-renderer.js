@@ -133,47 +133,119 @@ function appendContourCell(segments, column, row, columns, horizontalCount, x, y
 
   const right = x + step;
   const bottom = y + step;
-  const topX = x + (threshold - a) / (b - a) * step;
-  const rightY = y + (threshold - b) / (c - b) * step;
-  const bottomX = x + (threshold - d) / (c - d) * step;
-  const leftY = y + (threshold - a) / (d - a) * step;
   const top = row * (columns - 1) + column;
   const rightEdge = horizontalCount + row * columns + column + 1;
   const bottomEdge = (row + 1) * (columns - 1) + column;
   const left = horizontalCount + row * columns + column;
 
   switch (index) {
-    case 1: appendContourSegment(segments, top, left, topX, y, x, leftY); break;
-    case 2: appendContourSegment(segments, rightEdge, top, right, rightY, topX, y); break;
-    case 3: appendContourSegment(segments, rightEdge, left, right, rightY, x, leftY); break;
-    case 4: appendContourSegment(segments, bottomEdge, rightEdge, bottomX, bottom, right, rightY); break;
+    case 1: {
+      const topX = x + (threshold - a) / (b - a) * step;
+      const leftY = y + (threshold - a) / (d - a) * step;
+      appendContourSegment(segments, top, left, topX, y, x, leftY);
+      break;
+    }
+    case 2: {
+      const rightY = y + (threshold - b) / (c - b) * step;
+      const topX = x + (threshold - a) / (b - a) * step;
+      appendContourSegment(segments, rightEdge, top, right, rightY, topX, y);
+      break;
+    }
+    case 3: {
+      const rightY = y + (threshold - b) / (c - b) * step;
+      const leftY = y + (threshold - a) / (d - a) * step;
+      appendContourSegment(segments, rightEdge, left, right, rightY, x, leftY);
+      break;
+    }
+    case 4: {
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      const rightY = y + (threshold - b) / (c - b) * step;
+      appendContourSegment(segments, bottomEdge, rightEdge, bottomX, bottom, right, rightY);
+      break;
+    }
     case 5:
       // Resolve saddle cells from the scalar value at the cell center.
       if ((a + b + c + d) * 0.25 >= threshold) {
+        const topX = x + (threshold - a) / (b - a) * step;
+        const rightY = y + (threshold - b) / (c - b) * step;
+        const bottomX = x + (threshold - d) / (c - d) * step;
+        const leftY = y + (threshold - a) / (d - a) * step;
         appendContourSegment(segments, top, rightEdge, topX, y, right, rightY);
         appendContourSegment(segments, bottomEdge, left, bottomX, bottom, x, leftY);
       } else {
+        const topX = x + (threshold - a) / (b - a) * step;
+        const rightY = y + (threshold - b) / (c - b) * step;
+        const bottomX = x + (threshold - d) / (c - d) * step;
+        const leftY = y + (threshold - a) / (d - a) * step;
         appendContourSegment(segments, top, left, topX, y, x, leftY);
         appendContourSegment(segments, rightEdge, bottomEdge, right, rightY, bottomX, bottom);
       }
       break;
-    case 6: appendContourSegment(segments, bottomEdge, top, bottomX, bottom, topX, y); break;
-    case 7: appendContourSegment(segments, bottomEdge, left, bottomX, bottom, x, leftY); break;
-    case 8: appendContourSegment(segments, left, bottomEdge, x, leftY, bottomX, bottom); break;
-    case 9: appendContourSegment(segments, top, bottomEdge, topX, y, bottomX, bottom); break;
+    case 6: {
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      const topX = x + (threshold - a) / (b - a) * step;
+      appendContourSegment(segments, bottomEdge, top, bottomX, bottom, topX, y);
+      break;
+    }
+    case 7: {
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      const leftY = y + (threshold - a) / (d - a) * step;
+      appendContourSegment(segments, bottomEdge, left, bottomX, bottom, x, leftY);
+      break;
+    }
+    case 8: {
+      const leftY = y + (threshold - a) / (d - a) * step;
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      appendContourSegment(segments, left, bottomEdge, x, leftY, bottomX, bottom);
+      break;
+    }
+    case 9: {
+      const topX = x + (threshold - a) / (b - a) * step;
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      appendContourSegment(segments, top, bottomEdge, topX, y, bottomX, bottom);
+      break;
+    }
     case 10:
       if ((a + b + c + d) * 0.25 >= threshold) {
+        const topX = x + (threshold - a) / (b - a) * step;
+        const rightY = y + (threshold - b) / (c - b) * step;
+        const bottomX = x + (threshold - d) / (c - d) * step;
+        const leftY = y + (threshold - a) / (d - a) * step;
         appendContourSegment(segments, top, left, topX, y, x, leftY);
         appendContourSegment(segments, rightEdge, bottomEdge, right, rightY, bottomX, bottom);
       } else {
+        const topX = x + (threshold - a) / (b - a) * step;
+        const rightY = y + (threshold - b) / (c - b) * step;
+        const bottomX = x + (threshold - d) / (c - d) * step;
+        const leftY = y + (threshold - a) / (d - a) * step;
         appendContourSegment(segments, top, rightEdge, topX, y, right, rightY);
         appendContourSegment(segments, bottomEdge, left, bottomX, bottom, x, leftY);
       }
       break;
-    case 11: appendContourSegment(segments, rightEdge, bottomEdge, right, rightY, bottomX, bottom); break;
-    case 12: appendContourSegment(segments, left, rightEdge, x, leftY, right, rightY); break;
-    case 13: appendContourSegment(segments, top, rightEdge, topX, y, right, rightY); break;
-    case 14: appendContourSegment(segments, left, top, x, leftY, topX, y); break;
+    case 11: {
+      const rightY = y + (threshold - b) / (c - b) * step;
+      const bottomX = x + (threshold - d) / (c - d) * step;
+      appendContourSegment(segments, rightEdge, bottomEdge, right, rightY, bottomX, bottom);
+      break;
+    }
+    case 12: {
+      const leftY = y + (threshold - a) / (d - a) * step;
+      const rightY = y + (threshold - b) / (c - b) * step;
+      appendContourSegment(segments, left, rightEdge, x, leftY, right, rightY);
+      break;
+    }
+    case 13: {
+      const topX = x + (threshold - a) / (b - a) * step;
+      const rightY = y + (threshold - b) / (c - b) * step;
+      appendContourSegment(segments, top, rightEdge, topX, y, right, rightY);
+      break;
+    }
+    case 14: {
+      const leftY = y + (threshold - a) / (d - a) * step;
+      const topX = x + (threshold - a) / (b - a) * step;
+      appendContourSegment(segments, left, top, x, leftY, topX, y);
+      break;
+    }
   }
 }
 
@@ -268,11 +340,17 @@ function buildContours(grid, contourSets, travelX) {
         const b = topValues[set][column + 1];
         const c = bottomValues[set][column + 1];
         const d = bottomValues[set][column];
+        const minValue = Math.min(a, b, c, d);
+        const maxValue = Math.max(a, b, c, d);
+        const x = (startI + column) * contourStep;
+        const y = (startJ + row) * contourStep;
         for (let band = 0; band < thresholds.length; band++) {
+          const threshold = thresholds[band];
+          if (threshold > maxValue) break;
+          if (threshold <= minValue) continue;
           appendContourCell(
             bandSegments[set][band], column, row, columns, horizontalCount,
-            (startI + column) * contourStep, (startJ + row) * contourStep,
-            contourStep, a, b, c, d, thresholds[band]
+            x, y, contourStep, a, b, c, d, threshold
           );
         }
       }
