@@ -165,7 +165,7 @@ button:active { transform: translateY(1px); }
   top: 4px;
   bottom: 4px;
   left: 4px;
-  width: calc(25% - 4px);
+  width: calc((100% - 8px) / 4);
   border-radius: var(--control-inset-radius);
   background: var(--control-inset);
   box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
@@ -176,11 +176,11 @@ button:active { transform: translateY(1px); }
   transform: translateX(100%);
 }
 
-.render-mode[data-mode="areas"]::before {
+.render-mode[data-mode="blur"]::before {
   transform: translateX(200%);
 }
 
-.render-mode[data-mode="blur"]::before {
+.render-mode[data-mode="areas"]::before {
   transform: translateX(300%);
 }
 
