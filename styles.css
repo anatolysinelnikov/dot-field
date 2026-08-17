@@ -259,30 +259,6 @@ button:active { transform: translateY(1px); }
 }
 .render-mode button:active { transform: none; }
 
-.squares-tuning {
-  position: absolute;
-  left: 50%;
-  bottom: 138px;
-  width: min(300px, calc(100% - 28px));
-  transform: translateX(-50%);
-  display: grid;
-  gap: 5px;
-  padding: 8px 10px 7px;
-  border: var(--control-border);
-  border-radius: var(--control-radius);
-  background: var(--control-panel);
-  box-shadow: var(--control-shadow);
-  backdrop-filter: var(--control-backdrop);
-  color: #aeb9cb;
-  font-size: 11px;
-}
-
-.squares-tuning[hidden] { display: none; }
-.squares-tuning-control { display: grid; gap: 1px; }
-.squares-tuning span { display: flex; justify-content: space-between; }
-.squares-tuning output { color: #f1f5fb; font-variant-numeric: tabular-nums; }
-.squares-tuning input[type="range"] { height: 28px; }
-
 .time-control {
   min-width: 0;
   display: flex;
