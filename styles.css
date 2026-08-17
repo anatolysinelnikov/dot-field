@@ -138,12 +138,13 @@ button:active { transform: translateY(1px); }
 }
 
 .render-mode-controls {
-  --render-mode-segment-width: calc((100% - 8px) / 4);
+  --render-mode-width: min(408px, calc(100vw - 28px));
+  --render-mode-segment-width: calc((var(--render-mode-width) - 10px) / 4);
   position: absolute;
   left: 50%;
   bottom: 82px;
   transform: translateX(-50%);
-  width: min(408px, calc(100% - 28px));
+  width: var(--render-mode-width);
   display: flex;
   align-items: stretch;
   gap: 8px;
