@@ -307,9 +307,10 @@ export function renderAreas(ctx, viewport, t, travelX, fieldPixels, centerX, cen
     ctx.fillStyle = AREA_PRECIPITATION_BANDS[band].color;
     ctx.fill(rainPaths[band], 'evenodd');
   }
-  ctx.globalAlpha = 0.55;
+  ctx.globalAlpha = 0.45;
   ctx.fillStyle = '#FF00FF';
   ctx.fill(stormPath, 'evenodd');
+  ctx.globalAlpha = 0.35;
   ctx.fillStyle = '#FFD400';
   ctx.fill(hailPath, 'evenodd');
   ctx.globalAlpha = 1;
