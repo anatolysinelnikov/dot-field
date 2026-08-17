@@ -143,8 +143,8 @@ button:active { transform: translateY(1px); }
   bottom: 82px;
   transform: translateX(-50%);
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  width: min(326px, calc(100% - 28px));
+  grid-template-columns: repeat(4, 1fr);
+  width: min(408px, calc(100% - 28px));
   height: auto;
   margin: 0;
   padding: 4px;
@@ -165,26 +165,30 @@ button:active { transform: translateY(1px); }
   top: 4px;
   bottom: 4px;
   left: 4px;
-  width: calc(33.333% - 4px);
+  width: calc(25% - 4px);
   border-radius: var(--control-inset-radius);
   background: var(--control-inset);
   box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
   transition: transform 160ms ease;
 }
 
-.render-mode[data-mode="areas"]::before {
+.render-mode[data-mode="squares"]::before {
   transform: translateX(100%);
 }
 
-.render-mode[data-mode="blur"]::before {
+.render-mode[data-mode="areas"]::before {
   transform: translateX(200%);
+}
+
+.render-mode[data-mode="blur"]::before {
+  transform: translateX(300%);
 }
 
 .render-mode button {
   position: relative;
   display: block;
   height: auto;
-  padding: 10px 24px;
+  padding: 10px 12px;
   border: 0;
   border-radius: var(--control-inset-radius);
   background: transparent;

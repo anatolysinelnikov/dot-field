@@ -2,6 +2,7 @@ import { LOOP_SECONDS, LOD_MORPH_SECONDS, MAX_ZOOM, MIN_ZOOM } from './engine/co
 import { clamp, mix, smoothstep } from './engine/math.js';
 import { selectLOD } from './engine/lod.js';
 import { renderLOD, renderLODMorph } from './engine/dots-renderer.js';
+import { renderSquares, renderSquaresMorph } from './engine/squares-renderer.js';
 import { renderBlurredFields } from './engine/blur-renderer.js';
 import { renderAreaHazardMorph, renderAreaHazards, renderPrecipitationAreas } from './engine/areas-renderer.js';
 
@@ -76,6 +77,9 @@ function render(delta) {
     renderPrecipitationAreas(ctx, viewport, t, travelX, fieldPixels, centerX, centerY);
     if (state.lodMorph) renderAreaHazardMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
     else renderAreaHazards(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
+  } else if (state.renderMode === 'squares') {
+    if (state.lodMorph) renderSquaresMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
+    else renderSquares(ctx, viewport, state.lodLevel, t, travelX, fieldPixels, centerX, centerY);
   } else if (state.lodMorph) {
     renderLODMorph(ctx, viewport, state.lodMorph, t, travelX, fieldPixels, centerX, centerY);
   } else {
