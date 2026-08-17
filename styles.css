@@ -138,6 +138,7 @@ button:active { transform: translateY(1px); }
 }
 
 .render-mode-controls {
+  --render-mode-segment-width: calc((100% - 8px) / 4);
   position: absolute;
   left: 50%;
   bottom: 82px;
@@ -285,8 +286,8 @@ button:active { transform: translateY(1px); }
 .area-smooth[hidden] { display: none; }
 
 .area-smooth-content {
-  flex: 0 0 100px;
-  width: 100px;
+  flex: 0 0 var(--render-mode-segment-width);
+  width: var(--render-mode-segment-width);
   display: inline-flex;
   align-items: center;
   gap: 7px;
