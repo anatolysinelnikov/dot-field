@@ -4,7 +4,7 @@
 
 - Repository: `anatolysinelnikov/dot-field`
 - Analyzed branch: `main`
-- Analyzed commit: `f0b2287d2cf6f41ef017196b1c84246a0fa30869` (Areas performance merge)
+- Analyzed commit: `d4086d0fd927a143a738703db79e337db8103aa9`
 - Snapshot date: 2026-08-17
 
 This file is maintained architectural context, not implementation authority. For implementation-dependent work, inspect the current requested branch and relevant files first. If code and this document disagree, the code wins and this file should be updated.
