@@ -69,9 +69,7 @@ export function renderBlurredFields(ctx, precipitationCanvas, precipitationCtx, 
       let pixel = { r: 0, g: mix(144, 0, strong), b: 255, a: rainOpacity };
       const stormOpacity = visibleHazardOpacity(storm, 0.006, 0.03375, 0.075, 0.54, 0.76);
       const hailOpacity = visibleHazardOpacity(hail, 0.010, 0.0495, 0.11, 0.44);
-      // Fade storm continuously beneath hail so its magenta cannot tint the
-      // low-opacity yellow edge, while hail remains the topmost layer.
-      pixel = compositeField([255, 0, 255], stormOpacity * Math.pow(1 - hailOpacity, 2), pixel);
+      pixel = compositeField([255, 0, 255], stormOpacity, pixel);
       pixel = compositeField([255, 212, 0], hailOpacity, pixel);
       const pixelOffset = (py * rasterWidth + px) * 4;
       pixels[pixelOffset] = Math.round(pixel.r);
