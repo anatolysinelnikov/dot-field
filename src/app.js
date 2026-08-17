@@ -23,7 +23,7 @@ const squaresBoundaryRainBrightnessValue = document.querySelector('#squaresBound
 
 const state = { playing: true, time: 0, zoom: 1, width: 1, height: 1, dpr: 1,
   lastFrame: performance.now(), scrubbing: false, renderMode: 'dots', lodLevel: null,
-  desiredLOD: null, lodMorph: null, boundaryRainBrightness: 0.1 };
+  desiredLOD: null, lodMorph: null, boundaryRainBrightness: 0.02 };
 
 function resizeCanvas() {
   state.dpr = window.devicePixelRatio || 1;

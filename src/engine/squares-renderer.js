@@ -1,4 +1,4 @@
-import { BASE_GRID, GRID_OVERSCAN_CELLS, RAIN_BLUE, STRONG_PRECIPITATION_BLUE } from './config.js';
+import { BASE_GRID, GRID_OVERSCAN_CELLS, RAIN_BLUE, RAIN_MODERATE_MAX, STRONG_PRECIPITATION_BLUE } from './config.js';
 import { clamp, mix, smoothstep } from './math.js';
 import { resolveHazardState, resolveLODGroupHazardState, sampleField } from './lod.js';
 import { intensityToRadius, strongPrecipitationIntensity } from './dots-renderer.js';
@@ -31,9 +31,17 @@ function colorString(color) {
   return `rgb(${color[0]} ${color[1]} ${color[2]})`;
 }
 
-function precipitationColor(color, radius, boundaryRainBrightness) {
+function precipitationColor(color, radius, spacing, boundaryRainBrightness) {
   if (radius < MIN_VISIBLE_DOT_RADIUS_PX) return BACKGROUND;
-  const brightness = clamp(radius * boundaryRainBrightness / MIN_VISIBLE_DOT_RADIUS_PX, 0, 1);
+  // RAIN_MODERATE_MAX is Dots' established upper edge for light-blue rain;
+  // use its projected marker radius as the full-brightness anchor.
+  const fullBrightnessRadius = intensityToRadius(RAIN_MODERATE_MAX, spacing, 'rain');
+  const position = clamp(
+    (radius - MIN_VISIBLE_DOT_RADIUS_PX) / (fullBrightnessRadius - MIN_VISIBLE_DOT_RADIUS_PX),
+    0,
+    1
+  );
+  const brightness = mix(boundaryRainBrightness, 1, position);
   return mixColor(BACKGROUND, color, brightness);
 }
 
@@ -44,7 +52,7 @@ function rainColor(intensity, spacing, boundaryRainBrightness) {
   if (strongRadius >= MIN_VISIBLE_DOT_RADIUS_PX) {
     return STRONG_RAIN;
   }
-  return precipitationColor(RAIN, intensityToRadius(intensity, spacing, 'rain'), boundaryRainBrightness);
+  return precipitationColor(RAIN, intensityToRadius(intensity, spacing, 'rain'), spacing, boundaryRainBrightness);
 }
 
 function squareColor(value, hazardState, spacing, boundaryRainBrightness) {
