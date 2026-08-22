@@ -20,6 +20,25 @@ export function hazardStateAppearance(value, hazardState, spacing) {
   };
 }
 
+// Geographic Dots retains independent numeric storm and hail channels, so it
+// does not need the legacy Canvas appearance object or its discrete state.
+// This computes the same winning glyph/radius mapping in one strength pass.
+export function geographicHazardRadii(value, spacing, output) {
+  const hailStrength = intensityToStrength(value.hail, 'hail');
+  if (hailStrength > 0) {
+    output.stormRadius = 0;
+    output.hailRadius = spacing * mix(0.34, 1.0, Math.pow(hailStrength, 0.47));
+    return output;
+  }
+
+  const stormStrength = intensityToStrength(value.storm, 'storm');
+  output.hailRadius = 0;
+  output.stormRadius = stormStrength > 0
+    ? spacing * mix(0.30, 0.72, Math.pow(stormStrength, 0.47))
+    : 0;
+  return output;
+}
+
 export function appendHazardPath(ctx, x, y, radius, type) {
   if (type === 'hail') {
     for (let point = 0; point < 6; point++) {

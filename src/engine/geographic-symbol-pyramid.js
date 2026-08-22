@@ -1,8 +1,7 @@
 import { geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
 import { MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
 import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
-import { hazardStateAppearance } from './hazard-renderer.js';
-import { resolveHazardState } from './lod.js';
+import { geographicHazardRadii } from './hazard-renderer.js';
 
 export const REFERENCE_GRID_LEVEL = 13;
 export const STORM_INNER_RATIO = 0.38;
@@ -73,6 +72,7 @@ function evaluateDirect(level, frame, reusable) {
   const state = makeState(level.samples.length, reusable);
   const { rainRadius, strongRadius, stormRadius, hailRadius } = state;
   const value = { rain: 0, storm: 0, hail: 0 };
+  const hazard = { stormRadius: 0, hailRadius: 0 };
   const point = { x: 0, y: 0 };
   const { fieldPoints, samples } = level;
 
@@ -80,11 +80,11 @@ function evaluateDirect(level, frame, reusable) {
     point.x = fieldPoints[index * 2];
     point.y = fieldPoints[index * 2 + 1];
     geographicPreparedIntensityAt(frame, point, value);
-    const appearance = hazardStateAppearance(value, resolveHazardState(value), samples[index].spacing);
     rainRadius[index] = intensityToRadius(value.rain, samples[index].spacing, 'rain');
     strongRadius[index] = intensityToRadius(strongPrecipitationIntensity(value.rain), samples[index].spacing, 'rain');
-    stormRadius[index] = appearance.radius > 0 && appearance.type === 'storm' ? appearance.radius : 0;
-    hailRadius[index] = appearance.radius > 0 && appearance.type === 'hail' ? appearance.radius : 0;
+    geographicHazardRadii(value, samples[index].spacing, hazard);
+    stormRadius[index] = hazard.stormRadius;
+    hailRadius[index] = hazard.hailRadius;
   }
   return state;
 }

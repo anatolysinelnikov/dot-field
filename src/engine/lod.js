@@ -2,6 +2,10 @@ import { BASE_GRID, TARGET_SPACING } from './config.js';
 import { intensityAt } from './field.js';
 import { clamp, mix, smoothstep } from './math.js';
 
+// Shared immutable transfer floors. Keeping this object stable is important for
+// direct geographic evaluation, which applies the transfer at every sample.
+export const INTENSITY_THRESHOLDS = Object.freeze({ rain: 0.045, storm: 0.075, hail: 0.11 });
+
 export function selectLOD(zoom, fieldPixels) {
   const baseCellPixels = fieldPixels * zoom / BASE_GRID;
   const continuous = Math.log2(TARGET_SPACING / Math.max(baseCellPixels, 0.001));
@@ -40,7 +44,7 @@ export function sampleField(x, y, t, lod, travelX) {
   };
 }
 
-export function intensityToStrength(intensity, layer, thresholds = { rain: 0.045, storm: 0.075, hail: 0.11 }) {
+export function intensityToStrength(intensity, layer, thresholds = INTENSITY_THRESHOLDS) {
   return smoothstep(thresholds[layer] * 0.45, 0.93, intensity);
 }
 

@@ -1,12 +1,11 @@
 import { RAIN_MODERATE_MAX } from './config.js';
-import { intensityToStrength } from './lod.js';
+import { INTENSITY_THRESHOLDS, intensityToStrength } from './lod.js';
 import { clamp } from './math.js';
 
 export function intensityToRadius(intensity, spacing, layer) {
   // Adjust thresholds and radius mapping here. Rain intentionally overlaps most.
-  const thresholds = { rain: 0.045, storm: 0.075, hail: 0.11 };
   // Ease through the visibility floor instead of switching a dot on abruptly.
-  const normalized = intensityToStrength(intensity, layer, thresholds);
+  const normalized = intensityToStrength(intensity, layer, INTENSITY_THRESHOLDS);
   const overlap = layer === 'rain' ? 0.86 : layer === 'storm' ? 0.72 : 0.59;
   return spacing * overlap * Math.pow(normalized, layer === 'rain' ? 0.47 : 0.56);
 }
