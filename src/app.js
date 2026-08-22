@@ -189,14 +189,7 @@ function initializeWeatherLayer() {
   const waterShadowLayer = styleLayers.find((layer) => layer.id === MAPTILER_WATER_SHADOW_ID);
   if (waterShadowLayer && map.getLayer(MAPTILER_WATER_SHADOW_ID)) {
     const nativeOpacity = waterShadowLayer.paint?.['fill-opacity'];
-    const attenuatedOpacity = typeof nativeOpacity === 'number'
-      ? nativeOpacity * 0.25
-      : Array.isArray(nativeOpacity)
-        ? (nativeOpacity[0] === '*' && nativeOpacity[nativeOpacity.length - 1] === 0.25
-          ? nativeOpacity
-          : ['*', nativeOpacity, 0.25])
-        : 0.25;
-    map.setPaintProperty(MAPTILER_WATER_SHADOW_ID, 'fill-opacity', attenuatedOpacity);
+    map.setPaintProperty(MAPTILER_WATER_SHADOW_ID, 'fill-opacity', nativeOpacity ?? 1);
   }
 
   const upperContextIds = new Set([
