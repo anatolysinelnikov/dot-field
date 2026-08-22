@@ -43,6 +43,7 @@ const WEATHER_CONTEXT_RAIL_IDS = [
 const WEATHER_CONTEXT_MAJOR_SUPPORT_IDS = ['highway_major_subtle'];
 const WEATHER_CONTEXT_UPPER_LINE_FACTORS = [
   ['highway_major_inner', 0.45],
+  ['highway_major_subtle', 0.3],
   ['highway_motorway_casing', 0.7],
   ['highway_motorway_inner', 0.7],
   ['highway_motorway_subtle', 0.7]
@@ -177,7 +178,9 @@ function initializeWeatherLayer() {
     if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
   }
   for (const layerId of WEATHER_CONTEXT_MAJOR_SUPPORT_IDS) {
-    if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
+    if (!map.getLayer(layerId)) continue;
+    const beforeId = map.getLayer('highway_major_inner') ? 'highway_major_inner' : weatherLayer.id;
+    map.moveLayer(layerId, beforeId);
   }
   if (state.mapReady) return;
   state.mapReady = true;
