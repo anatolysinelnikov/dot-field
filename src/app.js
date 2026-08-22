@@ -1,5 +1,5 @@
-import { LOOP_SECONDS } from './engine/config.js';
-import { clamp } from './engine/math.js';
+import { LOD_MORPH_SECONDS, LOOP_SECONDS } from './engine/config.js';
+import { clamp, smoothstep } from './engine/math.js';
 import { WEATHER_REGION } from './engine/geography.js';
 import { selectMercatorGridSamples, zoomToMercatorGridLevel } from './engine/geographic-lod.js';
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
@@ -34,6 +34,8 @@ const state = {
   scrubbing: false,
   samples: [],
   lod: { level: null, leafCount: 0 },
+  desiredLevel: null,
+  lodTransition: null,
   logicalSamplingZoom: WEATHER_REGION.initialZoom,
   camera: null,
   projectionSwitching: false,
@@ -81,15 +83,68 @@ function updateLogicalSamplingZoom() {
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
 }
 
-function rebuildSamples(level) {
-  if (!state.mapReady) return;
-  if (state.lod.level === level) return;
-  const selection = selectMercatorGridSamples(level);
-  state.lod = { level: selection.level };
-  state.samples = selection.samples;
-  weatherLayer.setSamples(state.samples, state.time / LOOP_SECONDS);
+function commitSamples(level, samples) {
+  state.lod = { level };
+  state.samples = samples;
+  weatherLayer.setSamples(samples, state.time / LOOP_SECONDS);
   state.lastWeatherAt = performance.now();
   updateReadout();
+}
+
+function startAdjacentTransition(level, now) {
+  const direction = Math.sign(level - state.lod.level);
+  const toLevel = state.lod.level + direction;
+  const toSamples = selectMercatorGridSamples(toLevel).samples;
+  state.lodTransition = {
+    fromLevel: state.lod.level,
+    toLevel,
+    fromSamples: state.samples,
+    toSamples,
+    start: now,
+    rawProgress: 0
+  };
+  weatherLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
+}
+
+function rebuildSamples(level, now = performance.now()) {
+  if (!state.mapReady) return;
+  state.desiredLevel = level;
+  if (state.lod.level === null) {
+    const selection = selectMercatorGridSamples(level);
+    commitSamples(selection.level, selection.samples);
+    return;
+  }
+  const transition = state.lodTransition;
+  if (!transition) {
+    if (state.lod.level !== level) startAdjacentTransition(level, now);
+    return;
+  }
+  const direction = Math.sign(transition.toLevel - transition.fromLevel);
+  if (level === transition.toLevel) return;
+  if (level === transition.fromLevel || Math.sign(level - transition.toLevel) !== direction) {
+    const rawProgress = 1 - transition.rawProgress;
+    state.lodTransition = {
+      fromLevel: transition.toLevel,
+      toLevel: transition.fromLevel,
+      fromSamples: transition.toSamples,
+      toSamples: transition.fromSamples,
+      start: now - rawProgress * LOD_MORPH_SECONDS * 1000,
+      rawProgress
+    };
+    weatherLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
+  }
+}
+
+function updateLODTransition(now) {
+  const transition = state.lodTransition;
+  if (!transition) return;
+  const rawProgress = clamp((now - transition.start) / (LOD_MORPH_SECONDS * 1000), 0, 1);
+  transition.rawProgress = rawProgress;
+  weatherLayer.setTransitionProgress(smoothstep(0, 1, rawProgress));
+  if (rawProgress < 1) return;
+  state.lodTransition = null;
+  commitSamples(transition.toLevel, transition.toSamples);
+  if (state.desiredLevel !== state.lod.level) startAdjacentTransition(state.desiredLevel, now);
 }
 
 function queueWeatherUpdate() {
@@ -180,6 +235,7 @@ function frame(now) {
     // weather-value buffer rebuilds to 10 Hz keeps the topology untouched.
     if (state.mapReady && now - state.lastWeatherAt >= 100) queueWeatherUpdate();
   }
+  updateLODTransition(now);
   if (!state.scrubbing) timeSlider.value = String(Math.round(state.time / LOOP_SECONDS * 1000));
   requestAnimationFrame(frame);
 }

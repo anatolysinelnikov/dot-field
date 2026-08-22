@@ -85,9 +85,9 @@ Mercator render sampling is intentionally not equal-area on the Earth surface. I
 
 ## Uniform zoom LOD — `src/engine/geographic-lod.js`
 
-`zoomToMercatorGridLevel` selects one discrete level for the whole active weather region. It rounds `logical zoom + log2(512 / 9)`, clamped to levels 10 through 13: MapLibre's world is 512 CSS pixels wide at zoom zero and the target nominal neighboring-sample spacing is 9 CSS pixels. The mapping is centralized, deterministic, and independent of screen position, viewport, bearing, pan, projection, globe horizon, and `map.project`.
+`zoomToMercatorGridLevel` selects one discrete level for the whole active weather region. It rounds `logical zoom + log2(512 / 9)`, clamped to levels 8 through 15: MapLibre's world is 512 CSS pixels wide at zoom zero and the target nominal neighboring-sample spacing is 9 CSS pixels. The mapping is centralized, deterministic, and independent of screen position, viewport, bearing, pan, projection, globe horizon, and `map.project`.
 
-The initial logical zoom is 6.2 and selects level 12. Near London, L10/L11/L12/L13 are approximately 24/12/6/3 km between grid vertices. About 4 km is the nominal future provider resolution, so L13 is the maximum meaningful visualization and analysis level; further visual zoom makes those samples larger without inventing sub-provider detail. The Mercator lattice remains independent of a provider grid.
+The initial logical zoom is 6.2 and selects level 12. Near London, L8 through L15 are approximately 97, 49, 24, 12, 6, 3, 1.5, and 0.75 km between grid vertices. About 4 km is the nominal future provider resolution, so L13 is native hazard-analysis detail. L14 and L15 are finer deterministic render/reconstruction sampling of an interpolated field, not additional measured provider observations. The Mercator lattice remains independent of a provider grid.
 
 The active sample set and count remain unchanged when the same logical zoom map is panned, rotated, resized, or switched between Globe and Mercator. Zooming across a discrete threshold replaces the active level with the deterministically nested coarser or finer grid.
 
@@ -116,7 +116,9 @@ The current Dots mapping remains sourced from `precipitation-mapping.js`, `lod.j
 - storm and hail retain their star/hexagon appearances;
 - marker radius is computed from intensity relative to the active Mercator grid step, so symbol and sampling geometry pass through the same projection together.
 
-Hazards use a fixed native analysis lattice at L13, independently of the active rain display level. The cached L13 probes are assigned to their nearest active dyadic parent using canonical integer Mercator coordinates, with support-edge clamping. Per active sample, visible hail uses the maximum native hail value; otherwise visible storm uses the maximum native storm value. Hail retains priority over storm, so a localized hail cell cannot be averaged away or disappear only because display LOD is reduced.
+Hazards use a fixed native analysis lattice at L13, independently of the active rain display level. Every visible native probe first resolves its normal native glyph type and radius. Below L13, cached probes are assigned to their nearest active dyadic parent using canonical integer Mercator coordinates, with support-edge clamping. A parent retains hail priority; its radius is `sqrt(sum(native hail radius²))`, or the equivalent storm-only calculation when no hail is present. This preserves native coverage instead of inflating an isolated hazard by coarse display spacing. At L13 hazards render natively; at L14/L15 they retain those same L13 positions and radii.
+
+Adjacent display levels morph over `LOD_MORPH_SECONDS` (currently 0.2 seconds). Inherited Mercator samples remain fixed and interpolate their analytic rain radii; fine-only samples grow or shrink at their final deterministic positions. Correct hazard endpoint geometries crossfade briefly. The app queues adjacent transitions, and reverses an active transition when zoom direction reverses, so pan, Globe latitude compensation, resize, and projection changes cannot initiate a morph.
 
 ## Legacy modules
 

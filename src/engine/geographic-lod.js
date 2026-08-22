@@ -5,8 +5,8 @@ import { clamp } from './math.js';
 // 1 / 2^level therefore has this nominal screen spacing at a given zoom.
 export const MERCATOR_WORLD_SIZE = 512;
 export const TARGET_GRID_SPACING = 9;
-export const MIN_GRID_LEVEL = 10;
-export const MAX_GRID_LEVEL = 13;
+export const MIN_GRID_LEVEL = 8;
+export const MAX_GRID_LEVEL = 15;
 export const HAZARD_ANALYSIS_LEVEL = 13;
 
 const MAX_GRID_SIZE = 2 ** MAX_GRID_LEVEL;
@@ -95,7 +95,9 @@ export function groupNativeSamplesByDisplaySample(displaySamples, nativeSamples)
   const displayLevel = displaySamples[0].level;
   const nativeLevel = nativeSamples[0].level;
   if (nativeLevel < displayLevel) throw new Error('Native hazard level must not be coarser than the display level.');
-  const scale = 2 ** (nativeLevel - displayLevel);
+  // Canonical coordinates are expressed at MAX_GRID_LEVEL, so the nearest
+  // parent must be aligned to the active display level's canonical step.
+  const scale = 2 ** (MAX_GRID_LEVEL - displayLevel);
   const ids = new Map(displaySamples.map((sample) => [sample.id, sample]));
   const minX = Math.min(...displaySamples.map((sample) => sample.canonicalX));
   const maxX = Math.max(...displaySamples.map((sample) => sample.canonicalX));
