@@ -51,7 +51,7 @@ app.js ----------------------> MapLibre GL JS
 
 `app.js` owns UI state, play/pause, timeline scrubbing, projection buttons, MapLibre construction, logical sampling-zoom selection, weather refresh scheduling, and readouts. It does not implement camera controls; MapLibre owns those.
 
-The map loads the MapTiler Dataviz Dark MapLibre style (`dataviz-v4-dark`) from the Maps API using the local-only `config.local.json` key; the normal MapLibre attribution control and a visible MapTiler logo remain enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context. The custom weather layer is attached from the style-ready lifecycle (`style.load`) with an idempotent `getLayer` check. The MapTiler-specific context step keeps roads and minor symbols below weather while moving the verified geographic upper context above it: major settlement labels, country/first-order boundaries, river lines, and a subtle outline derived from the native polygon water layer. Water fills remain below weather, and unavailable optional context layers are skipped without preventing weather initialization. MapLibre error events remain visible in the console without exposing the authenticated style URL.
+The map loads the MapTiler Dataviz Dark MapLibre style (`dataviz-v4-dark`) from the Maps API using the local-only `config.local.json` key; the normal expanded MapLibre attribution control and a visible MapTiler logo remain enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context; camera zoom is constrained to raw MapLibre zoom 1 or higher. The custom weather layer is attached from the style-ready lifecycle (`style.load`) with an idempotent `getLayer` check. The MapTiler-specific context step keeps roads and minor symbols below weather while moving the verified geographic upper context above it: major settlement labels, country/first-order boundaries, river lines, the native water-shadow layer, a subtle water wash derived from the native polygon water layer, and its boundary outline. The original water fill remains below weather, and unavailable optional context layers are skipped without preventing weather initialization. MapLibre error events remain visible in the console without exposing the authenticated style URL.
 
 The initial projection is Globe. The explicit UI switches between `globe` and `mercator` through `map.setProjection`. The center/zoom are retained by MapLibre, and no weather/sample data is regenerated for a projection switch. Projection changes temporarily suppress sampling-zoom deltas and rebase the raw camera baseline after two render frames, so the visual A/B does not change LOD.
 
@@ -64,7 +64,7 @@ MapLibre raw zoom is not used directly for weather LOD. `app.js` maintains an ap
 `WEATHER_REGION` centralizes the test anchor, scale, trajectory, and normalized synthetic support:
 
 ```text
-center: [-0.1, 51.5]         # London
+center: [30.3158, 59.9391]    # Saint Petersburg
 longitudeSpan: 1.8 degrees
 latitudeSpan: 1.2 degrees
 trajectory: x = 0.33..0.67

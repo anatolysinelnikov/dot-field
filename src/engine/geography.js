@@ -4,7 +4,7 @@ import { mix, smoothstep } from './math.js';
 // Keep the geographic experiment anchor in one place. Changing this object is
 // sufficient to move the synthetic system to another test region.
 export const WEATHER_REGION = Object.freeze({
-  center: [-0.1, 51.5],
+  center: [30.3158, 59.9391],
   longitudeSpan: 1.8,
   latitudeSpan: 1.2,
   trajectory: Object.freeze({ startX: 0.33, endX: 0.67 }),
