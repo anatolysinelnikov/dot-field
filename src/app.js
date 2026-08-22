@@ -13,6 +13,34 @@ const WEATHER_CONTEXT_BEFORE_IDS = [
   'boundary_state',
   'place_other'
 ];
+const WEATHER_CONTEXT_TEXT_IDS = [
+  'highway_name_other',
+  'highway_name_motorway',
+  'place_other',
+  'place_suburb',
+  'place_village',
+  'place_town',
+  'place_city',
+  'place_city_large',
+  'place_state',
+  'place_country_other',
+  'place_country_minor',
+  'place_country_major'
+];
+const WEATHER_CONTEXT_LINE_FACTORS = [
+  ['highway_major_casing', 0.5],
+  ['highway_major_inner', 0.5],
+  ['highway_major_subtle', 0.45],
+  ['highway_motorway_casing', 0.5],
+  ['highway_motorway_inner', 0.5],
+  ['highway_motorway_subtle', 0.45],
+  ['railway_transit', 0.45],
+  ['railway_transit_dashline', 0.45],
+  ['railway_minor', 0.4],
+  ['railway_minor_dashline', 0.4],
+  ['railway', 0.45],
+  ['railway_dashline', 0.45]
+];
 const MAX_SAMPLING_LATITUDE = 85;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
@@ -52,6 +80,7 @@ const state = {
 };
 const weatherLayer = new GeographicDotsLayer();
 let lastMapErrorSignature = '';
+let contextStyleObject = null;
 
 function updateReadout() {
   zoomLabel.textContent = state.logicalSamplingZoom.toFixed(2);
@@ -98,7 +127,30 @@ function commitSamples(level, samples) {
   updateReadout();
 }
 
+function attenuatePaintOpacity(currentOpacity, factor) {
+  if (typeof currentOpacity === 'number') return currentOpacity * factor;
+  if (Array.isArray(currentOpacity)) return ['*', currentOpacity, factor];
+  return factor;
+}
+
+function tuneWeatherContext(style) {
+  if (style === contextStyleObject) return;
+  contextStyleObject = style;
+  for (const layerId of WEATHER_CONTEXT_TEXT_IDS) {
+    if (!map.getLayer(layerId)) continue;
+    map.setPaintProperty(layerId, 'text-halo-color', 'rgba(0, 0, 0, 0.9)');
+    map.setPaintProperty(layerId, 'text-halo-width', 1.5);
+    map.setPaintProperty(layerId, 'text-halo-blur', 0.2);
+  }
+  for (const [layerId, factor] of WEATHER_CONTEXT_LINE_FACTORS) {
+    if (!map.getLayer(layerId)) continue;
+    const currentOpacity = map.getPaintProperty(layerId, 'line-opacity');
+    map.setPaintProperty(layerId, 'line-opacity', attenuatePaintOpacity(currentOpacity, factor));
+  }
+}
+
 function initializeWeatherLayer() {
+  tuneWeatherContext(map.getStyle());
   const layerAlreadyPresent = Boolean(map.getLayer(weatherLayer.id));
   if (!layerAlreadyPresent) {
     const beforeId = WEATHER_CONTEXT_BEFORE_IDS.find((layerId) => map.getLayer(layerId));
