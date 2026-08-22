@@ -3,12 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Fixed-grid weather field</title>
+  <title>Geographic weather dots</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <main class="playground">
-    <canvas id="field" aria-label="Animated fixed-grid rain, thunderstorm, and hail intensity field"></canvas>
+    <div id="map" aria-label="Interactive geographic weather map"></div>
 
     <div class="legend" aria-hidden="true">
       <span class="rain"><i class="rain-base"></i><i class="rain-strong"></i>Rain</span>
@@ -16,32 +17,15 @@
       <span class="hail"><i></i>Hail</span>
     </div>
 
-    <div class="render-mode-controls">
-      <div id="renderModeSelector" class="render-mode" role="radiogroup" aria-label="Weather rendering mode" data-mode="dots">
-        <button type="button" role="radio" aria-checked="true" data-render-mode="dots">Dots</button>
-        <button type="button" role="radio" aria-checked="false" data-render-mode="squares">Squares</button>
-        <button type="button" role="radio" aria-checked="false" data-render-mode="blur">Blur</button>
-        <button type="button" role="radio" aria-checked="false" data-render-mode="areas">Areas</button>
-      </div>
-      <label id="areaSmoothControl" class="area-smooth" hidden>
-        <span class="area-smooth-content">
-          <input id="areaSmooth" type="checkbox">
-          <span>Smooth</span>
-        </span>
-      </label>
+    <div id="projectionSelector" class="projection-control" role="radiogroup" aria-label="Map projection" data-projection="globe">
+      <button type="button" role="radio" aria-checked="true" data-projection="globe">Globe</button>
+      <button type="button" role="radio" aria-checked="false" data-projection="mercator">Mercator</button>
     </div>
 
     <div class="readout" aria-live="polite">
-      <span>zoom <b id="zoomLabel">1.00×</b></span>
-      <span>LOD <b id="lodLabel">0</b></span>
-    </div>
-
-    <div class="zoom-controls" role="group" aria-label="Zoom controls">
-      <button id="resetZoom" class="zoom-reset" type="button" aria-label="Reset zoom" hidden>↺</button>
-      <div class="zoom-stepper">
-        <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
-        <button id="zoomOut" type="button" aria-label="Zoom out">−</button>
-      </div>
+      <span>zoom <b id="zoomLabel">–</b></span>
+      <span>LOD <b id="lodLabel">–</b></span>
+      <span>samples <b id="sampleLabel">0</b></span>
     </div>
 
     <section class="controls" aria-label="Playback and timeline controls">
@@ -52,6 +36,7 @@
     </section>
   </main>
 
+  <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script type="module" src="./src/app.js"></script>
 </body>
 </html>
