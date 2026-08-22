@@ -7,7 +7,6 @@ export const MERCATOR_WORLD_SIZE = 512;
 export const TARGET_GRID_SPACING = 9;
 export const MIN_GRID_LEVEL = 8;
 export const MAX_GRID_LEVEL = 15;
-export const HAZARD_ANALYSIS_LEVEL = 13;
 
 const MAX_GRID_SIZE = 2 ** MAX_GRID_LEVEL;
 const MAX_MERCATOR_LATITUDE = 85.05112878;
@@ -85,34 +84,4 @@ export function selectMercatorGridSamples(level) {
     }
   }
   return { samples, level: boundedLevel, gridSize, spacing: step };
-}
-
-// Map native grid probes to the nearest active display vertex using canonical
-// integer coordinates. Clamping at the rectangular support edge means every
-// native probe remains represented when a display level becomes coarser.
-export function groupNativeSamplesByDisplaySample(displaySamples, nativeSamples) {
-  if (!displaySamples.length || !nativeSamples.length) return new Map();
-  const displayLevel = displaySamples[0].level;
-  const nativeLevel = nativeSamples[0].level;
-  if (nativeLevel < displayLevel) throw new Error('Native hazard level must not be coarser than the display level.');
-  // Canonical coordinates are expressed at MAX_GRID_LEVEL, so the nearest
-  // parent must be aligned to the active display level's canonical step.
-  const scale = 2 ** (MAX_GRID_LEVEL - displayLevel);
-  const ids = new Map(displaySamples.map((sample) => [sample.id, sample]));
-  const minX = Math.min(...displaySamples.map((sample) => sample.canonicalX));
-  const maxX = Math.max(...displaySamples.map((sample) => sample.canonicalX));
-  const minY = Math.min(...displaySamples.map((sample) => sample.canonicalY));
-  const maxY = Math.max(...displaySamples.map((sample) => sample.canonicalY));
-  const groups = new Map();
-
-  for (const probe of nativeSamples) {
-    const canonicalX = clamp(Math.round(probe.canonicalX / scale) * scale, minX, maxX);
-    const canonicalY = clamp(Math.round(probe.canonicalY / scale) * scale, minY, maxY);
-    const parent = ids.get(`${canonicalX}:${canonicalY}`);
-    if (!parent) throw new Error('Native hazard probe could not be assigned to the active display grid.');
-    const group = groups.get(parent.id) || [];
-    group.push(probe);
-    groups.set(parent.id, group);
-  }
-  return groups;
 }

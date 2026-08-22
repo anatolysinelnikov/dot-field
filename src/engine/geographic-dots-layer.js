@@ -1,12 +1,7 @@
-import { geographicIntensityAt } from './geography.js';
-import { HAZARD_ANALYSIS_LEVEL, groupNativeSamplesByDisplaySample, selectMercatorGridSamples } from './geographic-lod.js';
-import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
-import { hazardStateAppearance } from './hazard-renderer.js';
-import { resolveHazardState } from './lod.js';
+import { GeographicSymbolPyramid, STORM_INNER_RATIO } from './geographic-symbol-pyramid.js';
 
 const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1], storm: [1, 0, 1, 1], hail: [1, 0.831, 0, 1] };
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
-const HAZARD_PROBES = selectMercatorGridSamples(HAZARD_ANALYSIS_LEVEL).samples;
 
 function circularPoints(count) {
   return Array.from({ length: count }, (_, index) => {
@@ -16,7 +11,7 @@ function circularPoints(count) {
 }
 const HAIL = circularPoints(6);
 const STORM = circularPoints(8).map((point, index) => {
-  const scale = index % 2 === 0 ? 1 : 0.38;
+  const scale = index % 2 === 0 ? 1 : STORM_INNER_RATIO;
   return [point[0] * scale, point[1] * scale];
 });
 
@@ -76,49 +71,22 @@ function setProjection(gl, program, projection) {
   if (transition) gl.uniform1f(transition, projection.projectionTransition);
 }
 
-function circleRadii(samples, time) {
+function circleRadii(symbols) {
   const result = { rain: new Map(), strong: new Map() };
-  for (const sample of samples) {
-    const value = geographicIntensityAt(...sample.lngLat, time);
-    const rain = intensityToRadius(value.rain, sample.spacing, 'rain');
-    const strong = intensityToRadius(strongPrecipitationIntensity(value.rain), sample.spacing, 'rain');
-    if (rain > 0) result.rain.set(sample.id, { sample, radius: rain });
-    if (strong > 0) result.strong.set(sample.id, { sample, radius: strong });
+  for (const symbol of symbols.values()) {
+    if (symbol.rainRadius > 0) result.rain.set(symbol.id, { sample: symbol.sample, radius: symbol.rainRadius });
+    if (symbol.strongRadius > 0) result.strong.set(symbol.id, { sample: symbol.sample, radius: symbol.strongRadius });
   }
   return result;
 }
 
-function nativeHazards(time) {
-  const result = [];
-  for (const probe of HAZARD_PROBES) {
-    const value = geographicIntensityAt(...probe.lngLat, time);
-    const appearance = hazardStateAppearance(value, resolveHazardState(value), probe.spacing);
-    if (appearance.radius > 0) result.push({ id: probe.id, sample: probe, type: appearance.type, radius: appearance.radius });
-  }
-  return result;
-}
-
-function hazardRepresentations(samples, time) {
-  if (samples[0]?.level >= HAZARD_ANALYSIS_LEVEL) return nativeHazards(time);
-  const result = [];
-  const samplesById = new Map(samples.map((sample) => [sample.id, sample]));
-  for (const [id, probes] of groupNativeSamplesByDisplaySample(samples, HAZARD_PROBES)) {
-    const hail = [];
-    const storm = [];
-    for (const probe of probes) {
-      const value = geographicIntensityAt(...probe.lngLat, time);
-      const appearance = hazardStateAppearance(value, resolveHazardState(value), probe.spacing);
-      if (appearance.radius > 0) (appearance.type === 'hail' ? hail : storm).push(appearance.radius);
-    }
-    const radii = hail.length ? hail : storm;
-    if (!radii.length) continue;
-    result.push({ id, sample: samplesById.get(id), type: hail.length ? 'hail' : 'storm', radius: Math.hypot(...radii) });
-  }
-  return result;
-}
-
-function makeEndpoint(samples, time) {
-  return { circles: circleRadii(samples, time), hazards: hazardRepresentations(samples, time) };
+function makeEndpoint(symbols) {
+  return {
+    circles: circleRadii(symbols),
+    hazards: [...symbols.values()].filter((symbol) => symbol.hazardType).map((symbol) => ({
+      id: symbol.id, sample: symbol.sample, type: symbol.hazardType, radius: symbol.hazardRadius
+    }))
+  };
 }
 
 function joinCircles(from, to) {
@@ -149,6 +117,8 @@ export class GeographicDotsLayer {
     this.instances = { rain: new Float32Array(), strong: new Float32Array() };
     this.geometry = { storm: { from: new Float32Array(), to: new Float32Array() }, hail: { from: new Float32Array(), to: new Float32Array() } };
     this.counts = { rain: 0, strong: 0, storm: { from: 0, to: 0 }, hail: { from: 0, to: 0 } };
+    this.pyramid = new GeographicSymbolPyramid();
+    this.representations = new Map();
     this.samples = [];
     this.transition = null;
     this.transitionProgress = 1;
@@ -173,14 +143,20 @@ export class GeographicDotsLayer {
   setSamples(samples, time) {
     this.samples = samples;
     this.transition = null;
-    const data = makeEndpoint(samples, time);
+    this.representations = this.pyramid.evaluate(time);
+    const data = makeEndpoint(this.representations.get(samples[0].level));
     this.setEndpointVisual(data, data, 1);
   }
 
   setTransition(fromSamples, toSamples, time, progress = 0) {
     this.samples = toSamples;
     this.transition = { fromSamples, toSamples };
-    this.setEndpointVisual(makeEndpoint(fromSamples, time), makeEndpoint(toSamples, time), progress);
+    this.representations = this.pyramid.evaluate(time);
+    this.setEndpointVisual(
+      makeEndpoint(this.representations.get(fromSamples[0].level)),
+      makeEndpoint(this.representations.get(toSamples[0].level)),
+      progress
+    );
   }
 
   setTransitionProgress(progress) {
