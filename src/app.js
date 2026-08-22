@@ -40,13 +40,13 @@ const WEATHER_CONTEXT_RAIL_IDS = [
   'railway',
   'railway_dashline'
 ];
+const WEATHER_CONTEXT_BELOW_WEATHER_IDS = ['highway_motorway_subtle'];
 const WEATHER_CONTEXT_MAJOR_SUPPORT_IDS = ['highway_major_subtle'];
 const WEATHER_CONTEXT_UPPER_LINE_FACTORS = [
   ['highway_major_inner', 0.45],
   ['highway_major_subtle', 0.3],
   ['highway_motorway_casing', 0.7],
-  ['highway_motorway_inner', 0.7],
-  ['highway_motorway_subtle', 0.7]
+  ['highway_motorway_inner', 0.7]
 ];
 const PLACE_LABEL_COLOR = '#AAAAAA';
 const ROAD_LABEL_COLOR = '#AAAAAA';
@@ -54,6 +54,7 @@ const MAX_SAMPLING_LATITUDE = 85;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
+const mapZoomLabel = document.querySelector('#mapZoomLabel');
 const lodLabel = document.querySelector('#lodLabel');
 const sampleLabel = document.querySelector('#sampleLabel');
 const projectionSelector = document.querySelector('#projectionSelector');
@@ -93,6 +94,7 @@ let contextStyleObject = null;
 
 function updateReadout() {
   zoomLabel.textContent = state.logicalSamplingZoom.toFixed(2);
+  mapZoomLabel.textContent = map.getZoom().toFixed(2);
   lodLabel.textContent = state.lod.level === null ? '–' : String(state.lod.level);
   sampleLabel.textContent = state.samples.length.toLocaleString();
 }
@@ -160,6 +162,18 @@ function tuneWeatherContext(style) {
     if (!map.getLayer(layerId)) continue;
     map.setPaintProperty(layerId, 'text-color', ROAD_LABEL_COLOR);
   }
+  const majorSubtleLayer = map.getLayer('highway_major_subtle');
+  if (majorSubtleLayer) {
+    const width = map.getPaintProperty('highway_major_subtle', 'line-width');
+    if (Array.isArray(width) && width[0] === 'interpolate') {
+      const adjustedWidth = [...width];
+      const zoomSixIndex = adjustedWidth.findIndex((value, index) => index > 2 && value === 6);
+      if (zoomSixIndex >= 0 && adjustedWidth[zoomSixIndex + 1] === 0) {
+        adjustedWidth[zoomSixIndex + 1] = 0.6;
+        map.setPaintProperty('highway_major_subtle', 'line-width', adjustedWidth);
+      }
+    }
+  }
   for (const [layerId, factor] of WEATHER_CONTEXT_UPPER_LINE_FACTORS) {
     if (!map.getLayer(layerId)) continue;
     const currentOpacity = map.getPaintProperty(layerId, 'line-opacity');
@@ -173,6 +187,9 @@ function initializeWeatherLayer() {
   if (!layerAlreadyPresent) {
     const beforeId = WEATHER_CONTEXT_BEFORE_IDS.find((layerId) => map.getLayer(layerId));
     map.addLayer(weatherLayer, beforeId);
+  }
+  for (const layerId of WEATHER_CONTEXT_BELOW_WEATHER_IDS) {
+    if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
   }
   for (const layerId of WEATHER_CONTEXT_RAIL_IDS) {
     if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
