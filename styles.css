@@ -130,11 +130,15 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
 .readout { position: absolute; z-index: 2; top: 18px; right: 20px; display: flex; gap: 14px; color: #aeb9cb; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; text-shadow: 0 1px 3px #000; pointer-events: none; }
 .readout b { color: #f1f5fb; font-weight: 500; }
 
+.maptiler-logo { position: absolute; z-index: 2; left: 20px; bottom: 76px; width: 76px; opacity: .9; }
+.maptiler-logo img { display: block; width: 100%; height: auto; }
+
 @media (max-width: 680px) {
   .legend { top: 14px; left: 14px; gap: 9px; font-size: 10px; }
   .projection-control { top: 43px; left: 14px; }
   .readout { top: 14px; right: 14px; gap: 8px; }
   .readout span:first-child { display: none; }
   .maplibregl-ctrl-bottom-right { bottom: 70px; }
+  .maptiler-logo { left: 14px; bottom: 68px; width: 68px; }
   .controls { left: 12px; right: 12px; bottom: 12px; }
 }

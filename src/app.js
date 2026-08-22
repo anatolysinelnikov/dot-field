@@ -4,53 +4,6 @@ import { WEATHER_REGION } from './engine/geography.js';
 import { selectMercatorGridSamples, zoomToMercatorGridLevel } from './engine/geographic-lod.js';
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
-const MAP_STYLE = 'https://tiles.openfreemap.org/styles/dark';
-const WATER_BOUNDARY_LAYER_ID = 'geographic-water-boundaries';
-const WEATHER_CONTEXT_BEFORE_IDS = [
-  'highway_major_inner',
-  'highway_major_subtle',
-  'highway_motorway_casing',
-  'highway_name_other',
-  'boundary_state',
-  'place_other'
-];
-const WEATHER_CONTEXT_TEXT_IDS = [
-  'highway_name_other',
-  'highway_name_motorway',
-  'place_other',
-  'place_suburb',
-  'place_village',
-  'place_town',
-  'place_city',
-  'place_city_large',
-  'place_state',
-  'place_country_other',
-  'place_country_minor',
-  'place_country_major'
-];
-const WEATHER_CONTEXT_ROAD_LABEL_IDS = [
-  'highway_name_other',
-  'highway_name_motorway'
-];
-const WEATHER_CONTEXT_PLACE_LABEL_IDS = WEATHER_CONTEXT_TEXT_IDS.filter((layerId) => !WEATHER_CONTEXT_ROAD_LABEL_IDS.includes(layerId));
-const WEATHER_CONTEXT_RAIL_IDS = [
-  'railway_transit',
-  'railway_transit_dashline',
-  'railway_minor',
-  'railway_minor_dashline',
-  'railway',
-  'railway_dashline'
-];
-const WEATHER_CONTEXT_BELOW_WEATHER_IDS = ['highway_motorway_subtle'];
-const WEATHER_CONTEXT_MAJOR_SUPPORT_IDS = ['highway_major_subtle'];
-const WEATHER_CONTEXT_UPPER_LINE_FACTORS = [
-  ['highway_major_inner', 0.45],
-  ['highway_major_subtle', 0.3],
-  ['highway_motorway_casing', 0.7],
-  ['highway_motorway_inner', 0.7]
-];
-const PLACE_LABEL_COLOR = '#AAAAAA';
-const ROAD_LABEL_COLOR = '#AAAAAA';
 const MAX_SAMPLING_LATITUDE = 85;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
@@ -62,6 +15,22 @@ const projectionSelector = document.querySelector('#projectionSelector');
 const projectionButtons = [...projectionSelector.querySelectorAll('[data-projection]')];
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
+
+async function loadMapTilerKey() {
+  try {
+    const response = await fetch('./config.local.json', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const config = await response.json();
+    if (typeof config.maptilerKey !== 'string' || !config.maptilerKey.trim()) throw new Error('maptilerKey is missing');
+    return config.maptilerKey.trim();
+  } catch {
+    console.error('MapTiler local configuration is missing or invalid. Expected config.local.json with a non-empty maptilerKey.');
+    throw new Error('MapTiler local configuration is missing or invalid.');
+  }
+}
+
+const mapTilerKey = await loadMapTilerKey();
+const MAP_STYLE = `https://api.maptiler.com/maps/dataviz-v4-dark/style.json?key=${encodeURIComponent(mapTilerKey)}`;
 
 const map = new window.maplibregl.Map({
   container: 'map',
@@ -91,7 +60,6 @@ const state = {
 };
 const weatherLayer = new GeographicDotsLayer();
 let lastMapErrorSignature = '';
-let contextStyleObject = null;
 
 function updateReadout() {
   zoomLabel.textContent = state.logicalSamplingZoom.toFixed(2);
@@ -139,105 +107,13 @@ function commitSamples(level, samples) {
   updateReadout();
 }
 
-function multiplyPaintOpacity(currentOpacity, factor) {
-  if (typeof currentOpacity === 'number') return currentOpacity * factor;
-  if (Array.isArray(currentOpacity)) return ['*', currentOpacity, factor];
-  return factor;
-}
-
-function findHydrographyBeforeId() {
-  return WEATHER_CONTEXT_BEFORE_IDS.find((layerId) => map.getLayer(layerId));
-}
-
-function waterBoundaryLayer() {
-  const waterLayer = map.getLayer('water');
-  if (!waterLayer || !waterLayer.source || !waterLayer['source-layer']) return null;
-  const boundaryLayer = {
-    id: WATER_BOUNDARY_LAYER_ID,
-    type: 'line',
-    source: waterLayer.source,
-    'source-layer': waterLayer['source-layer'],
-    filter: waterLayer.filter,
-    paint: {
-      'line-color': waterLayer.paint?.['fill-color'] || '#1B1B1D',
-      'line-opacity': 0.75,
-      'line-width': 1
-    }
-  };
-  if (waterLayer.minzoom !== undefined) boundaryLayer.minzoom = waterLayer.minzoom;
-  if (waterLayer.maxzoom !== undefined) boundaryLayer.maxzoom = waterLayer.maxzoom;
-  return boundaryLayer;
-}
-
-function tuneWeatherContext(style) {
-  if (style === contextStyleObject) return;
-  contextStyleObject = style;
-  for (const layerId of WEATHER_CONTEXT_TEXT_IDS) {
-    if (!map.getLayer(layerId)) continue;
-    map.setPaintProperty(layerId, 'text-halo-color', 'rgba(0, 0, 0, 0.9)');
-    map.setPaintProperty(layerId, 'text-halo-width', 1.5);
-    map.setPaintProperty(layerId, 'text-halo-blur', 0.2);
-  }
-  for (const layerId of WEATHER_CONTEXT_PLACE_LABEL_IDS) {
-    if (!map.getLayer(layerId)) continue;
-    map.setPaintProperty(layerId, 'text-color', PLACE_LABEL_COLOR);
-    map.setPaintProperty(layerId, 'text-halo-width', 1.75);
-  }
-  for (const layerId of WEATHER_CONTEXT_ROAD_LABEL_IDS) {
-    if (!map.getLayer(layerId)) continue;
-    map.setPaintProperty(layerId, 'text-color', ROAD_LABEL_COLOR);
-  }
-  const majorSubtleLayer = map.getLayer('highway_major_subtle');
-  if (majorSubtleLayer) {
-    const width = map.getPaintProperty('highway_major_subtle', 'line-width');
-    if (Array.isArray(width) && width[0] === 'interpolate') {
-      const adjustedWidth = [...width];
-      const zoomSixIndex = adjustedWidth.findIndex((value, index) => index > 2 && value === 6);
-      if (zoomSixIndex >= 0 && adjustedWidth[zoomSixIndex + 1] === 0) {
-        adjustedWidth[zoomSixIndex + 1] = 0.6;
-        map.setPaintProperty('highway_major_subtle', 'line-width', adjustedWidth);
-      }
-    }
-  }
-  for (const [layerId, factor] of WEATHER_CONTEXT_UPPER_LINE_FACTORS) {
-    if (!map.getLayer(layerId)) continue;
-    const currentOpacity = map.getPaintProperty(layerId, 'line-opacity');
-    map.setPaintProperty(layerId, 'line-opacity', multiplyPaintOpacity(currentOpacity, factor));
-  }
-  const waterwayLayer = map.getLayer('waterway');
-  if (waterwayLayer) {
-    const currentOpacity = map.getPaintProperty('waterway', 'line-opacity');
-    map.setPaintProperty('waterway', 'line-opacity', multiplyPaintOpacity(currentOpacity, 0.65));
-  }
+function firstSymbolLayerId() {
+  return map.getStyle().layers?.find((layer) => layer.type === 'symbol')?.id;
 }
 
 function initializeWeatherLayer() {
-  tuneWeatherContext(map.getStyle());
   const layerAlreadyPresent = Boolean(map.getLayer(weatherLayer.id));
-  if (!layerAlreadyPresent) {
-    const beforeId = WEATHER_CONTEXT_BEFORE_IDS.find((layerId) => map.getLayer(layerId));
-    map.addLayer(weatherLayer, beforeId);
-  }
-  for (const layerId of WEATHER_CONTEXT_BELOW_WEATHER_IDS) {
-    if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
-  }
-  for (const layerId of WEATHER_CONTEXT_RAIL_IDS) {
-    if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
-  }
-  if (map.getLayer('waterway')) {
-    const beforeId = findHydrographyBeforeId();
-    if (beforeId) map.moveLayer('waterway', beforeId);
-    else map.moveLayer('waterway');
-  }
-  if (!map.getLayer(WATER_BOUNDARY_LAYER_ID)) {
-    const boundaryLayer = waterBoundaryLayer();
-    if (boundaryLayer) map.addLayer(boundaryLayer, findHydrographyBeforeId());
-  }
-  for (const layerId of WEATHER_CONTEXT_MAJOR_SUPPORT_IDS) {
-    if (!map.getLayer(layerId)) continue;
-    const beforeId = map.getLayer('highway_major_inner') ? 'highway_major_inner' : weatherLayer.id;
-    map.moveLayer(layerId, beforeId);
-  }
+  if (!layerAlreadyPresent) map.addLayer(weatherLayer, firstSymbolLayerId());
   if (state.mapReady) return;
   state.mapReady = true;
   rebaseCamera();
@@ -378,8 +254,8 @@ map.on('error', (event) => {
   const details = [];
   if (event && 'sourceId' in event && event.sourceId) details.push(`source=${event.sourceId}`);
   if (event && 'tile' in event && event.tile) details.push('tile');
-  if (event && 'url' in event && event.url) details.push(`url=${event.url}`);
-  const message = error instanceof Error ? error.message : String(error || 'Unknown MapLibre error');
+  const message = (error instanceof Error ? error.message : String(error || 'Unknown MapLibre error'))
+    .replaceAll(mapTilerKey, '[redacted]');
   const signature = `${details.join('|')}|${message}`;
   if (signature === lastMapErrorSignature) return;
   lastMapErrorSignature = signature;
@@ -390,7 +266,7 @@ map.on('error', (event) => {
         : lowerMessage.includes('glyph') ? 'glyph'
           : lowerMessage.includes('style') ? 'style'
             : 'generic';
-  console.error(`MapLibre ${category} error${details.length ? ` (${details.join(', ')})` : ''}:`, error || event);
+  console.error(`MapLibre ${category} error${details.length ? ` (${details.join(', ')})` : ''}: ${message}`);
 });
 
 function frame(now) {

@@ -36,7 +36,7 @@ index.html + styles.css
 app.js ----------------------> MapLibre GL JS
  |                                  |
  |                                  +-- camera / pan / zoom / projection / navigation
- |                                  +-- OpenFreeMap Dark basemap + attribution
+ |                                  +-- MapTiler Dataviz Dark basemap + attribution/logo
  |
  +-> geographic-lod.js
  |          |
@@ -51,7 +51,7 @@ app.js ----------------------> MapLibre GL JS
 
 `app.js` owns UI state, play/pause, timeline scrubbing, projection buttons, MapLibre construction, logical sampling-zoom selection, weather refresh scheduling, and readouts. It does not implement camera controls; MapLibre owns those.
 
-The map uses the OpenFreeMap Dark style at `https://tiles.openfreemap.org/styles/dark`; the normal MapLibre attribution control remains enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context. Base geographic fills and minor context remain below the custom weather Dots layer. The layer is inserted below a verified upper-context style boundary, so major transport/reference lines, administrative boundaries, and place labels remain above weather; a small verified-ID fallback list is used, with normal top-of-style insertion as the final fallback. It is attached from the style-ready lifecycle (`style.load`) with an idempotent `getLayer` check, so individual basemap source or tile failures do not gate weather initialization. MapLibre error events remain visible in the console with available source/tile/resource context.
+The map loads the MapTiler Dataviz Dark MapLibre style (`dataviz-v4-dark`) from the Maps API using the local-only `config.local.json` key; the normal MapLibre attribution control and a visible MapTiler logo remain enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context. The custom weather layer is attached from the style-ready lifecycle (`style.load`) with an idempotent `getLayer` check and is inserted before the first loaded `symbol` layer, leaving fills and line context below weather while symbol/label context remains above it; if no symbol layer exists, it falls back to normal top-of-style insertion. No provider-specific layer IDs or context paint customizations are assumed, and MapLibre error events remain visible in the console without exposing the authenticated style URL.
 
 The initial projection is Globe. The explicit UI switches between `globe` and `mercator` through `map.setProjection`. The center/zoom are retained by MapLibre, and no weather/sample data is regenerated for a projection switch. Projection changes temporarily suppress sampling-zoom deltas and rebase the raw camera baseline after two render frames, so the visual A/B does not change LOD.
 
