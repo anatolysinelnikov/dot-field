@@ -32,6 +32,21 @@ async function loadMapTilerKey() {
 const mapTilerKey = await loadMapTilerKey();
 const MAP_STYLE = `https://api.maptiler.com/maps/dataviz-v4-dark/style.json?key=${encodeURIComponent(mapTilerKey)}`;
 
+const MAPTILER_GEOGRAPHIC_LABEL_IDS = [
+  'Continent labels',
+  'Country labels disputed',
+  'Country labels',
+  'State labels',
+  'City labels',
+  'Capital city labels',
+  'Town labels',
+  'Village labels',
+  'Place labels'
+];
+const MAPTILER_HYDROGRAPHY_IDS = ['River intermittent', 'River'];
+const MAPTILER_ADMIN_BOUNDARY_IDS = ['Other border', 'Disputed border', 'Country border'];
+const MAPTILER_WATER_BOUNDARY_ID = 'geographic-water-boundaries';
+
 const map = new window.maplibregl.Map({
   container: 'map',
   style: MAP_STYLE,
@@ -107,13 +122,59 @@ function commitSamples(level, samples) {
   updateReadout();
 }
 
-function firstSymbolLayerId() {
-  return map.getStyle().layers?.find((layer) => layer.type === 'symbol')?.id;
-}
-
 function initializeWeatherLayer() {
+  const styleLayers = map.getStyle().layers || [];
   const layerAlreadyPresent = Boolean(map.getLayer(weatherLayer.id));
-  if (!layerAlreadyPresent) map.addLayer(weatherLayer, firstSymbolLayerId());
+  if (!layerAlreadyPresent) {
+    const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');
+    map.addLayer(weatherLayer, firstSymbol?.id);
+  }
+
+  const waterLayer = styleLayers.find((layer) => layer.id === 'Water' && layer.type === 'fill');
+  if (waterLayer && !map.getLayer(MAPTILER_WATER_BOUNDARY_ID)) {
+    try {
+      map.addLayer({
+        id: MAPTILER_WATER_BOUNDARY_ID,
+        type: 'line',
+        source: waterLayer.source,
+        'source-layer': waterLayer['source-layer'],
+        ...(waterLayer.minzoom === undefined ? {} : { minzoom: waterLayer.minzoom }),
+        ...(waterLayer.maxzoom === undefined ? {} : { maxzoom: waterLayer.maxzoom }),
+        filter: waterLayer.filter,
+        paint: {
+          'line-color': waterLayer.paint?.['fill-color'] || '#141414',
+          'line-opacity': 0.75,
+          'line-width': 1
+        }
+      }, weatherLayer.id);
+    } catch (error) {
+      console.warn('MapTiler water-boundary context is unavailable.', error instanceof Error ? error.message : error);
+    }
+  }
+
+  const upperContextIds = new Set([
+    ...MAPTILER_HYDROGRAPHY_IDS,
+    MAPTILER_WATER_BOUNDARY_ID,
+    ...MAPTILER_ADMIN_BOUNDARY_IDS,
+    ...MAPTILER_GEOGRAPHIC_LABEL_IDS
+  ]);
+  const symbolIds = (map.getStyle().layers || [])
+    .filter((layer) => layer.type === 'symbol' && !upperContextIds.has(layer.id))
+    .map((layer) => layer.id);
+  for (const id of symbolIds) {
+    if (map.getLayer(id) && map.getLayer(weatherLayer.id)) map.moveLayer(id, weatherLayer.id);
+  }
+
+  const upperOrder = [
+    ...MAPTILER_HYDROGRAPHY_IDS,
+    MAPTILER_WATER_BOUNDARY_ID,
+    ...MAPTILER_ADMIN_BOUNDARY_IDS,
+    ...MAPTILER_GEOGRAPHIC_LABEL_IDS
+  ];
+  for (const id of upperOrder) {
+    if (map.getLayer(id)) map.moveLayer(id);
+  }
+
   if (state.mapReady) return;
   state.mapReady = true;
   rebaseCamera();
