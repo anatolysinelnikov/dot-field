@@ -5,6 +5,14 @@ import { selectMercatorGridSamples, zoomToMercatorGridLevel } from './engine/geo
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/dark';
+const WEATHER_CONTEXT_BEFORE_IDS = [
+  'highway_major_casing',
+  'highway_major_inner',
+  'highway_motorway_casing',
+  'highway_name_other',
+  'boundary_state',
+  'place_other'
+];
 const MAX_SAMPLING_LATITUDE = 85;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
@@ -92,7 +100,10 @@ function commitSamples(level, samples) {
 
 function initializeWeatherLayer() {
   const layerAlreadyPresent = Boolean(map.getLayer(weatherLayer.id));
-  if (!layerAlreadyPresent) map.addLayer(weatherLayer);
+  if (!layerAlreadyPresent) {
+    const beforeId = WEATHER_CONTEXT_BEFORE_IDS.find((layerId) => map.getLayer(layerId));
+    map.addLayer(weatherLayer, beforeId);
+  }
   if (state.mapReady) return;
   state.mapReady = true;
   rebaseCamera();
