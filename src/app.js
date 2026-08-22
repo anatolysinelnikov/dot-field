@@ -5,6 +5,7 @@ import { selectMercatorGridSamples, zoomToMercatorGridLevel } from './engine/geo
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/dark';
+const WATER_BOUNDARY_LAYER_ID = 'geographic-water-boundaries';
 const WEATHER_CONTEXT_BEFORE_IDS = [
   'highway_major_inner',
   'highway_major_subtle',
@@ -144,6 +145,30 @@ function multiplyPaintOpacity(currentOpacity, factor) {
   return factor;
 }
 
+function findHydrographyBeforeId() {
+  return WEATHER_CONTEXT_BEFORE_IDS.find((layerId) => map.getLayer(layerId));
+}
+
+function waterBoundaryLayer() {
+  const waterLayer = map.getLayer('water');
+  if (!waterLayer || !waterLayer.source || !waterLayer['source-layer']) return null;
+  const boundaryLayer = {
+    id: WATER_BOUNDARY_LAYER_ID,
+    type: 'line',
+    source: waterLayer.source,
+    'source-layer': waterLayer['source-layer'],
+    filter: waterLayer.filter,
+    paint: {
+      'line-color': waterLayer.paint?.['fill-color'] || '#1B1B1D',
+      'line-opacity': 0.75,
+      'line-width': 1
+    }
+  };
+  if (waterLayer.minzoom !== undefined) boundaryLayer.minzoom = waterLayer.minzoom;
+  if (waterLayer.maxzoom !== undefined) boundaryLayer.maxzoom = waterLayer.maxzoom;
+  return boundaryLayer;
+}
+
 function tuneWeatherContext(style) {
   if (style === contextStyleObject) return;
   contextStyleObject = style;
@@ -179,6 +204,11 @@ function tuneWeatherContext(style) {
     const currentOpacity = map.getPaintProperty(layerId, 'line-opacity');
     map.setPaintProperty(layerId, 'line-opacity', multiplyPaintOpacity(currentOpacity, factor));
   }
+  const waterwayLayer = map.getLayer('waterway');
+  if (waterwayLayer) {
+    const currentOpacity = map.getPaintProperty('waterway', 'line-opacity');
+    map.setPaintProperty('waterway', 'line-opacity', multiplyPaintOpacity(currentOpacity, 0.65));
+  }
 }
 
 function initializeWeatherLayer() {
@@ -193,6 +223,15 @@ function initializeWeatherLayer() {
   }
   for (const layerId of WEATHER_CONTEXT_RAIL_IDS) {
     if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
+  }
+  if (map.getLayer('waterway')) {
+    const beforeId = findHydrographyBeforeId();
+    if (beforeId) map.moveLayer('waterway', beforeId);
+    else map.moveLayer('waterway');
+  }
+  if (!map.getLayer(WATER_BOUNDARY_LAYER_ID)) {
+    const boundaryLayer = waterBoundaryLayer();
+    if (boundaryLayer) map.addLayer(boundaryLayer, findHydrographyBeforeId());
   }
   for (const layerId of WEATHER_CONTEXT_MAJOR_SUPPORT_IDS) {
     if (!map.getLayer(layerId)) continue;
