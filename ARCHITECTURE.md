@@ -8,7 +8,7 @@
 
 ## Project model
 
-This branch is a browser-native geographic weather visualization prototype. It keeps the deterministic synthetic weather field, but replaces the active Canvas/fixed-square-grid path with MapLibre GL JS, a hierarchical icosphere, and a custom WebGL weather layer.
+This branch is a browser-native geographic weather visualization prototype. It keeps the deterministic synthetic weather field, but replaces the active Canvas/fixed-square-grid path with MapLibre GL JS, a globally anchored square Mercator render lattice, and a custom WebGL weather layer.
 
 Only **Dots** is active in this experiment. Squares, Blur, Areas, their reconstruction code, and the older fixed-grid Dots renderer remain as legacy modules and are not routed by `src/app.js`.
 
@@ -38,9 +38,9 @@ app.js ----------------------> MapLibre GL JS
  |                                  +-- camera / pan / zoom / projection / navigation
  |                                  +-- OpenFreeMap Dark basemap + attribution
  |
- +-> geographic-lod.js -> icosphere.js
- |          |                    |
- |          +-> active samples   +-> deterministic hierarchical sphere topology
+ +-> geographic-lod.js
+ |          |
+ |          +-> globally anchored Mercator grid samples
  |
  +-> geographic-dots-layer.js -> MapLibre custom 3D WebGL layer
             |
@@ -55,7 +55,7 @@ The map uses the OpenFreeMap Dark style at `https://tiles.openfreemap.org/styles
 
 The initial projection is Globe. The explicit UI switches between `globe` and `mercator` through `map.setProjection`. The center/zoom are retained by MapLibre, and no weather/sample data is regenerated for a projection switch.
 
-Animation is deterministic and has the existing 18-second loop. Weather values and symbol buffers are refreshed at a modest cadence while playing because field movement is slow. Topology is rebuilt only when the discrete zoom-derived icosphere level changes. MapLibre camera movement and projection changes only reproject the existing layer geometry.
+Animation is deterministic and has the existing 18-second loop. Weather values and symbol buffers are refreshed at a modest cadence while playing because field movement is slow. Grid samples are rebuilt only when the discrete zoom-derived grid level changes. MapLibre camera movement and projection changes only reproject the existing layer geometry.
 
 ## Geographic synthetic field adapter — `src/engine/geography.js`
 
@@ -69,33 +69,33 @@ trajectory: x = 0.33..0.67
 field support: x radius 0.92, y radius 0.76
 ```
 
-The exported `WEATHER_SUPPORT` bounds are derived from that same configuration and are the only support bounds consumed by the icosphere sampler. Moving the experiment to another region requires changing this one geographic configuration. `geographicIntensityAt(longitude, latitude, time)` converts a geographic sample into the old synthetic field coordinate system, then calls `field.intensityAt`. Its deterministic horizontal travel is derived only from time. Pan, zoom, viewport size, and Globe/Mercator mode do not affect it.
+The exported `WEATHER_SUPPORT` bounds are derived from that same configuration and are the only support bounds consumed by the geographic lattice sampler. Moving the experiment to another region requires changing this one geographic configuration. `geographicIntensityAt(longitude, latitude, time)` converts a geographic sample into the old synthetic field coordinate system, then calls `field.intensityAt`. Its deterministic horizontal travel is derived only from time. Pan, zoom, viewport size, and Globe/Mercator mode do not affect it.
 
 `field.js` remains independent of MapLibre, WebGL, UI, and sampling topology.
 
-## Hierarchical geographic sampling — `src/engine/icosphere.js`
+## Square Mercator render sampling — `src/engine/geographic-lod.js`
 
-The sampling topology starts with an icosahedron. A face subdivision creates the three normalized edge midpoints and four child triangles. The 12 root vertices have deterministic identities (`root-0` … `root-11`). Every midpoint identity is the canonical string `midpoint(<sorted endpoint identity>|<sorted endpoint identity>)`; it is looked up in a topology identity map, so adjacent faces share the exact same vertex regardless of lazy traversal order.
+Active weather samples are vertices of a globally anchored dyadic grid in normalized Web-Mercator world coordinates. At level `L`, the step is `1 / 2^L`; only the centralized `WEATHER_SUPPORT` converted to Mercator bounds, plus a fixed conservative canonical-resolution overscan, is enumerated. The grid is independent of viewport visibility, pan, globe rotation, and projection mode.
 
-Each vertex also has an internal array index for storage and a fixed normalized sphere position / `[longitude, latitude]`. The array index is not the sample identity. Existing vertices are never moved or replaced by a finer level. Face IDs are deterministic paths from their icosahedron root face.
+Each sample stores its Mercator coordinate and its converted longitude/latitude. Its identity is a compact `canonicalX:canonicalY` integer pair at the fixed maximum grid resolution. A point inherited by a finer level therefore keeps exactly the same identity; IDs do not depend on enumeration order, camera history, device, or projection. Finer levels contain every coarser grid vertex, so refinement never moves existing samples.
 
-Subdivision is lazy: only faces requested by the LOD traversal are materialized. This retains the additive hierarchy without building a globally dense icosphere up front.
+Mercator render sampling is intentionally not equal-area on the Earth surface. It is a visualization choice that preserves the stable orthogonal Dot Field lattice, not a claim about physical sample area or a future provider's native grid.
 
 ## Uniform zoom LOD — `src/engine/geographic-lod.js`
 
-`zoomToIcosphereLevel` maps MapLibre zoom to one discrete level for the entire active weather region: `clamp(floor(zoom) + 3, 3, 8)`. The mapping is centralized, deterministic, and independent of screen position, viewport, bearing, pan, projection, globe horizon, and `map.project`.
+`zoomToMercatorGridLevel` selects one discrete level for the whole active weather region. It rounds `zoom + log2(512 / 9)`, clamped to the configured level range: MapLibre's world is 512 CSS pixels wide at zoom zero and the target nominal neighboring-sample spacing is 9 CSS pixels. The mapping is centralized, deterministic, and independent of screen position, viewport, bearing, pan, projection, globe horizon, and `map.project`.
 
-The traversal chooses the support tile set once at level 3 from the centralized `WEATHER_SUPPORT` bounds, then recursively reaches the selected uniform level inside those tiles. Descendants are not re-cropped at finer levels; this camera-independent support cull preserves additive parent samples. The active sample set and count therefore remain unchanged when the same zoomed map is panned or rotated.
+The active sample set and count remain unchanged when the same zoomed map is panned, rotated, resized, or switched between Globe and Mercator. Zooming across a discrete threshold replaces the active level with the deterministically nested coarser or finer grid.
 
-Refinement is additive: parent face vertices remain part of the finer active triangulation and finer levels add deterministic vertices. Coarsening returns to the same topology-derived identities. Projection changes use the same stored sample set and only change MapLibre’s projection.
-
-For each active vertex, incident edges of the selected triangulation are measured with spherical angular distance. The mean incident-edge angle is stored as that sample’s spacing for marker-radius transfer; no global nominal edge-angle formula or screen-space compensation is used.
+Grid step is exact and uniform at an active level, so it is stored as each sample's spacing for the marker-radius transfer. There is no screen-space, latitude, horizon, or perspective compensation.
 
 ## Dots rendering — `src/engine/geographic-dots-layer.js`
 
-`GeographicDotsLayer` is a MapLibre `type: 'custom'`, `renderingMode: '3d'` layer. It builds surface geometry in local longitude/latitude tangent directions, converts vertices to whole-world Mercator coordinates, and uses MapLibre’s projection-aware `projectTile` shader interface. The injected MapLibre shader code handles Globe, Mercator, and their internal transition/depth semantics.
+`GeographicDotsLayer` is a MapLibre `type: 'custom'`, `renderingMode: '3d'` layer. It builds geometry directly in whole-world Mercator surface coordinates and uses MapLibre’s projection-aware `projectTile` shader interface. The injected MapLibre shader code handles Globe, Mercator, and their internal transition/depth semantics.
 
-The layer uploads four batched buffers and emits at most four draw calls per frame:
+Rain and strong rain each use one shared unit quad and an instanced center/radius buffer. The vertex shader expands that quad in Mercator surface coordinates; the fragment shader evaluates an antialiased analytic circle. This keeps rain circular in Mercator, surface-attached in both projections, and naturally foreshortened near the globe horizon without a screen-facing billboard or polygon facets.
+
+Storm and hail retain simple batched polygon geometry. Storm's long tips remain north/east/south/west in the Mercator lattice with diagonal inner points; hail remains a hexagon. The layer emits at most four draw calls per frame:
 
 1. rain circles (`#0090FF`);
 2. strong-rain circles (`#0000FF`);
@@ -110,7 +110,7 @@ The current Dots mapping remains sourced from `precipitation-mapping.js`, `lod.j
 - rain / strong-rain color split is retained;
 - hail keeps priority over thunderstorm;
 - storm and hail retain their star/hexagon appearances;
-- marker radius is computed from intensity relative to that sample’s local icosphere spacing, so symbol and sampling geometry pass through the same projection together.
+- marker radius is computed from intensity relative to the active Mercator grid step, so symbol and sampling geometry pass through the same projection together.
 
 ## Legacy modules
 

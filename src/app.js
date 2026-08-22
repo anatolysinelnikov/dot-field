@@ -1,8 +1,7 @@
 import { LOOP_SECONDS } from './engine/config.js';
 import { clamp } from './engine/math.js';
 import { WEATHER_REGION } from './engine/geography.js';
-import { Icosphere } from './engine/icosphere.js';
-import { MAX_ICO_LEVEL, selectGeographicSamples, zoomToIcosphereLevel } from './engine/geographic-lod.js';
+import { selectMercatorGridSamples, zoomToMercatorGridLevel } from './engine/geographic-lod.js';
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/dark';
@@ -38,7 +37,6 @@ const state = {
   weatherQueued: false,
   lastWeatherAt: 0
 };
-const icosphere = new Icosphere(MAX_ICO_LEVEL);
 const weatherLayer = new GeographicDotsLayer();
 
 function updateReadout() {
@@ -50,8 +48,8 @@ function updateReadout() {
 function rebuildSamples(level) {
   if (!state.mapReady) return;
   if (state.lod.level === level) return;
-  const selection = selectGeographicSamples(icosphere, level);
-  state.lod = { level: selection.level, leafCount: selection.leafCount };
+  const selection = selectMercatorGridSamples(level);
+  state.lod = { level: selection.level };
   state.samples = selection.samples;
   weatherLayer.setSamples(state.samples, state.time / LOOP_SECONDS);
   state.lastWeatherAt = performance.now();
@@ -122,11 +120,11 @@ map.on('style.load', () => map.setProjection({ type: 'globe' }));
 map.on('load', () => {
   map.addLayer(weatherLayer);
   state.mapReady = true;
-  rebuildSamples(zoomToIcosphereLevel(map.getZoom()));
+  rebuildSamples(zoomToMercatorGridLevel(map.getZoom()));
 });
 map.on('zoom', () => {
   updateReadout();
-  rebuildSamples(zoomToIcosphereLevel(map.getZoom()));
+  rebuildSamples(zoomToMercatorGridLevel(map.getZoom()));
 });
 map.on('error', (event) => console.error('MapLibre error:', event.error));
 

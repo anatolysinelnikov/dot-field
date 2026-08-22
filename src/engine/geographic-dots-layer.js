@@ -10,33 +10,10 @@ const COLORS = {
   hail: [1, 0.831, 0, 1]
 };
 
-function mercatorCoordinate(longitude, latitude) {
-  const clampedLatitude = Math.max(-85.05112878, Math.min(85.05112878, latitude));
-  const latitudeRadians = clampedLatitude * Math.PI / 180;
-  return [
-    (longitude + 180) / 360,
-    (1 - Math.log(Math.tan(Math.PI / 4 + latitudeRadians / 2)) / Math.PI) / 2
-  ];
-}
-
-function appendVertex(vertices, longitude, latitude) {
-  const [x, y] = mercatorCoordinate(longitude, latitude);
-  // MapLibre's projection helper receives whole-world mercator coordinates
-  // (0..1) for custom layers when supplied with tileMercatorCoords below.
-  vertices.push(x, y);
-}
-
-function appendShape(vertices, longitude, latitude, radius, points) {
-  const radians = latitude * Math.PI / 180;
-  const longitudeScale = Math.max(0.16, Math.cos(radians));
-  for (let index = 0; index < points.length; index++) {
-    const current = points[index];
-    const next = points[(index + 1) % points.length];
-    appendVertex(vertices, longitude, latitude);
-    appendVertex(vertices, longitude + current[0] * radius * 180 / Math.PI / longitudeScale, latitude + current[1] * radius * 180 / Math.PI);
-    appendVertex(vertices, longitude + next[0] * radius * 180 / Math.PI / longitudeScale, latitude + next[1] * radius * 180 / Math.PI);
-  }
-}
+const QUAD = new Float32Array([
+  -1, -1, 1, -1, 1, 1,
+  -1, -1, 1, 1, -1, 1
+]);
 
 function circularPoints(count) {
   return Array.from({ length: count }, (_, index) => {
@@ -45,12 +22,23 @@ function circularPoints(count) {
   });
 }
 
-const CIRCLE = circularPoints(12);
 const HAIL = circularPoints(6);
 const STORM = circularPoints(8).map((point, index) => {
   const scale = index % 2 === 0 ? 1 : 0.38;
   return [point[0] * scale, point[1] * scale];
 });
+
+function appendShape(vertices, centerX, centerY, radius, points) {
+  for (let index = 0; index < points.length; index++) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    vertices.push(
+      centerX, centerY,
+      centerX + current[0] * radius, centerY + current[1] * radius,
+      centerX + next[0] * radius, centerY + next[1] * radius
+    );
+  }
+}
 
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -60,17 +48,31 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
-function makeProgram(gl, shaderData) {
+function makeProgram(gl, shaderData, kind) {
+  const circle = kind === 'circle';
   const vertexSource = `#version 300 es
 ${shaderData.vertexShaderPrelude}
 ${shaderData.define}
-in vec2 a_pos;
-void main() { gl_Position = projectTile(a_pos); }`;
+${circle ? `in vec2 a_corner;
+in vec2 a_center;
+in float a_radius;
+out vec2 v_local;
+void main() {
+  v_local = a_corner;
+  gl_Position = projectTile(a_center + a_corner * a_radius);
+}` : `in vec2 a_pos;
+void main() { gl_Position = projectTile(a_pos); }`}`;
   const fragmentSource = `#version 300 es
 precision highp float;
 uniform vec4 u_color;
+${circle ? 'in vec2 v_local;' : ''}
 out vec4 fragColor;
-void main() { fragColor = u_color; }`;
+void main() {
+  ${circle ? `float distanceToCenter = length(v_local);
+  float edge = fwidth(distanceToCenter);
+  float alpha = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distanceToCenter);
+  fragColor = vec4(u_color.rgb, u_color.a * alpha);` : 'fragColor = u_color;'}
+}`;
   const program = gl.createProgram();
   gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
   gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
@@ -84,13 +86,26 @@ function setMatrix(gl, program, name, value) {
   if (location && value) gl.uniformMatrix4fv(location, false, value);
 }
 
+function setProjection(gl, program, projection) {
+  setMatrix(gl, program, 'u_matrix', projection.mainMatrix);
+  setMatrix(gl, program, 'u_projection_fallback_matrix', projection.fallbackMatrix);
+  setMatrix(gl, program, 'u_projection_matrix', projection.mainMatrix);
+  const tileCoordinates = gl.getUniformLocation(program, 'u_projection_tile_mercator_coords');
+  if (tileCoordinates) gl.uniform4f(tileCoordinates, ...projection.tileMercatorCoords);
+  const clippingPlane = gl.getUniformLocation(program, 'u_projection_clipping_plane');
+  if (clippingPlane && projection.clippingPlane) gl.uniform4f(clippingPlane, ...projection.clippingPlane);
+  const transition = gl.getUniformLocation(program, 'u_projection_transition');
+  if (transition) gl.uniform1f(transition, projection.projectionTransition);
+}
+
 export class GeographicDotsLayer {
   constructor() {
     this.id = 'geographic-weather-dots';
     this.type = 'custom';
     this.renderingMode = '3d';
     this.programs = new Map();
-    this.geometry = { rain: new Float32Array(), strong: new Float32Array(), storm: new Float32Array(), hail: new Float32Array() };
+    this.geometry = { storm: new Float32Array(), hail: new Float32Array() };
+    this.instances = { rain: new Float32Array(), strong: new Float32Array() };
     this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.samples = [];
     this.buffersDirty = true;
@@ -100,11 +115,20 @@ export class GeographicDotsLayer {
     this.map = map;
     this.gl = gl;
     this.buffers = Object.fromEntries(Object.keys(this.geometry).map((key) => [key, gl.createBuffer()]));
+    this.instanceBuffers = Object.fromEntries(Object.keys(this.instances).map((key) => [key, gl.createBuffer()]));
+    this.quadBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, QUAD, gl.STATIC_DRAW);
   }
 
   onRemove(map, gl) {
-    for (const program of this.programs.values()) gl.deleteProgram(program);
-    for (const buffer of Object.values(this.buffers || {})) gl.deleteBuffer(buffer);
+    for (const entry of this.programs.values()) {
+      gl.deleteProgram(entry.circle);
+      gl.deleteProgram(entry.polygon);
+    }
+    for (const buffer of [...Object.values(this.buffers || {}), ...Object.values(this.instanceBuffers || {}), this.quadBuffer]) {
+      if (buffer) gl.deleteBuffer(buffer);
+    }
   }
 
   setSamples(samples, time) {
@@ -113,16 +137,22 @@ export class GeographicDotsLayer {
   }
 
   updateWeather(time) {
-    const vertices = { rain: [], strong: [], storm: [], hail: [] };
+    const instances = { rain: [], strong: [] };
+    const vertices = { storm: [], hail: [] };
     for (const sample of this.samples) {
-      const [longitude, latitude] = sample.vertex.lngLat;
+      const [longitude, latitude] = sample.lngLat;
+      const [centerX, centerY] = sample.mercator;
       const value = geographicIntensityAt(longitude, latitude, time);
       const rainRadius = intensityToRadius(value.rain, sample.spacing, 'rain');
-      if (rainRadius > 0) appendShape(vertices.rain, longitude, latitude, rainRadius, CIRCLE);
+      if (rainRadius > 0) instances.rain.push(centerX, centerY, rainRadius);
       const strongRadius = intensityToRadius(strongPrecipitationIntensity(value.rain), sample.spacing, 'rain');
-      if (strongRadius > 0) appendShape(vertices.strong, longitude, latitude, strongRadius, CIRCLE);
+      if (strongRadius > 0) instances.strong.push(centerX, centerY, strongRadius);
       const appearance = hazardStateAppearance(value, resolveHazardState(value), sample.spacing);
-      if (appearance.radius > 0) appendShape(vertices[appearance.type], longitude, latitude, appearance.radius, appearance.type === 'hail' ? HAIL : STORM);
+      if (appearance.radius > 0) appendShape(vertices[appearance.type], centerX, centerY, appearance.radius, appearance.type === 'hail' ? HAIL : STORM);
+    }
+    for (const key of Object.keys(instances)) {
+      this.instances[key] = new Float32Array(instances[key]);
+      this.counts[key] = this.instances[key].length / 3;
     }
     for (const key of Object.keys(vertices)) {
       this.geometry[key] = new Float32Array(vertices[key]);
@@ -138,37 +168,53 @@ export class GeographicDotsLayer {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[key]);
       gl.bufferData(gl.ARRAY_BUFFER, this.geometry[key], gl.STREAM_DRAW);
     }
+    for (const key of Object.keys(this.instances)) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[key]);
+      gl.bufferData(gl.ARRAY_BUFFER, this.instances[key], gl.STREAM_DRAW);
+    }
     this.buffersDirty = false;
   }
 
-  render(gl, args) {
-    this.uploadBuffers(gl);
-    const shaderData = args.shaderData;
-    let program = this.programs.get(shaderData.variantName);
-    if (!program) {
-      program = makeProgram(gl, shaderData);
-      this.programs.set(shaderData.variantName, program);
+  programsFor(gl, shaderData) {
+    let programs = this.programs.get(shaderData.variantName);
+    if (!programs) {
+      programs = { circle: makeProgram(gl, shaderData, 'circle'), polygon: makeProgram(gl, shaderData, 'polygon') };
+      this.programs.set(shaderData.variantName, programs);
     }
-    gl.useProgram(program);
-    const projection = args.defaultProjectionData;
-    setMatrix(gl, program, 'u_matrix', projection.mainMatrix);
-    setMatrix(gl, program, 'u_projection_fallback_matrix', projection.fallbackMatrix);
-    setMatrix(gl, program, 'u_projection_matrix', projection.mainMatrix);
-    const tileCoordinates = gl.getUniformLocation(program, 'u_projection_tile_mercator_coords');
-    if (tileCoordinates) gl.uniform4f(tileCoordinates, ...projection.tileMercatorCoords);
-    const clippingPlane = gl.getUniformLocation(program, 'u_projection_clipping_plane');
-    if (clippingPlane && projection.clippingPlane) gl.uniform4f(clippingPlane, ...projection.clippingPlane);
-    const transition = gl.getUniformLocation(program, 'u_projection_transition');
-    if (transition) gl.uniform1f(transition, projection.projectionTransition);
+    return programs;
+  }
 
+  renderCircles(gl, program, projection) {
+    const corner = gl.getAttribLocation(program, 'a_corner');
+    const center = gl.getAttribLocation(program, 'a_center');
+    const radius = gl.getAttribLocation(program, 'a_radius');
+    const color = gl.getUniformLocation(program, 'u_color');
+    gl.useProgram(program);
+    setProjection(gl, program, projection);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
+    gl.enableVertexAttribArray(corner);
+    gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
+    for (const key of Object.keys(this.instances)) {
+      if (!this.counts[key]) continue;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[key]);
+      gl.enableVertexAttribArray(center);
+      gl.vertexAttribPointer(center, 2, gl.FLOAT, false, 12, 0);
+      gl.vertexAttribDivisor(center, 1);
+      gl.enableVertexAttribArray(radius);
+      gl.vertexAttribPointer(radius, 1, gl.FLOAT, false, 12, 8);
+      gl.vertexAttribDivisor(radius, 1);
+      gl.uniform4fv(color, COLORS[key]);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.counts[key]);
+    }
+    gl.vertexAttribDivisor(center, 0);
+    gl.vertexAttribDivisor(radius, 0);
+  }
+
+  renderPolygons(gl, program, projection) {
     const position = gl.getAttribLocation(program, 'a_pos');
     const color = gl.getUniformLocation(program, 'u_color');
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthMask(false);
-    gl.enable(gl.POLYGON_OFFSET_FILL);
-    gl.polygonOffset(-1, -1);
+    gl.useProgram(program);
+    setProjection(gl, program, projection);
     for (const key of Object.keys(this.geometry)) {
       if (!this.counts[key]) continue;
       gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[key]);
@@ -177,6 +223,19 @@ export class GeographicDotsLayer {
       gl.uniform4fv(color, COLORS[key]);
       gl.drawArrays(gl.TRIANGLES, 0, this.counts[key]);
     }
+  }
+
+  render(gl, args) {
+    this.uploadBuffers(gl);
+    const programs = this.programsFor(gl, args.shaderData);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(-1, -1);
+    this.renderCircles(gl, programs.circle, args.defaultProjectionData);
+    this.renderPolygons(gl, programs.polygon, args.defaultProjectionData);
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.depthMask(true);
   }
