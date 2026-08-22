@@ -99,7 +99,7 @@ Grid step is exact and uniform at an active level, so it is stored as each sampl
 
 Rain and strong rain each use one shared unit quad and an instanced start/end center-and-radius buffer. The vertex shader interpolates the center and expands that quad in Mercator surface coordinates; the fragment shader evaluates an antialiased analytic circle. This keeps rain circular in Mercator, surface-attached in both projections, and naturally foreshortened near the globe horizon without a screen-facing billboard or polygon facets.
 
-Storm and hail retain simple batched polygon geometry. Storm's long tips remain north/east/south/west in the Mercator lattice with diagonal inner points; hail remains a hexagon. The layer emits at most four draw calls per frame:
+Storm and hail use static unit polygon meshes with the same instanced start/end center-and-radius transition attributes as rain. Storm's long tips remain north/east/south/west in the Mercator lattice with diagonal inner points; hail remains a hexagon. The layer emits at most four draw calls per frame:
 
 1. rain circles (`#0090FF`);
 2. strong-rain circles (`#0000FF`);
@@ -124,7 +124,9 @@ Rain and strong precipitation conserve their visible areas independently: each p
 
 This produces a demand-driven deterministic symbol pyramid: L14 and L15 both carry finer reconstructed storm/hail symbols; L13 remains the useful provider-scale reference rather than a hard hazard ceiling; and L12 through L9 are recursive reductions rather than direct reassignment from an arbitrary source level. A normal coarse update evaluates only the L13 reference set and the reductions it needs; it does not build the full L15-to-L9 hierarchy.
 
-Adjacent display levels morph over `LOD_MORPH_SECONDS` (currently 0.2 seconds). Circle instances interpolate both their cached endpoint anchors and radii: an inherited symbol can move between a reduced center and its direct child position, while fine-only symbols split from or converge to the deterministic parent center. Correct hazard endpoint geometries crossfade briefly. The app queues adjacent transitions, and reverses an active transition when zoom direction reverses, so pan, Globe latitude compensation, resize, and projection changes cannot initiate a morph.
+Adjacent display levels morph over `LOD_MORPH_SECONDS` (currently 0.2 seconds). For reduced-level transitions L9 through L13, the cached immediate parent/child ownership explicitly controls the transition instead of matching endpoint IDs. Each coarse parent shrinks at its centered anchor while every child, including the child sharing the parent's canonical ID, grows from that same anchor and moves to its own cached anchor. Circle and polygon radii interpolate in squared-radius (area) space, so the parent contribution falls with `1 - progress` while child contributions rise with `progress`.
+
+Storm and hail use that same true split/merge rather than an endpoint crossfade. Each contribution retains its endpoint glyph type during the morph: a hail parent can shrink while storm and hail children grow, preserving hail-over-storm endpoint priority without inventing an intermediate shape. Transition progress only updates a shader uniform and requests a repaint; weather values, topology, and instance data rebuild only at the regular weather cadence. L13–L14 and L14–L15 remain direct vertex-grid transitions, using shared sample IDs where available and zero-radius growth/shrink for fine-only samples; they are not claimed to be centered four-to-one reductions.
 
 ## Legacy modules
 

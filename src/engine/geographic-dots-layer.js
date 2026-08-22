@@ -1,4 +1,4 @@
-import { GeographicSymbolPyramid, STORM_INNER_RATIO } from './geographic-symbol-pyramid.js';
+import { GeographicSymbolPyramid, REFERENCE_GRID_LEVEL, STORM_INNER_RATIO } from './geographic-symbol-pyramid.js';
 
 const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1], storm: [1, 0, 1, 1], hail: [1, 0.831, 0, 1] };
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
@@ -9,18 +9,64 @@ function circularPoints(count) {
     return [Math.cos(angle), Math.sin(angle)];
   });
 }
-const HAIL = circularPoints(6);
-const STORM = circularPoints(8).map((point, index) => {
-  const scale = index % 2 === 0 ? 1 : STORM_INNER_RATIO;
-  return [point[0] * scale, point[1] * scale];
-});
 
-function appendShape(vertices, centerX, centerY, radius, points) {
+function unitShape(points) {
+  const vertices = [];
   for (let index = 0; index < points.length; index++) {
     const current = points[index];
     const next = points[(index + 1) % points.length];
-    vertices.push(centerX, centerY, centerX + current[0] * radius, centerY + current[1] * radius, centerX + next[0] * radius, centerY + next[1] * radius);
+    vertices.push(0, 0, current[0], current[1], next[0], next[1]);
   }
+  return new Float32Array(vertices);
+}
+
+const HAIL = unitShape(circularPoints(6));
+const STORM = unitShape(circularPoints(8).map((point, index) => {
+  const scale = index % 2 === 0 ? 1 : STORM_INNER_RATIO;
+  return [point[0] * scale, point[1] * scale];
+}));
+
+export function areaLinearRadius(startRadius, endRadius, progress) {
+  return Math.sqrt(startRadius * startRadius + (endRadius * endRadius - startRadius * startRadius) * progress);
+}
+
+function pushInstance(values, startAnchor, endAnchor, startRadius, endRadius) {
+  values.push(startAnchor[0], startAnchor[1], endAnchor[0], endAnchor[1], startRadius, endRadius);
+}
+
+export function buildHierarchicalTransitionInstances(coarseSymbols, fineSymbols, childIndices, radiusFor, refining) {
+  const values = [];
+  for (let parentIndex = 0; parentIndex < coarseSymbols.length; parentIndex++) {
+    const parent = coarseSymbols[parentIndex];
+    const parentRadius = radiusFor(parent);
+    if (parentRadius > 0) {
+      if (refining) pushInstance(values, parent.anchor, parent.anchor, parentRadius, 0);
+      else pushInstance(values, parent.anchor, parent.anchor, 0, parentRadius);
+    }
+    for (const childIndex of childIndices[parentIndex]) {
+      const child = fineSymbols[childIndex];
+      const childRadius = radiusFor(child);
+      if (childRadius <= 0) continue;
+      if (refining) pushInstance(values, parent.anchor, child.anchor, 0, childRadius);
+      else pushInstance(values, child.anchor, parent.anchor, childRadius, 0);
+    }
+  }
+  return new Float32Array(values);
+}
+
+function buildDirectTransitionInstances(fromSymbols, toSymbols, radiusFor) {
+  const from = new Map(fromSymbols.map((symbol) => [symbol.id, symbol]));
+  const to = new Map(toSymbols.map((symbol) => [symbol.id, symbol]));
+  const values = [];
+  for (const id of new Set([...from.keys(), ...to.keys()])) {
+    const start = from.get(id);
+    const end = to.get(id);
+    const startRadius = start ? radiusFor(start) : 0;
+    const endRadius = end ? radiusFor(end) : 0;
+    if (startRadius <= 0 && endRadius <= 0) continue;
+    pushInstance(values, start?.anchor || end.anchor, end?.anchor || start.anchor, startRadius, endRadius);
+  }
+  return new Float32Array(values);
 }
 
 function compileShader(gl, type, source) {
@@ -35,9 +81,9 @@ function makeProgram(gl, shaderData, kind) {
   const circle = kind === 'circle';
   const vertexSource = [
     '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
-    circle
-      ? 'in vec2 a_corner;\nin vec2 a_startCenter;\nin vec2 a_endCenter;\nin float a_startRadius;\nin float a_endRadius;\nuniform float u_transition;\nout vec2 v_local;\nvoid main() {\n  v_local = a_corner;\n  vec2 center = mix(a_startCenter, a_endCenter, u_transition);\n  float radius = mix(a_startRadius, a_endRadius, u_transition);\n  gl_Position = projectTile(center + a_corner * radius);\n}'
-      : 'in vec2 a_pos;\nvoid main() { gl_Position = projectTile(a_pos); }'
+    'in vec2 a_vertex;\nin vec2 a_startCenter;\nin vec2 a_endCenter;\nin float a_startRadius;\nin float a_endRadius;\nuniform float u_transition;',
+    circle ? 'out vec2 v_local;' : '',
+    'void main() {\n  float radius = sqrt(mix(a_startRadius * a_startRadius, a_endRadius * a_endRadius, u_transition));\n  vec2 center = mix(a_startCenter, a_endCenter, u_transition);\n  ' + (circle ? 'v_local = a_vertex;\n  ' : '') + 'gl_Position = projectTile(center + a_vertex * radius);\n}'
   ].join('\n');
   const fragmentSource = [
     '#version 300 es', 'precision highp float;', 'uniform vec4 u_color;',
@@ -71,50 +117,26 @@ function setProjection(gl, program, projection) {
   if (transition) gl.uniform1f(transition, projection.projectionTransition);
 }
 
-function circleRadii(symbols) {
-  const result = { rain: new Map(), strong: new Map() };
-  for (const symbol of symbols) {
-    if (symbol.rainRadius > 0) result.rain.set(symbol.id, { anchor: symbol.anchor, radius: symbol.rainRadius });
-    if (symbol.strongRadius > 0) result.strong.set(symbol.id, { anchor: symbol.anchor, radius: symbol.strongRadius });
-  }
-  return result;
+function isHierarchicalTransition(from, to) {
+  return Math.abs(from.level - to.level) === 1 && Math.max(from.level, to.level) <= REFERENCE_GRID_LEVEL;
+}
+
+function transitionInstances(from, to, pyramid, radiusFor) {
+  if (!isHierarchicalTransition(from, to)) return buildDirectTransitionInstances(from.symbols, to.symbols, radiusFor);
+  const refining = to.level > from.level;
+  const coarse = refining ? from : to;
+  const fine = refining ? to : from;
+  return buildHierarchicalTransitionInstances(
+    coarse.symbols,
+    fine.symbols,
+    pyramid.parents.get(fine.level).childIndices,
+    radiusFor,
+    refining
+  );
 }
 
 function makeEndpoint(level, symbols) {
-  return {
-    level,
-    symbolsById: new Map(symbols.map((symbol) => [symbol.id, symbol])),
-    circles: circleRadii(symbols),
-    hazards: symbols.filter((symbol) => symbol.hazardType).map((symbol) => ({
-      id: symbol.id, anchor: symbol.anchor, type: symbol.hazardType, radius: symbol.hazardRadius
-    }))
-  };
-}
-
-function joinCircles(from, to, parentForMissing) {
-  const values = [];
-  for (const id of new Set([...from.keys(), ...to.keys()])) {
-    let start = from.get(id);
-    let end = to.get(id);
-    if (!start) {
-      const parent = parentForMissing('start', id);
-      start = { anchor: parent?.anchor || end.anchor, radius: 0 };
-    }
-    if (!end) {
-      const parent = parentForMissing('end', id);
-      end = { anchor: parent?.anchor || start.anchor, radius: 0 };
-    }
-    values.push(start.anchor[0], start.anchor[1], end.anchor[0], end.anchor[1], start.radius, end.radius);
-  }
-  return new Float32Array(values);
-}
-
-function makeHazardGeometry(hazards, type) {
-  const vertices = [];
-  for (const hazard of hazards) {
-    if (hazard.type === type) appendShape(vertices, hazard.anchor[0], hazard.anchor[1], hazard.radius, type === 'hail' ? HAIL : STORM);
-  }
-  return new Float32Array(vertices);
+  return { level, symbols };
 }
 
 export class GeographicDotsLayer {
@@ -123,9 +145,8 @@ export class GeographicDotsLayer {
     this.type = 'custom';
     this.renderingMode = '3d';
     this.programs = new Map();
-    this.instances = { rain: new Float32Array(), strong: new Float32Array() };
-    this.geometry = { storm: { from: new Float32Array(), to: new Float32Array() }, hail: { from: new Float32Array(), to: new Float32Array() } };
-    this.counts = { rain: 0, strong: 0, storm: { from: 0, to: 0 }, hail: { from: 0, to: 0 } };
+    this.instances = { rain: new Float32Array(), strong: new Float32Array(), storm: new Float32Array(), hail: new Float32Array() };
+    this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.pyramid = new GeographicSymbolPyramid();
     this.representations = new Map();
     this.samples = [];
@@ -136,17 +157,17 @@ export class GeographicDotsLayer {
 
   onAdd(map, gl) {
     this.map = map;
-    this.buffers = { storm: { from: gl.createBuffer(), to: gl.createBuffer() }, hail: { from: gl.createBuffer(), to: gl.createBuffer() } };
-    this.instanceBuffers = { rain: gl.createBuffer(), strong: gl.createBuffer() };
-    this.quadBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, QUAD, gl.STATIC_DRAW);
+    this.instanceBuffers = Object.fromEntries(['rain', 'strong', 'storm', 'hail'].map((type) => [type, gl.createBuffer()]));
+    this.vertexBuffers = { rain: gl.createBuffer(), strong: gl.createBuffer(), storm: gl.createBuffer(), hail: gl.createBuffer() };
+    for (const [type, vertices] of Object.entries({ rain: QUAD, strong: QUAD, storm: STORM, hail: HAIL })) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffers[type]);
+      gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+    }
   }
 
   onRemove(map, gl) {
-    for (const entry of this.programs.values()) { gl.deleteProgram(entry.circle); gl.deleteProgram(entry.polygon); }
-    for (const type of ['storm', 'hail']) for (const side of ['from', 'to']) gl.deleteBuffer(this.buffers?.[type]?.[side]);
-    for (const buffer of [...Object.values(this.instanceBuffers || {}), this.quadBuffer]) if (buffer) gl.deleteBuffer(buffer);
+    for (const programs of this.programs.values()) { gl.deleteProgram(programs.circle); gl.deleteProgram(programs.hazard); }
+    for (const buffer of [...Object.values(this.instanceBuffers || {}), ...Object.values(this.vertexBuffers || {})]) if (buffer) gl.deleteBuffer(buffer);
   }
 
   setSamples(samples, time) {
@@ -154,8 +175,8 @@ export class GeographicDotsLayer {
     this.transition = null;
     const level = samples[0].level;
     this.representations = this.pyramid.evaluate([level], time);
-    const data = makeEndpoint(level, this.representations.get(level));
-    this.setEndpointVisual(data, data, 1);
+    const endpoint = makeEndpoint(level, this.representations.get(level));
+    this.setEndpointVisual(endpoint, endpoint, 1);
   }
 
   setTransition(fromSamples, toSamples, time, progress = 0) {
@@ -177,21 +198,11 @@ export class GeographicDotsLayer {
   }
 
   setEndpointVisual(from, to, progress) {
-    for (const type of ['rain', 'strong']) {
-      this.instances[type] = joinCircles(from.circles[type], to.circles[type], (side, id) => {
-        const childLevel = side === 'start' ? to.level : from.level;
-        const parentId = this.pyramid.parentIdFor(childLevel, id);
-        return (side === 'start' ? from.circles[type] : to.circles[type]).get(parentId) ||
-          (side === 'start' ? from.symbolsById : to.symbolsById).get(parentId);
-      });
-      this.counts[type] = this.instances[type].length / 6;
-    }
-    for (const type of ['storm', 'hail']) {
-      this.geometry[type].from = makeHazardGeometry(from.hazards, type);
-      this.geometry[type].to = makeHazardGeometry(to.hazards, type);
-      this.counts[type].from = this.geometry[type].from.length / 2;
-      this.counts[type].to = this.geometry[type].to.length / 2;
-    }
+    this.instances.rain = transitionInstances(from, to, this.pyramid, (symbol) => symbol.rainRadius);
+    this.instances.strong = transitionInstances(from, to, this.pyramid, (symbol) => symbol.strongRadius);
+    this.instances.storm = transitionInstances(from, to, this.pyramid, (symbol) => symbol.hazardType === 'storm' ? symbol.hazardRadius : 0);
+    this.instances.hail = transitionInstances(from, to, this.pyramid, (symbol) => symbol.hazardType === 'hail' ? symbol.hazardRadius : 0);
+    for (const type of ['rain', 'strong', 'storm', 'hail']) this.counts[type] = this.instances[type].length / 6;
     this.transitionProgress = progress;
     this.buffersDirty = true;
     this.map?.triggerRepaint();
@@ -203,12 +214,8 @@ export class GeographicDotsLayer {
   }
 
   uploadBuffers(gl) {
-    if (!this.buffersDirty || !this.buffers) return;
-    for (const type of ['storm', 'hail']) for (const side of ['from', 'to']) {
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[type][side]);
-      gl.bufferData(gl.ARRAY_BUFFER, this.geometry[type][side], gl.STREAM_DRAW);
-    }
-    for (const type of ['rain', 'strong']) {
+    if (!this.buffersDirty || !this.instanceBuffers) return;
+    for (const type of ['rain', 'strong', 'storm', 'hail']) {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[type]);
       gl.bufferData(gl.ARRAY_BUFFER, this.instances[type], gl.STREAM_DRAW);
     }
@@ -218,27 +225,28 @@ export class GeographicDotsLayer {
   programsFor(gl, shaderData) {
     let programs = this.programs.get(shaderData.variantName);
     if (!programs) {
-      programs = { circle: makeProgram(gl, shaderData, 'circle'), polygon: makeProgram(gl, shaderData, 'polygon') };
+      programs = { circle: makeProgram(gl, shaderData, 'circle'), hazard: makeProgram(gl, shaderData, 'hazard') };
       this.programs.set(shaderData.variantName, programs);
     }
     return programs;
   }
 
-  renderCircles(gl, program, projection) {
+  renderInstances(gl, program, projection, types) {
     gl.useProgram(program);
     setProjection(gl, program, projection);
     gl.uniform1f(gl.getUniformLocation(program, 'u_transition'), this.transitionProgress);
-    const corner = gl.getAttribLocation(program, 'a_corner');
+    const vertex = gl.getAttribLocation(program, 'a_vertex');
     const startCenter = gl.getAttribLocation(program, 'a_startCenter');
     const endCenter = gl.getAttribLocation(program, 'a_endCenter');
     const startRadius = gl.getAttribLocation(program, 'a_startRadius');
     const endRadius = gl.getAttribLocation(program, 'a_endRadius');
     const color = gl.getUniformLocation(program, 'u_color');
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-    gl.enableVertexAttribArray(corner);
-    gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
-    for (const type of ['rain', 'strong']) {
+
+    for (const type of types) {
       if (!this.counts[type]) continue;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffers[type]);
+      gl.enableVertexAttribArray(vertex);
+      gl.vertexAttribPointer(vertex, 2, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[type]);
       gl.enableVertexAttribArray(startCenter);
       gl.vertexAttribPointer(startCenter, 2, gl.FLOAT, false, 24, 0);
@@ -253,28 +261,13 @@ export class GeographicDotsLayer {
       gl.vertexAttribPointer(endRadius, 1, gl.FLOAT, false, 24, 20);
       gl.vertexAttribDivisor(endRadius, 1);
       gl.uniform4fv(color, COLORS[type]);
-      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.counts[type]);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, type === 'rain' || type === 'strong' ? 6 : ((type === 'storm' ? STORM.length : HAIL.length) / 2), this.counts[type]);
     }
+
     gl.vertexAttribDivisor(startCenter, 0);
     gl.vertexAttribDivisor(endCenter, 0);
     gl.vertexAttribDivisor(startRadius, 0);
     gl.vertexAttribDivisor(endRadius, 0);
-  }
-
-  renderPolygons(gl, program, projection) {
-    gl.useProgram(program);
-    setProjection(gl, program, projection);
-    const position = gl.getAttribLocation(program, 'a_pos');
-    const color = gl.getUniformLocation(program, 'u_color');
-    for (const type of ['storm', 'hail']) for (const side of ['from', 'to']) {
-      const alpha = side === 'from' ? 1 - this.transitionProgress : this.transitionProgress;
-      if (!alpha || !this.counts[type][side]) continue;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[type][side]);
-      gl.enableVertexAttribArray(position);
-      gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
-      gl.uniform4fv(color, [...COLORS[type].slice(0, 3), alpha]);
-      gl.drawArrays(gl.TRIANGLES, 0, this.counts[type][side]);
-    }
   }
 
   render(gl, args) {
@@ -286,8 +279,8 @@ export class GeographicDotsLayer {
     gl.depthMask(false);
     gl.enable(gl.POLYGON_OFFSET_FILL);
     gl.polygonOffset(-1, -1);
-    this.renderCircles(gl, programs.circle, args.defaultProjectionData);
-    this.renderPolygons(gl, programs.polygon, args.defaultProjectionData);
+    this.renderInstances(gl, programs.circle, args.defaultProjectionData, ['rain', 'strong']);
+    this.renderInstances(gl, programs.hazard, args.defaultProjectionData, ['storm', 'hail']);
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.depthMask(true);
   }
