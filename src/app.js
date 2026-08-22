@@ -254,7 +254,10 @@ function frame(now) {
   if (state.playing && !state.scrubbing) {
     state.time = (state.time + delta) % LOOP_SECONDS;
   }
-  if (state.mapReady && !state.scrubbing) weatherLayer.updateWeather(state.time / LOOP_SECONDS);
+  // A paused static layer has no temporal uniform to advance. Leaving its
+  // repaint scheduling to MapLibre prevents the application RAF from keeping
+  // an otherwise idle map rendering continuously.
+  if (state.mapReady && state.playing && !state.scrubbing) weatherLayer.updateWeather(state.time / LOOP_SECONDS);
   updateLODTransition(now);
   if (!state.scrubbing) timeSlider.value = String(state.time / LOOP_SECONDS);
   requestAnimationFrame(frame);

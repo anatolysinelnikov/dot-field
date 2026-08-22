@@ -36,24 +36,55 @@ export function areaLinearRadius(startRadius, endRadius, progress) {
   return Math.sqrt(startRadius * startRadius + (endRadius * endRadius - startRadius * startRadius) * progress);
 }
 
-function pushInstance(values, startAnchor, endAnchor, startTime0, startTime1, endTime0, endTime1) {
-  values.push(startAnchor[0], startAnchor[1], endAnchor[0], endAnchor[1], startTime0, startTime1, endTime0, endTime1);
+class InstanceWriter {
+  constructor() {
+    this.values = new Float32Array();
+    this.length = 0;
+  }
+
+  reset() {
+    this.length = 0;
+  }
+
+  push(startAnchor, endAnchor, startTime0, startTime1, endTime0, endTime1) {
+    const nextLength = this.length + INSTANCE_STRIDE;
+    if (nextLength > this.values.length) {
+      const capacity = Math.max(nextLength, this.values.length * 2, 256);
+      const values = new Float32Array(capacity);
+      values.set(this.values);
+      this.values = values;
+    }
+    const offset = this.length;
+    this.values[offset] = startAnchor[0];
+    this.values[offset + 1] = startAnchor[1];
+    this.values[offset + 2] = endAnchor[0];
+    this.values[offset + 3] = endAnchor[1];
+    this.values[offset + 4] = startTime0;
+    this.values[offset + 5] = startTime1;
+    this.values[offset + 6] = endTime0;
+    this.values[offset + 7] = endTime1;
+    this.length = nextLength;
+  }
+
+  finish() {
+    return this.values.subarray(0, this.length);
+  }
 }
 
 function hasTemporalRadius(radius0, radius1, radius2 = 0, radius3 = 0) {
   return radius0 > 0 || radius1 > 0 || radius2 > 0 || radius3 > 0;
 }
 
-export function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, childIndices, radiusFor, refining) {
-  const values = [];
+export function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, childIndices, radiusFor, refining, writer = new InstanceWriter()) {
+  writer.reset();
   for (let parentIndex = 0; parentIndex < coarseTime0.length; parentIndex++) {
     const parent0 = coarseTime0[parentIndex];
     const parent1 = coarseTime1[parentIndex];
     const parentRadius0 = radiusFor(parent0);
     const parentRadius1 = radiusFor(parent1);
     if (hasTemporalRadius(parentRadius0, parentRadius1)) {
-      if (refining) pushInstance(values, parent0.anchor, parent0.anchor, parentRadius0, parentRadius1, 0, 0);
-      else pushInstance(values, parent0.anchor, parent0.anchor, 0, 0, parentRadius0, parentRadius1);
+      if (refining) writer.push(parent0.anchor, parent0.anchor, parentRadius0, parentRadius1, 0, 0);
+      else writer.push(parent0.anchor, parent0.anchor, 0, 0, parentRadius0, parentRadius1);
     }
 
     for (const childIndex of childIndices[parentIndex]) {
@@ -62,27 +93,27 @@ export function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coars
       const childRadius0 = radiusFor(child0);
       const childRadius1 = radiusFor(child1);
       if (!hasTemporalRadius(childRadius0, childRadius1)) continue;
-      if (refining) pushInstance(values, parent0.anchor, child0.anchor, 0, 0, childRadius0, childRadius1);
-      else pushInstance(values, child0.anchor, parent0.anchor, childRadius0, childRadius1, 0, 0);
+      if (refining) writer.push(parent0.anchor, child0.anchor, 0, 0, childRadius0, childRadius1);
+      else writer.push(child0.anchor, parent0.anchor, childRadius0, childRadius1, 0, 0);
     }
   }
-  return new Float32Array(values);
+  return writer.finish();
 }
 
-function buildSameLevelTemporalInstances(symbolsTime0, symbolsTime1, radiusFor) {
-  const values = [];
+function buildSameLevelTemporalInstances(symbolsTime0, symbolsTime1, radiusFor, writer) {
+  writer.reset();
   for (let index = 0; index < symbolsTime0.length; index++) {
     const symbol0 = symbolsTime0[index];
     const symbol1 = symbolsTime1[index];
     const radius0 = radiusFor(symbol0);
     const radius1 = radiusFor(symbol1);
-    if (hasTemporalRadius(radius0, radius1)) pushInstance(values, symbol0.anchor, symbol0.anchor, radius0, radius1, radius0, radius1);
+    if (hasTemporalRadius(radius0, radius1)) writer.push(symbol0.anchor, symbol0.anchor, radius0, radius1, radius0, radius1);
   }
-  return new Float32Array(values);
+  return writer.finish();
 }
 
-function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, pairs, fromIsLower, radiusFor) {
-  const values = [];
+function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, pairs, fromIsLower, radiusFor, writer) {
+  writer.reset();
   for (let index = 0; index < pairs.length; index += 2) {
     const lowerIndex = pairs[index];
     const higherIndex = pairs[index + 1];
@@ -97,9 +128,9 @@ function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, pa
     const toRadius0 = to0 ? radiusFor(to0) : 0;
     const toRadius1 = to1 ? radiusFor(to1) : 0;
     if (!hasTemporalRadius(fromRadius0, fromRadius1, toRadius0, toRadius1)) continue;
-    pushInstance(values, from0?.anchor || from1?.anchor || to0.anchor, to0?.anchor || to1?.anchor || from0.anchor, fromRadius0, fromRadius1, toRadius0, toRadius1);
+    writer.push(from0?.anchor || from1?.anchor || to0.anchor, to0?.anchor || to1?.anchor || from0.anchor, fromRadius0, fromRadius1, toRadius0, toRadius1);
   }
-  return new Float32Array(values);
+  return writer.finish();
 }
 
 function compileShader(gl, type, source) {
@@ -186,6 +217,7 @@ export class GeographicDotsLayer {
     this.renderingMode = '3d';
     this.programs = new Map();
     this.instances = { rain: new Float32Array(), strong: new Float32Array(), storm: new Float32Array(), hail: new Float32Array() };
+    this.instanceWriters = { rain: new InstanceWriter(), strong: new InstanceWriter(), storm: new InstanceWriter(), hail: new InstanceWriter() };
     this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.bufferCapacity = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.pyramid = new GeographicSymbolPyramid();
@@ -290,7 +322,7 @@ export class GeographicDotsLayer {
     if (!this.transition) {
       const level = this.samples[0].level;
       for (const type of ['rain', 'strong', 'storm', 'hail']) {
-        this.setInstances(type, buildSameLevelTemporalInstances(frames0.get(level), frames1.get(level), radiusFor[type]));
+        this.setInstances(type, buildSameLevelTemporalInstances(frames0.get(level), frames1.get(level), radiusFor[type], this.instanceWriters[type]));
       }
     } else {
       const fromLevel = this.transition.fromSamples[0].level;
@@ -311,7 +343,8 @@ export class GeographicDotsLayer {
             frames1.get(fineLevel),
             this.pyramid.parents.get(fineLevel).childIndices,
             radiusFor[type],
-            refining
+            refining,
+            this.instanceWriters[type]
           )
           : buildDirectTemporalInstances(
             frames0.get(fromLevel),
@@ -320,7 +353,8 @@ export class GeographicDotsLayer {
             frames1.get(toLevel),
             pairs,
             fromIsLower,
-            radiusFor[type]
+            radiusFor[type],
+            this.instanceWriters[type]
           );
         this.setInstances(type, data);
       }
