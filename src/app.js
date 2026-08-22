@@ -41,8 +41,14 @@ const WEATHER_CONTEXT_RAIL_IDS = [
   'railway_dashline'
 ];
 const WEATHER_CONTEXT_MAJOR_SUPPORT_IDS = ['highway_major_subtle'];
-const DEFAULT_PLACE_LABEL_COLOR = '#F5F5F5';
-const DEFAULT_ROAD_LABEL_COLOR = '#C7C7C7';
+const WEATHER_CONTEXT_UPPER_LINE_FACTORS = [
+  ['highway_major_inner', 0.45],
+  ['highway_motorway_casing', 0.7],
+  ['highway_motorway_inner', 0.7],
+  ['highway_motorway_subtle', 0.7]
+];
+const PLACE_LABEL_COLOR = '#AAAAAA';
+const ROAD_LABEL_COLOR = '#AAAAAA';
 const MAX_SAMPLING_LATITUDE = 85;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
@@ -51,12 +57,6 @@ const lodLabel = document.querySelector('#lodLabel');
 const sampleLabel = document.querySelector('#sampleLabel');
 const projectionSelector = document.querySelector('#projectionSelector');
 const projectionButtons = [...projectionSelector.querySelectorAll('[data-projection]')];
-const placeLabelColorInput = document.querySelector('#placeLabelColor');
-const placeLabelColorValue = document.querySelector('#placeLabelColorValue');
-const roadLabelColorInput = document.querySelector('#roadLabelColor');
-const roadLabelColorValue = document.querySelector('#roadLabelColorValue');
-let placeLabelColor = DEFAULT_PLACE_LABEL_COLOR;
-let roadLabelColor = DEFAULT_ROAD_LABEL_COLOR;
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 
@@ -135,16 +135,10 @@ function commitSamples(level, samples) {
   updateReadout();
 }
 
-function setLabelTextColor(layerIds, color) {
-  for (const layerId of layerIds) {
-    if (map.getLayer(layerId)) map.setPaintProperty(layerId, 'text-color', color);
-  }
-}
-
-function updateColorValue(input, output) {
-  const color = input.value.toUpperCase();
-  output.textContent = color;
-  return color;
+function multiplyPaintOpacity(currentOpacity, factor) {
+  if (typeof currentOpacity === 'number') return currentOpacity * factor;
+  if (Array.isArray(currentOpacity)) return ['*', currentOpacity, factor];
+  return factor;
 }
 
 function tuneWeatherContext(style) {
@@ -158,12 +152,17 @@ function tuneWeatherContext(style) {
   }
   for (const layerId of WEATHER_CONTEXT_PLACE_LABEL_IDS) {
     if (!map.getLayer(layerId)) continue;
-    map.setPaintProperty(layerId, 'text-color', placeLabelColor);
+    map.setPaintProperty(layerId, 'text-color', PLACE_LABEL_COLOR);
     map.setPaintProperty(layerId, 'text-halo-width', 1.75);
   }
   for (const layerId of WEATHER_CONTEXT_ROAD_LABEL_IDS) {
     if (!map.getLayer(layerId)) continue;
-    map.setPaintProperty(layerId, 'text-color', roadLabelColor);
+    map.setPaintProperty(layerId, 'text-color', ROAD_LABEL_COLOR);
+  }
+  for (const [layerId, factor] of WEATHER_CONTEXT_UPPER_LINE_FACTORS) {
+    if (!map.getLayer(layerId)) continue;
+    const currentOpacity = map.getPaintProperty(layerId, 'line-opacity');
+    map.setPaintProperty(layerId, 'line-opacity', multiplyPaintOpacity(currentOpacity, factor));
   }
 }
 
@@ -309,18 +308,6 @@ for (const eventName of ['pointerup', 'pointercancel']) {
   });
 }
 for (const button of projectionButtons) button.addEventListener('click', () => setProjection(button.dataset.projection));
-placeLabelColorInput.value = placeLabelColor;
-placeLabelColorValue.textContent = placeLabelColor;
-roadLabelColorInput.value = roadLabelColor;
-roadLabelColorValue.textContent = roadLabelColor;
-placeLabelColorInput.addEventListener('input', () => {
-  placeLabelColor = updateColorValue(placeLabelColorInput, placeLabelColorValue);
-  setLabelTextColor(WEATHER_CONTEXT_PLACE_LABEL_IDS, placeLabelColor);
-});
-roadLabelColorInput.addEventListener('input', () => {
-  roadLabelColor = updateColorValue(roadLabelColorInput, roadLabelColorValue);
-  setLabelTextColor(WEATHER_CONTEXT_ROAD_LABEL_IDS, roadLabelColor);
-});
 
 map.on('style.load', () => {
   if (!state.mapReady) map.setProjection({ type: 'globe' });
