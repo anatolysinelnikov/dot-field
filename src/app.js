@@ -6,6 +6,8 @@ import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/dark';
 const WEATHER_CONTEXT_BEFORE_IDS = [
+  'highway_major_inner',
+  'highway_major_subtle',
   'highway_motorway_casing',
   'highway_name_other',
   'boundary_state',
@@ -25,6 +27,11 @@ const WEATHER_CONTEXT_TEXT_IDS = [
   'place_country_minor',
   'place_country_major'
 ];
+const WEATHER_CONTEXT_ROAD_LABEL_IDS = [
+  'highway_name_other',
+  'highway_name_motorway'
+];
+const WEATHER_CONTEXT_PLACE_LABEL_IDS = WEATHER_CONTEXT_TEXT_IDS.filter((layerId) => !WEATHER_CONTEXT_ROAD_LABEL_IDS.includes(layerId));
 const WEATHER_CONTEXT_RAIL_IDS = [
   'railway_transit',
   'railway_transit_dashline',
@@ -33,6 +40,7 @@ const WEATHER_CONTEXT_RAIL_IDS = [
   'railway',
   'railway_dashline'
 ];
+const WEATHER_CONTEXT_MAJOR_SUPPORT_IDS = ['highway_major_subtle'];
 const MAX_SAMPLING_LATITUDE = 85;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
@@ -128,6 +136,15 @@ function tuneWeatherContext(style) {
     map.setPaintProperty(layerId, 'text-halo-width', 1.5);
     map.setPaintProperty(layerId, 'text-halo-blur', 0.2);
   }
+  for (const layerId of WEATHER_CONTEXT_PLACE_LABEL_IDS) {
+    if (!map.getLayer(layerId)) continue;
+    map.setPaintProperty(layerId, 'text-color', '#F5F5F5');
+    map.setPaintProperty(layerId, 'text-halo-width', 1.75);
+  }
+  for (const layerId of WEATHER_CONTEXT_ROAD_LABEL_IDS) {
+    if (!map.getLayer(layerId)) continue;
+    map.setPaintProperty(layerId, 'text-color', '#C7C7C7');
+  }
 }
 
 function initializeWeatherLayer() {
@@ -138,6 +155,9 @@ function initializeWeatherLayer() {
     map.addLayer(weatherLayer, beforeId);
   }
   for (const layerId of WEATHER_CONTEXT_RAIL_IDS) {
+    if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
+  }
+  for (const layerId of WEATHER_CONTEXT_MAJOR_SUPPORT_IDS) {
     if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
   }
   if (state.mapReady) return;
