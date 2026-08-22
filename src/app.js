@@ -58,6 +58,7 @@ const MAPTILER_WATER_LABEL_IDS = [
 ];
 const MAPTILER_WATER_SHADOW_ID = 'Water shadow';
 const MAPTILER_WATER_WASH_ID = 'geographic-water-wash';
+const MAPTILER_WATER_EDGE_SHADOW_ID = 'geographic-water-edge-shadow';
 
 const map = new window.maplibregl.Map({
   container: 'map',
@@ -145,6 +146,7 @@ function initializeWeatherLayer() {
   }
 
   const waterLayer = styleLayers.find((layer) => layer.id === 'Water' && layer.type === 'fill');
+  const waterShadowLayer = styleLayers.find((layer) => layer.id === MAPTILER_WATER_SHADOW_ID);
   if (waterLayer && !map.getLayer(MAPTILER_WATER_WASH_ID)) {
     try {
       map.addLayer({
@@ -186,10 +188,27 @@ function initializeWeatherLayer() {
     }
   }
 
-  const waterShadowLayer = styleLayers.find((layer) => layer.id === MAPTILER_WATER_SHADOW_ID);
-  if (waterShadowLayer && map.getLayer(MAPTILER_WATER_SHADOW_ID)) {
-    const nativeOpacity = waterShadowLayer.paint?.['fill-opacity'];
-    map.setPaintProperty(MAPTILER_WATER_SHADOW_ID, 'fill-opacity', nativeOpacity ?? 1);
+  if (waterLayer && !map.getLayer(MAPTILER_WATER_EDGE_SHADOW_ID)) {
+    try {
+      map.addLayer({
+        id: MAPTILER_WATER_EDGE_SHADOW_ID,
+        type: 'line',
+        source: waterLayer.source,
+        'source-layer': waterLayer['source-layer'],
+        ...(waterLayer.minzoom === undefined ? {} : { minzoom: waterLayer.minzoom }),
+        ...(waterLayer.maxzoom === undefined ? {} : { maxzoom: waterLayer.maxzoom }),
+        filter: waterLayer.filter,
+        paint: {
+          'line-color': waterShadowLayer?.paint?.['fill-color'] || '#000000',
+          'line-opacity': 1,
+          'line-width': 3,
+          'line-blur': 1.5,
+          'line-offset': -1.5
+        }
+      }, weatherLayer.id);
+    } catch (error) {
+      console.warn('MapTiler water-edge shadow context is unavailable.', error instanceof Error ? error.message : error);
+    }
   }
 
   const upperContextIds = new Set([
@@ -208,7 +227,7 @@ function initializeWeatherLayer() {
 
   const upperOrder = [
     MAPTILER_WATER_WASH_ID,
-    MAPTILER_WATER_SHADOW_ID,
+    MAPTILER_WATER_EDGE_SHADOW_ID,
     MAPTILER_WATER_BOUNDARY_ID,
     ...MAPTILER_HYDROGRAPHY_IDS,
     ...MAPTILER_ADMIN_BOUNDARY_IDS,
