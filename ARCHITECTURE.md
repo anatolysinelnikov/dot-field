@@ -51,7 +51,7 @@ app.js ----------------------> MapLibre GL JS
 
 `app.js` owns UI state, play/pause, timeline scrubbing, projection buttons, MapLibre construction, logical sampling-zoom selection, weather refresh scheduling, and readouts. It does not implement camera controls; MapLibre owns those.
 
-The map uses the OpenFreeMap Dark style at `https://tiles.openfreemap.org/styles/dark`; the normal MapLibre attribution control remains enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context.
+The map uses the OpenFreeMap Dark style at `https://tiles.openfreemap.org/styles/dark`; the normal MapLibre attribution control remains enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context. The custom weather layer is attached from the style-ready lifecycle (`style.load`) with an idempotent `getLayer` check, so individual basemap source or tile failures do not gate weather initialization. MapLibre error events remain visible in the console with available source/tile/resource context.
 
 The initial projection is Globe. The explicit UI switches between `globe` and `mercator` through `map.setProjection`. The center/zoom are retained by MapLibre, and no weather/sample data is regenerated for a projection switch. Projection changes temporarily suppress sampling-zoom deltas and rebase the raw camera baseline after two render frames, so the visual A/B does not change LOD.
 

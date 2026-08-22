@@ -43,6 +43,7 @@ const state = {
   weatherQueued: false
 };
 const weatherLayer = new GeographicDotsLayer();
+let lastMapErrorSignature = '';
 
 function updateReadout() {
   zoomLabel.textContent = state.logicalSamplingZoom.toFixed(2);
@@ -87,6 +88,15 @@ function commitSamples(level, samples) {
   state.samples = samples;
   weatherLayer.setSamples(samples, state.time / LOOP_SECONDS);
   updateReadout();
+}
+
+function initializeWeatherLayer() {
+  const layerAlreadyPresent = Boolean(map.getLayer(weatherLayer.id));
+  if (!layerAlreadyPresent) map.addLayer(weatherLayer);
+  if (state.mapReady) return;
+  state.mapReady = true;
+  rebaseCamera();
+  rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
 }
 
 function startAdjacentTransition(level, now) {
@@ -213,15 +223,30 @@ for (const eventName of ['pointerup', 'pointercancel']) {
 }
 for (const button of projectionButtons) button.addEventListener('click', () => setProjection(button.dataset.projection));
 
-map.on('style.load', () => map.setProjection({ type: 'globe' }));
-map.on('load', () => {
-  map.addLayer(weatherLayer);
-  state.mapReady = true;
-  rebaseCamera();
-  rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
+map.on('style.load', () => {
+  if (!state.mapReady) map.setProjection({ type: 'globe' });
+  initializeWeatherLayer();
 });
 map.on('move', updateLogicalSamplingZoom);
-map.on('error', (event) => console.error('MapLibre error:', event.error));
+map.on('error', (event) => {
+  const error = event?.error;
+  const details = [];
+  if (event && 'sourceId' in event && event.sourceId) details.push(`source=${event.sourceId}`);
+  if (event && 'tile' in event && event.tile) details.push('tile');
+  if (event && 'url' in event && event.url) details.push(`url=${event.url}`);
+  const message = error instanceof Error ? error.message : String(error || 'Unknown MapLibre error');
+  const signature = `${details.join('|')}|${message}`;
+  if (signature === lastMapErrorSignature) return;
+  lastMapErrorSignature = signature;
+  const lowerMessage = message.toLowerCase();
+  const category = event?.tile ? 'vector-tile'
+    : event?.sourceId ? 'source/TileJSON'
+      : lowerMessage.includes('sprite') ? 'sprite'
+        : lowerMessage.includes('glyph') ? 'glyph'
+          : lowerMessage.includes('style') ? 'style'
+            : 'generic';
+  console.error(`MapLibre ${category} error${details.length ? ` (${details.join(', ')})` : ''}:`, error || event);
+});
 
 function frame(now) {
   const delta = Math.min((now - state.lastFrame) / 1000, 0.1);
