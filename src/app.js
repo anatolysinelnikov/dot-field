@@ -46,15 +46,13 @@ const MAPTILER_GEOGRAPHIC_LABEL_IDS = [
 const MAPTILER_HYDROGRAPHY_IDS = ['River intermittent', 'River'];
 const MAPTILER_ADMIN_BOUNDARY_IDS = ['Other border', 'Disputed border', 'Country border'];
 const MAPTILER_WATER_BOUNDARY_ID = 'geographic-water-boundaries';
-const MAPTILER_WATER_SHADOW_ID = 'Water shadow';
-const MAPTILER_WATER_WASH_ID = 'geographic-water-wash';
 
 const map = new window.maplibregl.Map({
   container: 'map',
   style: MAP_STYLE,
   center: WEATHER_REGION.center,
   zoom: WEATHER_REGION.initialZoom,
-  minZoom: 1,
+  minZoom: 1.5,
   maxPitch: 75,
   canvasContextAttributes: { antialias: true },
   attributionControl: { compact: false }
@@ -134,26 +132,6 @@ function initializeWeatherLayer() {
   }
 
   const waterLayer = styleLayers.find((layer) => layer.id === 'Water' && layer.type === 'fill');
-  if (waterLayer && !map.getLayer(MAPTILER_WATER_WASH_ID)) {
-    try {
-      map.addLayer({
-        id: MAPTILER_WATER_WASH_ID,
-        type: 'fill',
-        source: waterLayer.source,
-        'source-layer': waterLayer['source-layer'],
-        ...(waterLayer.minzoom === undefined ? {} : { minzoom: waterLayer.minzoom }),
-        ...(waterLayer.maxzoom === undefined ? {} : { maxzoom: waterLayer.maxzoom }),
-        filter: waterLayer.filter,
-        paint: {
-          'fill-color': waterLayer.paint?.['fill-color'] || '#141414',
-          'fill-opacity': 0.12
-        }
-      }, weatherLayer.id);
-    } catch (error) {
-      console.warn('MapTiler water-wash context is unavailable.', error instanceof Error ? error.message : error);
-    }
-  }
-
   if (waterLayer && !map.getLayer(MAPTILER_WATER_BOUNDARY_ID)) {
     try {
       map.addLayer({
@@ -178,8 +156,6 @@ function initializeWeatherLayer() {
   const upperContextIds = new Set([
     ...MAPTILER_HYDROGRAPHY_IDS,
     MAPTILER_WATER_BOUNDARY_ID,
-    MAPTILER_WATER_SHADOW_ID,
-    MAPTILER_WATER_WASH_ID,
     ...MAPTILER_ADMIN_BOUNDARY_IDS,
     ...MAPTILER_GEOGRAPHIC_LABEL_IDS
   ]);
@@ -191,8 +167,6 @@ function initializeWeatherLayer() {
   }
 
   const upperOrder = [
-    MAPTILER_WATER_WASH_ID,
-    MAPTILER_WATER_SHADOW_ID,
     MAPTILER_WATER_BOUNDARY_ID,
     ...MAPTILER_HYDROGRAPHY_IDS,
     ...MAPTILER_ADMIN_BOUNDARY_IDS,
