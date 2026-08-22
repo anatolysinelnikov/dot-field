@@ -92,6 +92,7 @@ export class GeographicDotsLayer {
     this.programs = new Map();
     this.geometry = { rain: new Float32Array(), strong: new Float32Array(), storm: new Float32Array(), hail: new Float32Array() };
     this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
+    this.samples = [];
     this.buffersDirty = true;
   }
 
@@ -106,9 +107,14 @@ export class GeographicDotsLayer {
     for (const buffer of Object.values(this.buffers || {})) gl.deleteBuffer(buffer);
   }
 
-  update(samples, time) {
+  setSamples(samples, time) {
+    this.samples = samples;
+    this.updateWeather(time);
+  }
+
+  updateWeather(time) {
     const vertices = { rain: [], strong: [], storm: [], hail: [] };
-    for (const sample of samples) {
+    for (const sample of this.samples) {
       const [longitude, latitude] = sample.vertex.lngLat;
       const value = geographicIntensityAt(longitude, latitude, time);
       const rainRadius = intensityToRadius(value.rain, sample.spacing, 'rain');

@@ -9,7 +9,7 @@ function midpoint(a, b) {
   return normalize([a[0] + b[0], a[1] + b[1], a[2] + b[2]]);
 }
 
-function angularDistance(a, b) {
+export function angularDistance(a, b) {
   return Math.acos(Math.min(1, Math.max(-1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])));
 }
 
@@ -33,26 +33,31 @@ const ROOT_FACES = [
 export class Icosphere {
   constructor(maxLevel) {
     this.maxLevel = maxLevel;
-    this.vertices = ROOT_POINTS.map((position, id) => ({ id, position, lngLat: longitudeLatitude(position) }));
+    this.vertexByIdentity = new Map();
+    this.vertices = ROOT_POINTS.map((position, index) => {
+      const identity = `root-${index}`;
+      const vertex = { index, identity, position, lngLat: longitudeLatitude(position) };
+      this.vertexByIdentity.set(identity, index);
+      return vertex;
+    });
     this.levels = [ROOT_FACES.map((vertices, index) => ({ id: `0/${index}`, level: 0, vertices, children: null }))];
-    this.midpointIds = [];
-    this.edgeAngle = angularDistance(this.vertices[0].position, this.vertices[11].position);
   }
 
   subdivide(face) {
     if (face.children || face.level >= this.maxLevel) return face.children;
     const nextLevel = face.level + 1;
-    const edgeVertices = this.midpointIds[nextLevel] ?? new Map();
-    this.midpointIds[nextLevel] = edgeVertices;
     const midpointId = (left, right) => {
-      const key = left < right ? `${left}:${right}` : `${right}:${left}`;
-      const existing = edgeVertices.get(key);
+      const leftIdentity = this.vertices[left].identity;
+      const rightIdentity = this.vertices[right].identity;
+      const endpoints = [leftIdentity, rightIdentity].sort();
+      const identity = `midpoint(${endpoints[0]}|${endpoints[1]})`;
+      const existing = this.vertexByIdentity.get(identity);
       if (existing !== undefined) return existing;
       const position = midpoint(this.vertices[left].position, this.vertices[right].position);
-      const id = this.vertices.length;
-      this.vertices.push({ id, position, lngLat: longitudeLatitude(position) });
-      edgeVertices.set(key, id);
-      return id;
+      const index = this.vertices.length;
+      this.vertices.push({ index, identity, position, lngLat: longitudeLatitude(position) });
+      this.vertexByIdentity.set(identity, index);
+      return index;
     };
     const [a, b, c] = face.vertices;
     const ab = midpointId(a, b);
@@ -66,7 +71,4 @@ export class Icosphere {
     return face.children;
   }
 
-  sampleSpacing(level) {
-    return this.edgeAngle / Math.pow(2, level);
-  }
 }

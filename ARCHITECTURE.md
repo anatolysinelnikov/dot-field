@@ -49,43 +49,47 @@ app.js ----------------------> MapLibre GL JS
 
 ### Application orchestration — `src/app.js`
 
-`app.js` owns UI state, play/pause, timeline scrubbing, projection buttons, MapLibre construction, LOD refresh scheduling, and readouts. It does not implement camera controls; MapLibre owns those.
+`app.js` owns UI state, play/pause, timeline scrubbing, projection buttons, MapLibre construction, zoom-to-topology selection, weather refresh scheduling, and readouts. It does not implement camera controls; MapLibre owns those.
 
 The map uses the OpenFreeMap Dark style at `https://tiles.openfreemap.org/styles/dark`; the normal MapLibre attribution control remains enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context.
 
 The initial projection is Globe. The explicit UI switches between `globe` and `mercator` through `map.setProjection`. The center/zoom are retained by MapLibre, and no weather/sample data is regenerated for a projection switch.
 
-Animation is deterministic and has the existing 18-second loop. Weather geometry is refreshed at a modest cadence while playing because field movement is slow; a map move, resize, projection change, or timeline scrub queues a fresh selection immediately.
+Animation is deterministic and has the existing 18-second loop. Weather values and symbol buffers are refreshed at a modest cadence while playing because field movement is slow. Topology is rebuilt only when the discrete zoom-derived icosphere level changes. MapLibre camera movement and projection changes only reproject the existing layer geometry.
 
 ## Geographic synthetic field adapter — `src/engine/geography.js`
 
-`WEATHER_REGION` centralizes the test anchor:
+`WEATHER_REGION` centralizes the test anchor, scale, trajectory, and normalized synthetic support:
 
 ```text
-center: [-4, 55]             # United Kingdom / North Atlantic / North Sea
-longitudeSpan: 32 degrees
-latitudeSpan: 20 degrees
+center: [-3, 54.5]           # central Great Britain
+longitudeSpan: 15 degrees
+latitudeSpan: 9.5 degrees
+trajectory: x = 0.33..0.67
+field support: x radius 0.92, y radius 0.76
 ```
 
-`geographicIntensityAt(longitude, latitude, time)` converts a geographic sample into the old synthetic field coordinate system, then calls `field.intensityAt`. Its deterministic horizontal travel is derived only from time. Pan, zoom, viewport size, and Globe/Mercator mode do not affect it.
+The exported `WEATHER_SUPPORT` bounds are derived from that same configuration and are the only support bounds consumed by the icosphere sampler. Moving the experiment to another region requires changing this one geographic configuration. `geographicIntensityAt(longitude, latitude, time)` converts a geographic sample into the old synthetic field coordinate system, then calls `field.intensityAt`. Its deterministic horizontal travel is derived only from time. Pan, zoom, viewport size, and Globe/Mercator mode do not affect it.
 
 `field.js` remains independent of MapLibre, WebGL, UI, and sampling topology.
 
 ## Hierarchical geographic sampling — `src/engine/icosphere.js`
 
-The sampling topology starts with an icosahedron. A face subdivision creates the three normalized edge midpoints and four child triangles. Midpoint identity is keyed by its sorted parent-vertex IDs, so adjacent faces share the exact same vertex.
+The sampling topology starts with an icosahedron. A face subdivision creates the three normalized edge midpoints and four child triangles. The 12 root vertices have deterministic identities (`root-0` … `root-11`). Every midpoint identity is the canonical string `midpoint(<sorted endpoint identity>|<sorted endpoint identity>)`; it is looked up in a topology identity map, so adjacent faces share the exact same vertex regardless of lazy traversal order.
 
-Each vertex has a stable numeric ID and a fixed normalized sphere position / `[longitude, latitude]`. Existing vertices are never moved or replaced by a finer level. Face IDs are deterministic paths from their icosahedron root face.
+Each vertex also has an internal array index for storage and a fixed normalized sphere position / `[longitude, latitude]`. The array index is not the sample identity. Existing vertices are never moved or replaced by a finer level. Face IDs are deterministic paths from their icosahedron root face.
 
 Subdivision is lazy: only faces requested by the LOD traversal are materialized. This retains the additive hierarchy without building a globally dense icosphere up front.
 
-## Local screen-space LOD — `src/engine/geographic-lod.js`
+## Uniform zoom LOD — `src/engine/geographic-lod.js`
 
-LOD recursively tests each face’s projected edge length from `map.project`. A visible face is subdivided while its longest projected edge exceeds the screen-spacing threshold. This is a projected-geometric criterion, not a distance-from-screen-center rule.
+`zoomToIcosphereLevel` maps MapLibre zoom to one discrete level for the entire active weather region: `clamp(floor(zoom) + 3, 3, 8)`. The mapping is centralized, deterministic, and independent of screen position, viewport, bearing, pan, projection, globe horizon, and `map.project`.
 
-The traversal only materializes the geographic support that can contain the current synthetic system across its complete deterministic trajectory. That support test is a data cull; it does not alter the topology or sample identities. Off-screen leaf faces are not selected. Visible leaf faces contribute their vertices to the active set, and a shared vertex uses the finest adjacent active leaf level for its local spacing.
+The traversal chooses the support tile set once at level 3 from the centralized `WEATHER_SUPPORT` bounds, then recursively reaches the selected uniform level inside those tiles. Descendants are not re-cropped at finer levels; this camera-independent support cull preserves additive parent samples. The active sample set and count therefore remain unchanged when the same zoomed map is panned or rotated.
 
-Refinement is additive: parent face vertices stay selected after child faces are selected. Coarsening removes only finer vertices. Projection changes use the same stored icosphere vertices and hierarchy.
+Refinement is additive: parent face vertices remain part of the finer active triangulation and finer levels add deterministic vertices. Coarsening returns to the same topology-derived identities. Projection changes use the same stored sample set and only change MapLibre’s projection.
+
+For each active vertex, incident edges of the selected triangulation are measured with spherical angular distance. The mean incident-edge angle is stored as that sample’s spacing for marker-radius transfer; no global nominal edge-angle formula or screen-space compensation is used.
 
 ## Dots rendering — `src/engine/geographic-dots-layer.js`
 

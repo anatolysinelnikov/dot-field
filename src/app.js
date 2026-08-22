@@ -2,11 +2,10 @@ import { LOOP_SECONDS } from './engine/config.js';
 import { clamp } from './engine/math.js';
 import { WEATHER_REGION } from './engine/geography.js';
 import { Icosphere } from './engine/icosphere.js';
-import { selectGeographicSamples } from './engine/geographic-lod.js';
+import { MAX_ICO_LEVEL, selectGeographicSamples, zoomToIcosphereLevel } from './engine/geographic-lod.js';
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/dark';
-const MAX_ICO_LEVEL = 9;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
@@ -34,34 +33,40 @@ const state = {
   lastFrame: performance.now(),
   scrubbing: false,
   samples: [],
-  lod: { finest: 0, leaves: 0 },
+  lod: { level: null, leafCount: 0 },
   mapReady: false,
-  geometryQueued: false,
-  lastGeometryAt: 0
+  weatherQueued: false,
+  lastWeatherAt: 0
 };
 const icosphere = new Icosphere(MAX_ICO_LEVEL);
 const weatherLayer = new GeographicDotsLayer();
 
 function updateReadout() {
   zoomLabel.textContent = map.getZoom().toFixed(2);
-  lodLabel.textContent = String(state.lod.finest);
+  lodLabel.textContent = state.lod.level === null ? '–' : String(state.lod.level);
   sampleLabel.textContent = state.samples.length.toLocaleString();
 }
 
-function rebuildGeometry() {
-  state.geometryQueued = false;
+function rebuildSamples(level) {
   if (!state.mapReady) return;
-  state.lod = selectGeographicSamples(map, icosphere);
-  state.samples = state.lod.samples;
-  weatherLayer.update(state.samples, state.time / LOOP_SECONDS);
-  state.lastGeometryAt = performance.now();
+  if (state.lod.level === level) return;
+  const selection = selectGeographicSamples(icosphere, level);
+  state.lod = { level: selection.level, leafCount: selection.leafCount };
+  state.samples = selection.samples;
+  weatherLayer.setSamples(state.samples, state.time / LOOP_SECONDS);
+  state.lastWeatherAt = performance.now();
   updateReadout();
 }
 
-function queueGeometry() {
-  if (state.geometryQueued) return;
-  state.geometryQueued = true;
-  requestAnimationFrame(rebuildGeometry);
+function queueWeatherUpdate() {
+  if (state.weatherQueued) return;
+  state.weatherQueued = true;
+  requestAnimationFrame(() => {
+    state.weatherQueued = false;
+    if (!state.mapReady) return;
+    weatherLayer.updateWeather(state.time / LOOP_SECONDS);
+    state.lastWeatherAt = performance.now();
+  });
 }
 
 function setPlaying(playing) {
@@ -77,7 +82,7 @@ function updateTimelineFromPointer(clientX) {
   const value = clamp(min + (clientX - rect.left) / rect.width * (max - min), min, max);
   timeSlider.value = String(value);
   state.time = Number(timeSlider.value) / 1000 * LOOP_SECONDS;
-  queueGeometry();
+  queueWeatherUpdate();
 }
 
 function setProjection(type) {
@@ -85,7 +90,6 @@ function setProjection(type) {
   map.setProjection({ type });
   projectionSelector.dataset.projection = type;
   for (const button of projectionButtons) button.setAttribute('aria-checked', String(button.dataset.projection === type));
-  queueGeometry();
 }
 
 let scrubbingPointerId = null;
@@ -102,7 +106,7 @@ timeSlider.addEventListener('pointermove', (event) => {
 });
 timeSlider.addEventListener('input', () => {
   state.time = Number(timeSlider.value) / 1000 * LOOP_SECONDS;
-  queueGeometry();
+  queueWeatherUpdate();
 });
 for (const eventName of ['pointerup', 'pointercancel']) {
   timeSlider.addEventListener(eventName, (event) => {
@@ -118,12 +122,13 @@ map.on('style.load', () => map.setProjection({ type: 'globe' }));
 map.on('load', () => {
   map.addLayer(weatherLayer);
   state.mapReady = true;
-  queueGeometry();
+  rebuildSamples(zoomToIcosphereLevel(map.getZoom()));
 });
-map.on('move', queueGeometry);
-map.on('resize', queueGeometry);
+map.on('zoom', () => {
+  updateReadout();
+  rebuildSamples(zoomToIcosphereLevel(map.getZoom()));
+});
 map.on('error', (event) => console.error('MapLibre error:', event.error));
-window.addEventListener('resize', queueGeometry);
 
 function frame(now) {
   const delta = Math.min((now - state.lastFrame) / 1000, 0.1);
@@ -131,9 +136,8 @@ function frame(now) {
   if (state.playing && !state.scrubbing) {
     state.time = (state.time + delta) % LOOP_SECONDS;
     // The synthetic field evolves slowly over its 18-second loop. Throttling
-    // buffer rebuilds to 10 Hz avoids repeatedly replacing GPU buffers while
-    // keeping the deterministic motion visually continuous.
-    if (state.mapReady && now - state.lastGeometryAt >= 100) queueGeometry();
+    // weather-value buffer rebuilds to 10 Hz keeps the topology untouched.
+    if (state.mapReady && now - state.lastWeatherAt >= 100) queueWeatherUpdate();
   }
   if (!state.scrubbing) timeSlider.value = String(Math.round(state.time / LOOP_SECONDS * 1000));
   requestAnimationFrame(frame);
