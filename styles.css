@@ -88,10 +88,10 @@ button:active { transform: translateY(1px); }
 .controls {
   position: absolute;
   z-index: 2;
-  left: 50%;
+  left: 18px;
+  right: 18px;
   bottom: 18px;
-  width: min(560px, calc(100% - 28px));
-  transform: translateX(-50%);
+  width: auto;
   display: grid;
   grid-template-columns: auto minmax(150px, 1fr);
   gap: 8px;
@@ -136,4 +136,5 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
   .readout { top: 14px; right: 14px; gap: 8px; }
   .readout span:first-child { display: none; }
   .maplibregl-ctrl-bottom-right { bottom: 70px; }
+  .controls { left: 12px; right: 12px; bottom: 12px; }
 }

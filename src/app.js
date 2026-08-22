@@ -40,8 +40,7 @@ const state = {
   camera: null,
   projectionSwitching: false,
   mapReady: false,
-  weatherQueued: false,
-  lastWeatherAt: 0
+  weatherQueued: false
 };
 const weatherLayer = new GeographicDotsLayer();
 
@@ -87,7 +86,6 @@ function commitSamples(level, samples) {
   state.lod = { level };
   state.samples = samples;
   weatherLayer.setSamples(samples, state.time / LOOP_SECONDS);
-  state.lastWeatherAt = performance.now();
   updateReadout();
 }
 
@@ -154,7 +152,6 @@ function queueWeatherUpdate() {
     state.weatherQueued = false;
     if (!state.mapReady) return;
     weatherLayer.updateWeather(state.time / LOOP_SECONDS);
-    state.lastWeatherAt = performance.now();
   });
 }
 
@@ -170,7 +167,7 @@ function updateTimelineFromPointer(clientX) {
   const max = Number(timeSlider.max);
   const value = clamp(min + (clientX - rect.left) / rect.width * (max - min), min, max);
   timeSlider.value = String(value);
-  state.time = Number(timeSlider.value) / 1000 * LOOP_SECONDS;
+  state.time = Number(timeSlider.value) * LOOP_SECONDS;
   queueWeatherUpdate();
 }
 
@@ -203,7 +200,7 @@ timeSlider.addEventListener('pointermove', (event) => {
   if (event.pointerId === scrubbingPointerId) updateTimelineFromPointer(event.clientX);
 });
 timeSlider.addEventListener('input', () => {
-  state.time = Number(timeSlider.value) / 1000 * LOOP_SECONDS;
+  state.time = Number(timeSlider.value) * LOOP_SECONDS;
   queueWeatherUpdate();
 });
 for (const eventName of ['pointerup', 'pointercancel']) {
@@ -231,12 +228,10 @@ function frame(now) {
   state.lastFrame = now;
   if (state.playing && !state.scrubbing) {
     state.time = (state.time + delta) % LOOP_SECONDS;
-    // The synthetic field evolves slowly over its 18-second loop. Throttling
-    // weather-value buffer rebuilds to 10 Hz keeps the topology untouched.
-    if (state.mapReady && now - state.lastWeatherAt >= 100) queueWeatherUpdate();
   }
+  if (state.mapReady && !state.scrubbing) weatherLayer.updateWeather(state.time / LOOP_SECONDS);
   updateLODTransition(now);
-  if (!state.scrubbing) timeSlider.value = String(Math.round(state.time / LOOP_SECONDS * 1000));
+  if (!state.scrubbing) timeSlider.value = String(state.time / LOOP_SECONDS);
   requestAnimationFrame(frame);
 }
 

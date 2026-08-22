@@ -1,6 +1,12 @@
+import { LOOP_SECONDS } from './config.js';
+import { prepareGeographicFieldFrame } from './geography.js';
 import { GeographicSymbolPyramid, REFERENCE_GRID_LEVEL, STORM_INNER_RATIO } from './geographic-symbol-pyramid.js';
 
 const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1], storm: [1, 0, 1, 1], hail: [1, 0.831, 0, 1] };
+const TEMPORAL_FRAME_SECONDS = 0.1;
+const TEMPORAL_FRAME_COUNT = Math.round(LOOP_SECONDS / TEMPORAL_FRAME_SECONDS);
+const INSTANCE_STRIDE = 8;
+const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
 
 function circularPoints(count) {
@@ -30,41 +36,68 @@ export function areaLinearRadius(startRadius, endRadius, progress) {
   return Math.sqrt(startRadius * startRadius + (endRadius * endRadius - startRadius * startRadius) * progress);
 }
 
-function pushInstance(values, startAnchor, endAnchor, startRadius, endRadius) {
-  values.push(startAnchor[0], startAnchor[1], endAnchor[0], endAnchor[1], startRadius, endRadius);
+function pushInstance(values, startAnchor, endAnchor, startTime0, startTime1, endTime0, endTime1) {
+  values.push(startAnchor[0], startAnchor[1], endAnchor[0], endAnchor[1], startTime0, startTime1, endTime0, endTime1);
 }
 
-export function buildHierarchicalTransitionInstances(coarseSymbols, fineSymbols, childIndices, radiusFor, refining) {
+function hasTemporalRadius(radius0, radius1, radius2 = 0, radius3 = 0) {
+  return radius0 > 0 || radius1 > 0 || radius2 > 0 || radius3 > 0;
+}
+
+export function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, childIndices, radiusFor, refining) {
   const values = [];
-  for (let parentIndex = 0; parentIndex < coarseSymbols.length; parentIndex++) {
-    const parent = coarseSymbols[parentIndex];
-    const parentRadius = radiusFor(parent);
-    if (parentRadius > 0) {
-      if (refining) pushInstance(values, parent.anchor, parent.anchor, parentRadius, 0);
-      else pushInstance(values, parent.anchor, parent.anchor, 0, parentRadius);
+  for (let parentIndex = 0; parentIndex < coarseTime0.length; parentIndex++) {
+    const parent0 = coarseTime0[parentIndex];
+    const parent1 = coarseTime1[parentIndex];
+    const parentRadius0 = radiusFor(parent0);
+    const parentRadius1 = radiusFor(parent1);
+    if (hasTemporalRadius(parentRadius0, parentRadius1)) {
+      if (refining) pushInstance(values, parent0.anchor, parent0.anchor, parentRadius0, parentRadius1, 0, 0);
+      else pushInstance(values, parent0.anchor, parent0.anchor, 0, 0, parentRadius0, parentRadius1);
     }
+
     for (const childIndex of childIndices[parentIndex]) {
-      const child = fineSymbols[childIndex];
-      const childRadius = radiusFor(child);
-      if (childRadius <= 0) continue;
-      if (refining) pushInstance(values, parent.anchor, child.anchor, 0, childRadius);
-      else pushInstance(values, child.anchor, parent.anchor, childRadius, 0);
+      const child0 = fineTime0[childIndex];
+      const child1 = fineTime1[childIndex];
+      const childRadius0 = radiusFor(child0);
+      const childRadius1 = radiusFor(child1);
+      if (!hasTemporalRadius(childRadius0, childRadius1)) continue;
+      if (refining) pushInstance(values, parent0.anchor, child0.anchor, 0, 0, childRadius0, childRadius1);
+      else pushInstance(values, child0.anchor, parent0.anchor, childRadius0, childRadius1, 0, 0);
     }
   }
   return new Float32Array(values);
 }
 
-function buildDirectTransitionInstances(fromSymbols, toSymbols, radiusFor) {
-  const from = new Map(fromSymbols.map((symbol) => [symbol.id, symbol]));
-  const to = new Map(toSymbols.map((symbol) => [symbol.id, symbol]));
+function buildSameLevelTemporalInstances(symbolsTime0, symbolsTime1, radiusFor) {
   const values = [];
-  for (const id of new Set([...from.keys(), ...to.keys()])) {
-    const start = from.get(id);
-    const end = to.get(id);
-    const startRadius = start ? radiusFor(start) : 0;
-    const endRadius = end ? radiusFor(end) : 0;
-    if (startRadius <= 0 && endRadius <= 0) continue;
-    pushInstance(values, start?.anchor || end.anchor, end?.anchor || start.anchor, startRadius, endRadius);
+  for (let index = 0; index < symbolsTime0.length; index++) {
+    const symbol0 = symbolsTime0[index];
+    const symbol1 = symbolsTime1[index];
+    const radius0 = radiusFor(symbol0);
+    const radius1 = radiusFor(symbol1);
+    if (hasTemporalRadius(radius0, radius1)) pushInstance(values, symbol0.anchor, symbol0.anchor, radius0, radius1, radius0, radius1);
+  }
+  return new Float32Array(values);
+}
+
+function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, pairs, fromIsLower, radiusFor) {
+  const values = [];
+  for (let index = 0; index < pairs.length; index += 2) {
+    const lowerIndex = pairs[index];
+    const higherIndex = pairs[index + 1];
+    const fromIndex = fromIsLower ? lowerIndex : higherIndex;
+    const toIndex = fromIsLower ? higherIndex : lowerIndex;
+    const from0 = fromIndex < 0 ? null : fromTime0[fromIndex];
+    const to0 = toIndex < 0 ? null : toTime0[toIndex];
+    const from1 = fromIndex < 0 ? null : fromTime1[fromIndex];
+    const to1 = toIndex < 0 ? null : toTime1[toIndex];
+    const fromRadius0 = from0 ? radiusFor(from0) : 0;
+    const fromRadius1 = from1 ? radiusFor(from1) : 0;
+    const toRadius0 = to0 ? radiusFor(to0) : 0;
+    const toRadius1 = to1 ? radiusFor(to1) : 0;
+    if (!hasTemporalRadius(fromRadius0, fromRadius1, toRadius0, toRadius1)) continue;
+    pushInstance(values, from0?.anchor || from1?.anchor || to0.anchor, to0?.anchor || to1?.anchor || from0.anchor, fromRadius0, fromRadius1, toRadius0, toRadius1);
   }
   return new Float32Array(values);
 }
@@ -81,9 +114,9 @@ function makeProgram(gl, shaderData, kind) {
   const circle = kind === 'circle';
   const vertexSource = [
     '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
-    'in vec2 a_vertex;\nin vec2 a_startCenter;\nin vec2 a_endCenter;\nin float a_startRadius;\nin float a_endRadius;\nuniform float u_transition;',
+    'in vec2 a_vertex;\nin vec2 a_startCenter;\nin vec2 a_endCenter;\nin float a_startTime0;\nin float a_startTime1;\nin float a_endTime0;\nin float a_endTime1;\nuniform float u_temporalProgress;\nuniform float u_lodTransition;',
     circle ? 'out vec2 v_local;' : '',
-    'void main() {\n  float radius = sqrt(mix(a_startRadius * a_startRadius, a_endRadius * a_endRadius, u_transition));\n  vec2 center = mix(a_startCenter, a_endCenter, u_transition);\n  ' + (circle ? 'v_local = a_vertex;\n  ' : '') + 'gl_Position = projectTile(center + a_vertex * radius);\n}'
+    'float temporalRadius(float radius0, float radius1) { return sqrt(mix(radius0 * radius0, radius1 * radius1, u_temporalProgress)); }\nvoid main() {\n  float startRadius = temporalRadius(a_startTime0, a_startTime1);\n  float endRadius = temporalRadius(a_endTime0, a_endTime1);\n  float radius = sqrt(mix(startRadius * startRadius, endRadius * endRadius, u_lodTransition));\n  vec2 center = mix(a_startCenter, a_endCenter, u_lodTransition);\n  ' + (circle ? 'v_local = a_vertex;\n  ' : '') + 'gl_Position = projectTile(center + a_vertex * radius);\n}'
   ].join('\n');
   const fragmentSource = [
     '#version 300 es', 'precision highp float;', 'uniform vec4 u_color;',
@@ -97,46 +130,53 @@ function makeProgram(gl, shaderData, kind) {
   gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'Weather shader linking failed.');
-  return program;
+
+  return {
+    program,
+    locations: {
+      vertex: gl.getAttribLocation(program, 'a_vertex'),
+      startCenter: gl.getAttribLocation(program, 'a_startCenter'),
+      endCenter: gl.getAttribLocation(program, 'a_endCenter'),
+      startTime0: gl.getAttribLocation(program, 'a_startTime0'),
+      startTime1: gl.getAttribLocation(program, 'a_startTime1'),
+      endTime0: gl.getAttribLocation(program, 'a_endTime0'),
+      endTime1: gl.getAttribLocation(program, 'a_endTime1'),
+      color: gl.getUniformLocation(program, 'u_color'),
+      temporalProgress: gl.getUniformLocation(program, 'u_temporalProgress'),
+      lodTransition: gl.getUniformLocation(program, 'u_lodTransition'),
+      matrix: gl.getUniformLocation(program, 'u_matrix'),
+      fallbackMatrix: gl.getUniformLocation(program, 'u_projection_fallback_matrix'),
+      projectionMatrix: gl.getUniformLocation(program, 'u_projection_matrix'),
+      tileMercatorCoords: gl.getUniformLocation(program, 'u_projection_tile_mercator_coords'),
+      clippingPlane: gl.getUniformLocation(program, 'u_projection_clipping_plane'),
+      projectionTransition: gl.getUniformLocation(program, 'u_projection_transition')
+    }
+  };
 }
 
-function setMatrix(gl, program, name, value) {
-  const location = gl.getUniformLocation(program, name);
+function setMatrix(gl, location, value) {
   if (location && value) gl.uniformMatrix4fv(location, false, value);
 }
 
-function setProjection(gl, program, projection) {
-  setMatrix(gl, program, 'u_matrix', projection.mainMatrix);
-  setMatrix(gl, program, 'u_projection_fallback_matrix', projection.fallbackMatrix);
-  setMatrix(gl, program, 'u_projection_matrix', projection.mainMatrix);
-  const tiles = gl.getUniformLocation(program, 'u_projection_tile_mercator_coords');
-  if (tiles) gl.uniform4f(tiles, ...projection.tileMercatorCoords);
-  const plane = gl.getUniformLocation(program, 'u_projection_clipping_plane');
-  if (plane && projection.clippingPlane) gl.uniform4f(plane, ...projection.clippingPlane);
-  const transition = gl.getUniformLocation(program, 'u_projection_transition');
-  if (transition) gl.uniform1f(transition, projection.projectionTransition);
+function setProjection(gl, locations, projection) {
+  setMatrix(gl, locations.matrix, projection.mainMatrix);
+  setMatrix(gl, locations.fallbackMatrix, projection.fallbackMatrix);
+  setMatrix(gl, locations.projectionMatrix, projection.mainMatrix);
+  if (locations.tileMercatorCoords) gl.uniform4f(locations.tileMercatorCoords, ...projection.tileMercatorCoords);
+  if (locations.clippingPlane && projection.clippingPlane) gl.uniform4f(locations.clippingPlane, ...projection.clippingPlane);
+  if (locations.projectionTransition) gl.uniform1f(locations.projectionTransition, projection.projectionTransition);
 }
 
-function isHierarchicalTransition(from, to) {
-  return Math.abs(from.level - to.level) === 1 && Math.max(from.level, to.level) <= REFERENCE_GRID_LEVEL;
+function isHierarchicalTransition(fromLevel, toLevel) {
+  return Math.abs(fromLevel - toLevel) === 1 && Math.max(fromLevel, toLevel) <= REFERENCE_GRID_LEVEL;
 }
 
-function transitionInstances(from, to, pyramid, radiusFor) {
-  if (!isHierarchicalTransition(from, to)) return buildDirectTransitionInstances(from.symbols, to.symbols, radiusFor);
-  const refining = to.level > from.level;
-  const coarse = refining ? from : to;
-  const fine = refining ? to : from;
-  return buildHierarchicalTransitionInstances(
-    coarse.symbols,
-    fine.symbols,
-    pyramid.parents.get(fine.level).childIndices,
-    radiusFor,
-    refining
-  );
-}
-
-function makeEndpoint(level, symbols) {
-  return { level, symbols };
+function temporalFrameAt(time) {
+  const wrapped = ((time % 1) + 1) % 1;
+  const rawScaled = wrapped * TEMPORAL_FRAME_COUNT;
+  const scaled = Math.abs(rawScaled - Math.round(rawScaled)) < 1e-9 ? Math.round(rawScaled) : rawScaled;
+  const index = Math.floor(scaled) % TEMPORAL_FRAME_COUNT;
+  return { index, progress: scaled - Math.floor(scaled) };
 }
 
 export class GeographicDotsLayer {
@@ -147,11 +187,13 @@ export class GeographicDotsLayer {
     this.programs = new Map();
     this.instances = { rain: new Float32Array(), strong: new Float32Array(), storm: new Float32Array(), hail: new Float32Array() };
     this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
+    this.bufferCapacity = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.pyramid = new GeographicSymbolPyramid();
-    this.representations = new Map();
     this.samples = [];
     this.transition = null;
     this.transitionProgress = 1;
+    this.temporal = null;
+    this.temporalProgress = 0;
     this.buffersDirty = true;
   }
 
@@ -166,30 +208,44 @@ export class GeographicDotsLayer {
   }
 
   onRemove(map, gl) {
-    for (const programs of this.programs.values()) { gl.deleteProgram(programs.circle); gl.deleteProgram(programs.hazard); }
+    for (const programs of this.programs.values()) { gl.deleteProgram(programs.circle.program); gl.deleteProgram(programs.hazard.program); }
     for (const buffer of [...Object.values(this.instanceBuffers || {}), ...Object.values(this.vertexBuffers || {})]) if (buffer) gl.deleteBuffer(buffer);
+  }
+
+  activeLevels() {
+    if (this.transition) return [this.transition.fromSamples[0].level, this.transition.toSamples[0].level];
+    return this.samples.length ? [this.samples[0].level] : [];
+  }
+
+  evaluateKeyframe(index) {
+    const time = index / TEMPORAL_FRAME_COUNT;
+    return this.pyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time));
+  }
+
+  rebuildTemporal(time) {
+    const frame = temporalFrameAt(time);
+    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    this.temporal = {
+      index: frame.index,
+      nextIndex,
+      frames0: this.evaluateKeyframe(frame.index),
+      frames1: this.evaluateKeyframe(nextIndex)
+    };
+    this.temporalProgress = frame.progress;
+    this.rebuildInstances();
   }
 
   setSamples(samples, time) {
     this.samples = samples;
     this.transition = null;
-    const level = samples[0].level;
-    this.representations = this.pyramid.evaluate([level], time);
-    const endpoint = makeEndpoint(level, this.representations.get(level));
-    this.setEndpointVisual(endpoint, endpoint, 1);
+    this.rebuildTemporal(time);
   }
 
   setTransition(fromSamples, toSamples, time, progress = 0) {
     this.samples = toSamples;
     this.transition = { fromSamples, toSamples };
-    const fromLevel = fromSamples[0].level;
-    const toLevel = toSamples[0].level;
-    this.representations = this.pyramid.evaluate([fromLevel, toLevel], time);
-    this.setEndpointVisual(
-      makeEndpoint(fromLevel, this.representations.get(fromLevel)),
-      makeEndpoint(toLevel, this.representations.get(toLevel)),
-      progress
-    );
+    this.transitionProgress = progress;
+    this.rebuildTemporal(time);
   }
 
   setTransitionProgress(progress) {
@@ -197,27 +253,93 @@ export class GeographicDotsLayer {
     this.map?.triggerRepaint();
   }
 
-  setEndpointVisual(from, to, progress) {
-    this.instances.rain = transitionInstances(from, to, this.pyramid, (symbol) => symbol.rainRadius);
-    this.instances.strong = transitionInstances(from, to, this.pyramid, (symbol) => symbol.strongRadius);
-    this.instances.storm = transitionInstances(from, to, this.pyramid, (symbol) => symbol.hazardType === 'storm' ? symbol.hazardRadius : 0);
-    this.instances.hail = transitionInstances(from, to, this.pyramid, (symbol) => symbol.hazardType === 'hail' ? symbol.hazardRadius : 0);
-    for (const type of ['rain', 'strong', 'storm', 'hail']) this.counts[type] = this.instances[type].length / 6;
-    this.transitionProgress = progress;
-    this.buffersDirty = true;
-    this.map?.triggerRepaint();
+  updateWeather(time) {
+    if (!this.samples.length) return;
+    const frame = temporalFrameAt(time);
+    if (!this.temporal || frame.index !== this.temporal.index) {
+      if (this.temporal && frame.index === this.temporal.nextIndex) {
+        this.temporal.index = frame.index;
+        this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+        this.temporal.frames0 = this.temporal.frames1;
+        this.temporal.frames1 = this.evaluateKeyframe(this.temporal.nextIndex);
+        this.temporalProgress = frame.progress;
+        this.rebuildInstances();
+      } else {
+        this.rebuildTemporal(time);
+      }
+    } else {
+      this.temporalProgress = frame.progress;
+      this.map?.triggerRepaint();
+    }
   }
 
-  updateWeather(time) {
-    if (this.transition) this.setTransition(this.transition.fromSamples, this.transition.toSamples, time, this.transitionProgress);
-    else this.setSamples(this.samples, time);
+  setInstances(type, data) {
+    this.instances[type] = data;
+    this.counts[type] = data.length / INSTANCE_STRIDE;
+  }
+
+  rebuildInstances() {
+    const { frames0, frames1 } = this.temporal;
+    const radiusFor = {
+      rain: (symbol) => symbol.rainRadius,
+      strong: (symbol) => symbol.strongRadius,
+      storm: (symbol) => symbol.hazardType === 'storm' ? symbol.hazardRadius : 0,
+      hail: (symbol) => symbol.hazardType === 'hail' ? symbol.hazardRadius : 0
+    };
+
+    if (!this.transition) {
+      const level = this.samples[0].level;
+      for (const type of ['rain', 'strong', 'storm', 'hail']) {
+        this.setInstances(type, buildSameLevelTemporalInstances(frames0.get(level), frames1.get(level), radiusFor[type]));
+      }
+    } else {
+      const fromLevel = this.transition.fromSamples[0].level;
+      const toLevel = this.transition.toSamples[0].level;
+      const hierarchical = isHierarchicalTransition(fromLevel, toLevel);
+      const refining = toLevel > fromLevel;
+      const coarseLevel = refining ? fromLevel : toLevel;
+      const fineLevel = refining ? toLevel : fromLevel;
+      const pairs = hierarchical ? null : this.pyramid.directPairsFor(Math.min(fromLevel, toLevel), Math.max(fromLevel, toLevel));
+      const fromIsLower = fromLevel < toLevel;
+
+      for (const type of ['rain', 'strong', 'storm', 'hail']) {
+        const data = hierarchical
+          ? buildHierarchicalTemporalInstances(
+            frames0.get(coarseLevel),
+            frames0.get(fineLevel),
+            frames1.get(coarseLevel),
+            frames1.get(fineLevel),
+            this.pyramid.parents.get(fineLevel).childIndices,
+            radiusFor[type],
+            refining
+          )
+          : buildDirectTemporalInstances(
+            frames0.get(fromLevel),
+            frames0.get(toLevel),
+            frames1.get(fromLevel),
+            frames1.get(toLevel),
+            pairs,
+            fromIsLower,
+            radiusFor[type]
+          );
+        this.setInstances(type, data);
+      }
+    }
+
+    this.buffersDirty = true;
+    this.map?.triggerRepaint();
   }
 
   uploadBuffers(gl) {
     if (!this.buffersDirty || !this.instanceBuffers) return;
     for (const type of ['rain', 'strong', 'storm', 'hail']) {
+      const bytes = this.instances[type].byteLength;
       gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[type]);
-      gl.bufferData(gl.ARRAY_BUFFER, this.instances[type], gl.STREAM_DRAW);
+      if (bytes > this.bufferCapacity[type]) {
+        gl.bufferData(gl.ARRAY_BUFFER, bytes, gl.STREAM_DRAW);
+        this.bufferCapacity[type] = bytes;
+      }
+      if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instances[type]);
     }
     this.buffersDirty = false;
   }
@@ -231,43 +353,44 @@ export class GeographicDotsLayer {
     return programs;
   }
 
-  renderInstances(gl, program, projection, types) {
+  renderInstances(gl, entry, projection, types) {
+    const { program, locations } = entry;
     gl.useProgram(program);
-    setProjection(gl, program, projection);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_transition'), this.transitionProgress);
-    const vertex = gl.getAttribLocation(program, 'a_vertex');
-    const startCenter = gl.getAttribLocation(program, 'a_startCenter');
-    const endCenter = gl.getAttribLocation(program, 'a_endCenter');
-    const startRadius = gl.getAttribLocation(program, 'a_startRadius');
-    const endRadius = gl.getAttribLocation(program, 'a_endRadius');
-    const color = gl.getUniformLocation(program, 'u_color');
+    setProjection(gl, locations, projection);
+    gl.uniform1f(locations.temporalProgress, this.temporalProgress);
+    gl.uniform1f(locations.lodTransition, this.transitionProgress);
 
     for (const type of types) {
       if (!this.counts[type]) continue;
       gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffers[type]);
-      gl.enableVertexAttribArray(vertex);
-      gl.vertexAttribPointer(vertex, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(locations.vertex);
+      gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[type]);
-      gl.enableVertexAttribArray(startCenter);
-      gl.vertexAttribPointer(startCenter, 2, gl.FLOAT, false, 24, 0);
-      gl.vertexAttribDivisor(startCenter, 1);
-      gl.enableVertexAttribArray(endCenter);
-      gl.vertexAttribPointer(endCenter, 2, gl.FLOAT, false, 24, 8);
-      gl.vertexAttribDivisor(endCenter, 1);
-      gl.enableVertexAttribArray(startRadius);
-      gl.vertexAttribPointer(startRadius, 1, gl.FLOAT, false, 24, 16);
-      gl.vertexAttribDivisor(startRadius, 1);
-      gl.enableVertexAttribArray(endRadius);
-      gl.vertexAttribPointer(endRadius, 1, gl.FLOAT, false, 24, 20);
-      gl.vertexAttribDivisor(endRadius, 1);
-      gl.uniform4fv(color, COLORS[type]);
+      gl.enableVertexAttribArray(locations.startCenter);
+      gl.vertexAttribPointer(locations.startCenter, 2, gl.FLOAT, false, INSTANCE_BYTES, 0);
+      gl.vertexAttribDivisor(locations.startCenter, 1);
+      gl.enableVertexAttribArray(locations.endCenter);
+      gl.vertexAttribPointer(locations.endCenter, 2, gl.FLOAT, false, INSTANCE_BYTES, 8);
+      gl.vertexAttribDivisor(locations.endCenter, 1);
+      gl.enableVertexAttribArray(locations.startTime0);
+      gl.vertexAttribPointer(locations.startTime0, 1, gl.FLOAT, false, INSTANCE_BYTES, 16);
+      gl.vertexAttribDivisor(locations.startTime0, 1);
+      gl.enableVertexAttribArray(locations.startTime1);
+      gl.vertexAttribPointer(locations.startTime1, 1, gl.FLOAT, false, INSTANCE_BYTES, 20);
+      gl.vertexAttribDivisor(locations.startTime1, 1);
+      gl.enableVertexAttribArray(locations.endTime0);
+      gl.vertexAttribPointer(locations.endTime0, 1, gl.FLOAT, false, INSTANCE_BYTES, 24);
+      gl.vertexAttribDivisor(locations.endTime0, 1);
+      gl.enableVertexAttribArray(locations.endTime1);
+      gl.vertexAttribPointer(locations.endTime1, 1, gl.FLOAT, false, INSTANCE_BYTES, 28);
+      gl.vertexAttribDivisor(locations.endTime1, 1);
+      gl.uniform4fv(locations.color, COLORS[type]);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, type === 'rain' || type === 'strong' ? 6 : ((type === 'storm' ? STORM.length : HAIL.length) / 2), this.counts[type]);
     }
 
-    gl.vertexAttribDivisor(startCenter, 0);
-    gl.vertexAttribDivisor(endCenter, 0);
-    gl.vertexAttribDivisor(startRadius, 0);
-    gl.vertexAttribDivisor(endRadius, 0);
+    for (const location of [locations.startCenter, locations.endCenter, locations.startTime0, locations.startTime1, locations.endTime0, locations.endTime1]) {
+      gl.vertexAttribDivisor(location, 0);
+    }
   }
 
   render(gl, args) {

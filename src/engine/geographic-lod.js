@@ -5,7 +5,7 @@ import { clamp } from './math.js';
 // 1 / 2^level therefore has this nominal screen spacing at a given zoom.
 export const MERCATOR_WORLD_SIZE = 512;
 export const TARGET_GRID_SPACING = 9;
-export const MIN_GRID_LEVEL = 9;
+export const MIN_GRID_LEVEL = 10;
 export const MAX_GRID_LEVEL = 15;
 
 const MAX_GRID_SIZE = 2 ** MAX_GRID_LEVEL;

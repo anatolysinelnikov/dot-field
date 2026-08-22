@@ -1,4 +1,4 @@
-import { geographicIntensityAt } from './geography.js';
+import { geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
 import { MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
 import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
 import { hazardStateAppearance } from './hazard-renderer.js';
@@ -48,9 +48,21 @@ function buildParentTopology(fine, coarse) {
   return { childIndices, parentIndexByChild };
 }
 
-function directSymbol(sample, anchor, time, counts) {
+function buildDirectPairs(lower, higher) {
+  const higherIndices = new Map(higher.samples.map((sample, index) => [sample.id, index]));
+  const lowerIndices = new Map(lower.samples.map((sample, index) => [sample.id, index]));
+  const pairs = [];
+  for (let index = 0; index < lower.samples.length; index++) pairs.push(index, higherIndices.get(lower.samples[index].id) ?? -1);
+  for (let index = 0; index < higher.samples.length; index++) {
+    if (!lowerIndices.has(higher.samples[index].id)) pairs.push(-1, index);
+  }
+  return new Int32Array(pairs);
+}
+
+function directSymbol(node, frame, counts, value) {
+  const { sample, anchor } = node;
   counts[sample.level] = (counts[sample.level] || 0) + 1;
-  const value = geographicIntensityAt(...sample.lngLat, time);
+  geographicPreparedIntensityAt(frame, node.fieldPoint, value);
   const appearance = hazardStateAppearance(value, resolveHazardState(value), sample.spacing);
   return {
     id: sample.id,
@@ -61,6 +73,13 @@ function directSymbol(sample, anchor, time, counts) {
     hazardType: appearance.radius > 0 ? appearance.type : null,
     hazardRadius: appearance.radius
   };
+}
+
+function directSymbols(nodes, frame, counts) {
+  const symbols = new Array(nodes.length);
+  const value = { rain: 0, storm: 0, hail: 0 };
+  for (let index = 0; index < nodes.length; index++) symbols[index] = directSymbol(nodes[index], frame, counts, value);
+  return symbols;
 }
 
 export function reduceSymbols(parent, children) {
@@ -118,7 +137,12 @@ export class GeographicSymbolPyramid {
         samples: selection.samples,
         samplesById: new Map(selection.samples.map((sample, index) => [sample.id, index])),
         anchors,
-        nodes: selection.samples.map((sample, index) => ({ id: sample.id, sample, anchor: anchors[index] }))
+        nodes: selection.samples.map((sample, index) => ({
+          id: sample.id,
+          sample,
+          anchor: anchors[index],
+          fieldPoint: geographicToSynthetic(...sample.lngLat)
+        }))
       });
     }
 
@@ -138,6 +162,11 @@ export class GeographicSymbolPyramid {
       this.parents.set(level + 1, topology);
     }
 
+    this.directPairs = new Map();
+    for (let level = REFERENCE_GRID_LEVEL; level < MAX_GRID_LEVEL; level++) {
+      this.directPairs.set(level + 1, buildDirectPairs(this.levels.get(level), this.levels.get(level + 1)));
+    }
+
     this.lastEvaluationCounts = {};
   }
 
@@ -153,7 +182,12 @@ export class GeographicSymbolPyramid {
     return this.levels.get(level - 1).samples[topology.parentIndexByChild[childIndex]].id;
   }
 
-  evaluate(requestedLevels, time) {
+  directPairsFor(lowerLevel, higherLevel) {
+    if (higherLevel !== lowerLevel + 1) throw new Error('Direct grid pairs require adjacent levels.');
+    return this.directPairs.get(higherLevel);
+  }
+
+  evaluate(requestedLevels, frame) {
     const requested = [...new Set(requestedLevels)];
     const representations = new Map();
     const counts = {};
@@ -161,7 +195,7 @@ export class GeographicSymbolPyramid {
 
     if (wantsReference) {
       const reference = this.levels.get(REFERENCE_GRID_LEVEL);
-      let symbols = reference.nodes.map((node) => directSymbol(node.sample, node.anchor, time, counts));
+      let symbols = directSymbols(reference.nodes, frame, counts);
       representations.set(REFERENCE_GRID_LEVEL, symbols);
 
       const minimumRequested = Math.min(...requested.filter((level) => level <= REFERENCE_GRID_LEVEL));
@@ -180,7 +214,7 @@ export class GeographicSymbolPyramid {
     for (const level of requested) {
       if (level <= REFERENCE_GRID_LEVEL) continue;
       const direct = this.levels.get(level);
-      representations.set(level, direct.nodes.map((node) => directSymbol(node.sample, node.anchor, time, counts)));
+      representations.set(level, directSymbols(direct.nodes, frame, counts));
     }
 
     this.lastEvaluationCounts = counts;
