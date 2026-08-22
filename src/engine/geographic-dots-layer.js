@@ -7,6 +7,8 @@ const TEMPORAL_FRAME_SECONDS = 0.1;
 const TEMPORAL_FRAME_COUNT = Math.round(LOOP_SECONDS / TEMPORAL_FRAME_SECONDS);
 const INSTANCE_STRIDE = 8;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
+const WEATHER_TYPES = ['rain', 'strong', 'storm', 'hail'];
+const RADIUS_KEYS = { rain: 'rainRadius', strong: 'strongRadius', storm: 'stormRadius', hail: 'hailRadius' };
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
 
 function circularPoints(count) {
@@ -46,7 +48,7 @@ class InstanceWriter {
     this.length = 0;
   }
 
-  push(startAnchor, endAnchor, startTime0, startTime1, endTime0, endTime1) {
+  push(startX, startY, endX, endY, startTime0, startTime1, endTime0, endTime1) {
     const nextLength = this.length + INSTANCE_STRIDE;
     if (nextLength > this.values.length) {
       const capacity = Math.max(nextLength, this.values.length * 2, 256);
@@ -55,10 +57,10 @@ class InstanceWriter {
       this.values = values;
     }
     const offset = this.length;
-    this.values[offset] = startAnchor[0];
-    this.values[offset + 1] = startAnchor[1];
-    this.values[offset + 2] = endAnchor[0];
-    this.values[offset + 3] = endAnchor[1];
+    this.values[offset] = startX;
+    this.values[offset + 1] = startY;
+    this.values[offset + 2] = endX;
+    this.values[offset + 3] = endY;
     this.values[offset + 4] = startTime0;
     this.values[offset + 5] = startTime1;
     this.values[offset + 6] = endTime0;
@@ -75,60 +77,64 @@ function hasTemporalRadius(radius0, radius1, radius2 = 0, radius3 = 0) {
   return radius0 > 0 || radius1 > 0 || radius2 > 0 || radius3 > 0;
 }
 
-export function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, childIndices, radiusFor, refining, writer = new InstanceWriter()) {
+function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, coarseAnchors, fineAnchors, childIndices, radiusKey, refining, writer) {
   writer.reset();
-  for (let parentIndex = 0; parentIndex < coarseTime0.length; parentIndex++) {
-    const parent0 = coarseTime0[parentIndex];
-    const parent1 = coarseTime1[parentIndex];
-    const parentRadius0 = radiusFor(parent0);
-    const parentRadius1 = radiusFor(parent1);
+  for (let parentIndex = 0; parentIndex < coarseTime0[radiusKey].length; parentIndex++) {
+    const parentRadius0 = coarseTime0[radiusKey][parentIndex];
+    const parentRadius1 = coarseTime1[radiusKey][parentIndex];
+    const parentAnchorIndex = parentIndex * 2;
     if (hasTemporalRadius(parentRadius0, parentRadius1)) {
-      if (refining) writer.push(parent0.anchor, parent0.anchor, parentRadius0, parentRadius1, 0, 0);
-      else writer.push(parent0.anchor, parent0.anchor, 0, 0, parentRadius0, parentRadius1);
+      if (refining) writer.push(coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], parentRadius0, parentRadius1, 0, 0);
+      else writer.push(coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], 0, 0, parentRadius0, parentRadius1);
     }
 
     for (const childIndex of childIndices[parentIndex]) {
-      const child0 = fineTime0[childIndex];
-      const child1 = fineTime1[childIndex];
-      const childRadius0 = radiusFor(child0);
-      const childRadius1 = radiusFor(child1);
+      const childRadius0 = fineTime0[radiusKey][childIndex];
+      const childRadius1 = fineTime1[radiusKey][childIndex];
       if (!hasTemporalRadius(childRadius0, childRadius1)) continue;
-      if (refining) writer.push(parent0.anchor, child0.anchor, 0, 0, childRadius0, childRadius1);
-      else writer.push(child0.anchor, parent0.anchor, childRadius0, childRadius1, 0, 0);
+      const childAnchorIndex = childIndex * 2;
+      if (refining) writer.push(coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], fineAnchors[childAnchorIndex], fineAnchors[childAnchorIndex + 1], 0, 0, childRadius0, childRadius1);
+      else writer.push(fineAnchors[childAnchorIndex], fineAnchors[childAnchorIndex + 1], coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], childRadius0, childRadius1, 0, 0);
     }
   }
   return writer.finish();
 }
 
-function buildSameLevelTemporalInstances(symbolsTime0, symbolsTime1, radiusFor, writer) {
+function buildSameLevelTemporalInstances(time0, time1, anchors, radiusKey, writer) {
   writer.reset();
-  for (let index = 0; index < symbolsTime0.length; index++) {
-    const symbol0 = symbolsTime0[index];
-    const symbol1 = symbolsTime1[index];
-    const radius0 = radiusFor(symbol0);
-    const radius1 = radiusFor(symbol1);
-    if (hasTemporalRadius(radius0, radius1)) writer.push(symbol0.anchor, symbol0.anchor, radius0, radius1, radius0, radius1);
+  const radii0 = time0[radiusKey];
+  const radii1 = time1[radiusKey];
+  for (let index = 0; index < radii0.length; index++) {
+    const radius0 = radii0[index];
+    const radius1 = radii1[index];
+    if (!hasTemporalRadius(radius0, radius1)) continue;
+    const anchorIndex = index * 2;
+    writer.push(anchors[anchorIndex], anchors[anchorIndex + 1], anchors[anchorIndex], anchors[anchorIndex + 1], radius0, radius1, radius0, radius1);
   }
   return writer.finish();
 }
 
-function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, pairs, fromIsLower, radiusFor, writer) {
+function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, fromAnchors, toAnchors, pairs, fromIsLower, radiusKey, writer) {
   writer.reset();
+  const fromRadii0 = fromTime0[radiusKey];
+  const toRadii0 = toTime0[radiusKey];
+  const fromRadii1 = fromTime1[radiusKey];
+  const toRadii1 = toTime1[radiusKey];
   for (let index = 0; index < pairs.length; index += 2) {
     const lowerIndex = pairs[index];
     const higherIndex = pairs[index + 1];
     const fromIndex = fromIsLower ? lowerIndex : higherIndex;
     const toIndex = fromIsLower ? higherIndex : lowerIndex;
-    const from0 = fromIndex < 0 ? null : fromTime0[fromIndex];
-    const to0 = toIndex < 0 ? null : toTime0[toIndex];
-    const from1 = fromIndex < 0 ? null : fromTime1[fromIndex];
-    const to1 = toIndex < 0 ? null : toTime1[toIndex];
-    const fromRadius0 = from0 ? radiusFor(from0) : 0;
-    const fromRadius1 = from1 ? radiusFor(from1) : 0;
-    const toRadius0 = to0 ? radiusFor(to0) : 0;
-    const toRadius1 = to1 ? radiusFor(to1) : 0;
+    const fromRadius0 = fromIndex < 0 ? 0 : fromRadii0[fromIndex];
+    const fromRadius1 = fromIndex < 0 ? 0 : fromRadii1[fromIndex];
+    const toRadius0 = toIndex < 0 ? 0 : toRadii0[toIndex];
+    const toRadius1 = toIndex < 0 ? 0 : toRadii1[toIndex];
     if (!hasTemporalRadius(fromRadius0, fromRadius1, toRadius0, toRadius1)) continue;
-    writer.push(from0?.anchor || from1?.anchor || to0.anchor, to0?.anchor || to1?.anchor || from0.anchor, fromRadius0, fromRadius1, toRadius0, toRadius1);
+    const startAnchors = fromIndex < 0 ? toAnchors : fromAnchors;
+    const startAnchorIndex = (fromIndex < 0 ? toIndex : fromIndex) * 2;
+    const endAnchors = toIndex < 0 ? fromAnchors : toAnchors;
+    const endAnchorIndex = (toIndex < 0 ? fromIndex : toIndex) * 2;
+    writer.push(startAnchors[startAnchorIndex], startAnchors[startAnchorIndex + 1], endAnchors[endAnchorIndex], endAnchors[endAnchorIndex + 1], fromRadius0, fromRadius1, toRadius0, toRadius1);
   }
   return writer.finish();
 }
@@ -231,7 +237,7 @@ export class GeographicDotsLayer {
 
   onAdd(map, gl) {
     this.map = map;
-    this.instanceBuffers = Object.fromEntries(['rain', 'strong', 'storm', 'hail'].map((type) => [type, gl.createBuffer()]));
+    this.instanceBuffers = Object.fromEntries(WEATHER_TYPES.map((type) => [type, gl.createBuffer()]));
     this.vertexBuffers = { rain: gl.createBuffer(), strong: gl.createBuffer(), storm: gl.createBuffer(), hail: gl.createBuffer() };
     for (const [type, vertices] of Object.entries({ rain: QUAD, strong: QUAD, storm: STORM, hail: HAIL })) {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffers[type]);
@@ -249,9 +255,9 @@ export class GeographicDotsLayer {
     return this.samples.length ? [this.samples[0].level] : [];
   }
 
-  evaluateKeyframe(index) {
+  evaluateKeyframe(index, reusableStates = null) {
     const time = index / TEMPORAL_FRAME_COUNT;
-    return this.pyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time));
+    return this.pyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time), reusableStates);
   }
 
   rebuildTemporal(time) {
@@ -292,8 +298,9 @@ export class GeographicDotsLayer {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
         this.temporal.index = frame.index;
         this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+        const reusableStates = this.temporal.frames0;
         this.temporal.frames0 = this.temporal.frames1;
-        this.temporal.frames1 = this.evaluateKeyframe(this.temporal.nextIndex);
+        this.temporal.frames1 = this.evaluateKeyframe(this.temporal.nextIndex, reusableStates);
         this.temporalProgress = frame.progress;
         this.rebuildInstances();
       } else {
@@ -312,17 +319,11 @@ export class GeographicDotsLayer {
 
   rebuildInstances() {
     const { frames0, frames1 } = this.temporal;
-    const radiusFor = {
-      rain: (symbol) => symbol.rainRadius,
-      strong: (symbol) => symbol.strongRadius,
-      storm: (symbol) => symbol.hazardType === 'storm' ? symbol.hazardRadius : 0,
-      hail: (symbol) => symbol.hazardType === 'hail' ? symbol.hazardRadius : 0
-    };
-
     if (!this.transition) {
       const level = this.samples[0].level;
-      for (const type of ['rain', 'strong', 'storm', 'hail']) {
-        this.setInstances(type, buildSameLevelTemporalInstances(frames0.get(level), frames1.get(level), radiusFor[type], this.instanceWriters[type]));
+      const anchors = this.pyramid.levels.get(level).anchors;
+      for (const type of WEATHER_TYPES) {
+        this.setInstances(type, buildSameLevelTemporalInstances(frames0[level], frames1[level], anchors, RADIUS_KEYS[type], this.instanceWriters[type]));
       }
     } else {
       const fromLevel = this.transition.fromSamples[0].level;
@@ -333,27 +334,35 @@ export class GeographicDotsLayer {
       const fineLevel = refining ? toLevel : fromLevel;
       const pairs = hierarchical ? null : this.pyramid.directPairsFor(Math.min(fromLevel, toLevel), Math.max(fromLevel, toLevel));
       const fromIsLower = fromLevel < toLevel;
+      const coarseAnchors = this.pyramid.levels.get(coarseLevel).anchors;
+      const fineAnchors = this.pyramid.levels.get(fineLevel).anchors;
+      const fromAnchors = this.pyramid.levels.get(fromLevel).anchors;
+      const toAnchors = this.pyramid.levels.get(toLevel).anchors;
 
-      for (const type of ['rain', 'strong', 'storm', 'hail']) {
+      for (const type of WEATHER_TYPES) {
         const data = hierarchical
           ? buildHierarchicalTemporalInstances(
-            frames0.get(coarseLevel),
-            frames0.get(fineLevel),
-            frames1.get(coarseLevel),
-            frames1.get(fineLevel),
+            frames0[coarseLevel],
+            frames0[fineLevel],
+            frames1[coarseLevel],
+            frames1[fineLevel],
+            coarseAnchors,
+            fineAnchors,
             this.pyramid.parents.get(fineLevel).childIndices,
-            radiusFor[type],
+            RADIUS_KEYS[type],
             refining,
             this.instanceWriters[type]
           )
           : buildDirectTemporalInstances(
-            frames0.get(fromLevel),
-            frames0.get(toLevel),
-            frames1.get(fromLevel),
-            frames1.get(toLevel),
+            frames0[fromLevel],
+            frames0[toLevel],
+            frames1[fromLevel],
+            frames1[toLevel],
+            fromAnchors,
+            toAnchors,
             pairs,
             fromIsLower,
-            radiusFor[type],
+            RADIUS_KEYS[type],
             this.instanceWriters[type]
           );
         this.setInstances(type, data);
@@ -366,7 +375,7 @@ export class GeographicDotsLayer {
 
   uploadBuffers(gl) {
     if (!this.buffersDirty || !this.instanceBuffers) return;
-    for (const type of ['rain', 'strong', 'storm', 'hail']) {
+    for (const type of WEATHER_TYPES) {
       const bytes = this.instances[type].byteLength;
       gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[type]);
       if (bytes > this.bufferCapacity[type]) {
