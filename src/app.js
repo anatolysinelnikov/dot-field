@@ -6,8 +6,6 @@ import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/dark';
 const WEATHER_CONTEXT_BEFORE_IDS = [
-  'highway_major_casing',
-  'highway_major_inner',
   'highway_motorway_casing',
   'highway_name_other',
   'boundary_state',
@@ -27,19 +25,13 @@ const WEATHER_CONTEXT_TEXT_IDS = [
   'place_country_minor',
   'place_country_major'
 ];
-const WEATHER_CONTEXT_LINE_FACTORS = [
-  ['highway_major_casing', 0.5],
-  ['highway_major_inner', 0.5],
-  ['highway_major_subtle', 0.45],
-  ['highway_motorway_casing', 0.5],
-  ['highway_motorway_inner', 0.5],
-  ['highway_motorway_subtle', 0.45],
-  ['railway_transit', 0.45],
-  ['railway_transit_dashline', 0.45],
-  ['railway_minor', 0.4],
-  ['railway_minor_dashline', 0.4],
-  ['railway', 0.45],
-  ['railway_dashline', 0.45]
+const WEATHER_CONTEXT_RAIL_IDS = [
+  'railway_transit',
+  'railway_transit_dashline',
+  'railway_minor',
+  'railway_minor_dashline',
+  'railway',
+  'railway_dashline'
 ];
 const MAX_SAMPLING_LATITUDE = 85;
 const playPause = document.querySelector('#playPause');
@@ -127,12 +119,6 @@ function commitSamples(level, samples) {
   updateReadout();
 }
 
-function attenuatePaintOpacity(currentOpacity, factor) {
-  if (typeof currentOpacity === 'number') return currentOpacity * factor;
-  if (Array.isArray(currentOpacity)) return ['*', currentOpacity, factor];
-  return factor;
-}
-
 function tuneWeatherContext(style) {
   if (style === contextStyleObject) return;
   contextStyleObject = style;
@@ -142,11 +128,6 @@ function tuneWeatherContext(style) {
     map.setPaintProperty(layerId, 'text-halo-width', 1.5);
     map.setPaintProperty(layerId, 'text-halo-blur', 0.2);
   }
-  for (const [layerId, factor] of WEATHER_CONTEXT_LINE_FACTORS) {
-    if (!map.getLayer(layerId)) continue;
-    const currentOpacity = map.getPaintProperty(layerId, 'line-opacity');
-    map.setPaintProperty(layerId, 'line-opacity', attenuatePaintOpacity(currentOpacity, factor));
-  }
 }
 
 function initializeWeatherLayer() {
@@ -155,6 +136,9 @@ function initializeWeatherLayer() {
   if (!layerAlreadyPresent) {
     const beforeId = WEATHER_CONTEXT_BEFORE_IDS.find((layerId) => map.getLayer(layerId));
     map.addLayer(weatherLayer, beforeId);
+  }
+  for (const layerId of WEATHER_CONTEXT_RAIL_IDS) {
+    if (map.getLayer(layerId)) map.moveLayer(layerId, weatherLayer.id);
   }
   if (state.mapReady) return;
   state.mapReady = true;
