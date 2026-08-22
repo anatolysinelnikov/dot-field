@@ -5,6 +5,7 @@ import { selectMercatorGridSamples, zoomToMercatorGridLevel } from './engine/geo
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/dark';
+const MAX_SAMPLING_LATITUDE = 85;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
@@ -33,6 +34,9 @@ const state = {
   scrubbing: false,
   samples: [],
   lod: { level: null, leafCount: 0 },
+  logicalSamplingZoom: WEATHER_REGION.initialZoom,
+  camera: null,
+  projectionSwitching: false,
   mapReady: false,
   weatherQueued: false,
   lastWeatherAt: 0
@@ -40,9 +44,41 @@ const state = {
 const weatherLayer = new GeographicDotsLayer();
 
 function updateReadout() {
-  zoomLabel.textContent = map.getZoom().toFixed(2);
+  zoomLabel.textContent = state.logicalSamplingZoom.toFixed(2);
   lodLabel.textContent = state.lod.level === null ? '–' : String(state.lod.level);
   sampleLabel.textContent = state.samples.length.toLocaleString();
+}
+
+function cameraState() {
+  return {
+    rawZoom: map.getZoom(),
+    latitude: clamp(map.getCenter().lat, -MAX_SAMPLING_LATITUDE, MAX_SAMPLING_LATITUDE),
+    projection: map.getProjection().type
+  };
+}
+
+function rebaseCamera() {
+  state.camera = cameraState();
+}
+
+function updateLogicalSamplingZoom() {
+  const next = cameraState();
+  const previous = state.camera;
+  if (!previous || state.projectionSwitching || previous.projection !== next.projection) {
+    state.camera = next;
+    updateReadout();
+    return;
+  }
+  let delta = next.rawZoom - previous.rawZoom;
+  if (next.projection === 'globe') {
+    const nextCosine = Math.max(0.001, Math.cos(next.latitude * Math.PI / 180));
+    const previousCosine = Math.max(0.001, Math.cos(previous.latitude * Math.PI / 180));
+    delta -= Math.log2(nextCosine / previousCosine);
+  }
+  if (Number.isFinite(delta)) state.logicalSamplingZoom += delta;
+  state.camera = next;
+  updateReadout();
+  rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
 }
 
 function rebuildSamples(level) {
@@ -85,9 +121,18 @@ function updateTimelineFromPointer(clientX) {
 
 function setProjection(type) {
   if (map.getProjection().type === type) return;
+  state.projectionSwitching = true;
   map.setProjection({ type });
   projectionSelector.dataset.projection = type;
   for (const button of projectionButtons) button.setAttribute('aria-checked', String(button.dataset.projection === type));
+  // MapLibre may adjust raw camera zoom while changing projections. Its
+  // projection update is applied in the render cycle, while this custom layer
+  // continuously requests repaints, so do not wait for an idle event here.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    rebaseCamera();
+    state.projectionSwitching = false;
+    updateReadout();
+  }));
 }
 
 let scrubbingPointerId = null;
@@ -120,12 +165,10 @@ map.on('style.load', () => map.setProjection({ type: 'globe' }));
 map.on('load', () => {
   map.addLayer(weatherLayer);
   state.mapReady = true;
-  rebuildSamples(zoomToMercatorGridLevel(map.getZoom()));
+  rebaseCamera();
+  rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
 });
-map.on('zoom', () => {
-  updateReadout();
-  rebuildSamples(zoomToMercatorGridLevel(map.getZoom()));
-});
+map.on('move', updateLogicalSamplingZoom);
 map.on('error', (event) => console.error('MapLibre error:', event.error));
 
 function frame(now) {

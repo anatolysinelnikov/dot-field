@@ -1,4 +1,5 @@
 import { geographicIntensityAt } from './geography.js';
+import { HAZARD_ANALYSIS_LEVEL, groupNativeSamplesByDisplaySample, selectMercatorGridSamples } from './geographic-lod.js';
 import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
 import { hazardStateAppearance } from './hazard-renderer.js';
 import { resolveHazardState } from './lod.js';
@@ -27,6 +28,7 @@ const STORM = circularPoints(8).map((point, index) => {
   const scale = index % 2 === 0 ? 1 : 0.38;
   return [point[0] * scale, point[1] * scale];
 });
+const HAZARD_PROBES = selectMercatorGridSamples(HAZARD_ANALYSIS_LEVEL).samples;
 
 function appendShape(vertices, centerX, centerY, radius, points) {
   for (let index = 0; index < points.length; index++) {
@@ -108,6 +110,7 @@ export class GeographicDotsLayer {
     this.instances = { rain: new Float32Array(), strong: new Float32Array() };
     this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.samples = [];
+    this.hazardGroups = new Map();
     this.buffersDirty = true;
   }
 
@@ -133,12 +136,31 @@ export class GeographicDotsLayer {
 
   setSamples(samples, time) {
     this.samples = samples;
+    this.hazardGroups = groupNativeSamplesByDisplaySample(samples, HAZARD_PROBES);
     this.updateWeather(time);
+  }
+
+  aggregateHazards(time) {
+    const aggregated = new Map();
+    for (const [sampleId, probes] of this.hazardGroups) {
+      let storm = 0;
+      let hail = 0;
+      for (const probe of probes) {
+        const [longitude, latitude] = probe.lngLat;
+        const value = geographicIntensityAt(longitude, latitude, time);
+        const state = resolveHazardState(value);
+        if (state > 3) hail = Math.max(hail, value.hail);
+        else if (state > 0) storm = Math.max(storm, value.storm);
+      }
+      if (hail > 0 || storm > 0) aggregated.set(sampleId, { rain: 0, storm, hail });
+    }
+    return aggregated;
   }
 
   updateWeather(time) {
     const instances = { rain: [], strong: [] };
     const vertices = { storm: [], hail: [] };
+    const hazards = this.aggregateHazards(time);
     for (const sample of this.samples) {
       const [longitude, latitude] = sample.lngLat;
       const [centerX, centerY] = sample.mercator;
@@ -147,7 +169,8 @@ export class GeographicDotsLayer {
       if (rainRadius > 0) instances.rain.push(centerX, centerY, rainRadius);
       const strongRadius = intensityToRadius(strongPrecipitationIntensity(value.rain), sample.spacing, 'rain');
       if (strongRadius > 0) instances.strong.push(centerX, centerY, strongRadius);
-      const appearance = hazardStateAppearance(value, resolveHazardState(value), sample.spacing);
+      const hazardValue = hazards.get(sample.id) || { rain: 0, storm: 0, hail: 0 };
+      const appearance = hazardStateAppearance(hazardValue, resolveHazardState(hazardValue), sample.spacing);
       if (appearance.radius > 0) appendShape(vertices[appearance.type], centerX, centerY, appearance.radius, appearance.type === 'hail' ? HAIL : STORM);
     }
     for (const key of Object.keys(instances)) {

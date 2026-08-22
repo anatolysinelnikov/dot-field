@@ -49,22 +49,24 @@ app.js ----------------------> MapLibre GL JS
 
 ### Application orchestration — `src/app.js`
 
-`app.js` owns UI state, play/pause, timeline scrubbing, projection buttons, MapLibre construction, zoom-to-topology selection, weather refresh scheduling, and readouts. It does not implement camera controls; MapLibre owns those.
+`app.js` owns UI state, play/pause, timeline scrubbing, projection buttons, MapLibre construction, logical sampling-zoom selection, weather refresh scheduling, and readouts. It does not implement camera controls; MapLibre owns those.
 
 The map uses the OpenFreeMap Dark style at `https://tiles.openfreemap.org/styles/dark`; the normal MapLibre attribution control remains enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context.
 
-The initial projection is Globe. The explicit UI switches between `globe` and `mercator` through `map.setProjection`. The center/zoom are retained by MapLibre, and no weather/sample data is regenerated for a projection switch.
+The initial projection is Globe. The explicit UI switches between `globe` and `mercator` through `map.setProjection`. The center/zoom are retained by MapLibre, and no weather/sample data is regenerated for a projection switch. Projection changes temporarily suppress sampling-zoom deltas and rebase the raw camera baseline after two render frames, so the visual A/B does not change LOD.
 
-Animation is deterministic and has the existing 18-second loop. Weather values and symbol buffers are refreshed at a modest cadence while playing because field movement is slow. Grid samples are rebuilt only when the discrete zoom-derived grid level changes. MapLibre camera movement and projection changes only reproject the existing layer geometry.
+Animation is deterministic and has the existing 18-second loop. Weather values and symbol buffers are refreshed at a modest cadence while playing because field movement is slow. Grid samples are rebuilt only when the discrete logical-zoom-derived grid level changes. MapLibre camera movement and projection changes only reproject the existing layer geometry.
+
+MapLibre raw zoom is not used directly for weather LOD. `app.js` maintains an application-owned logical sampling zoom. In Globe mode, each raw zoom delta is corrected by `log2(cos(new latitude) / cos(old latitude))`, matching MapLibre's latitude adjustment; a camera pan/rotation therefore does not alter weather density. Mercator applies the raw zoom delta directly. The UI `zoom` readout shows this logical sampling zoom rather than MapLibre's internal raw zoom.
 
 ## Geographic synthetic field adapter — `src/engine/geography.js`
 
 `WEATHER_REGION` centralizes the test anchor, scale, trajectory, and normalized synthetic support:
 
 ```text
-center: [-3, 54.5]           # central Great Britain
-longitudeSpan: 15 degrees
-latitudeSpan: 9.5 degrees
+center: [-0.1, 51.5]         # London
+longitudeSpan: 1.8 degrees
+latitudeSpan: 1.2 degrees
 trajectory: x = 0.33..0.67
 field support: x radius 0.92, y radius 0.76
 ```
@@ -83,9 +85,11 @@ Mercator render sampling is intentionally not equal-area on the Earth surface. I
 
 ## Uniform zoom LOD — `src/engine/geographic-lod.js`
 
-`zoomToMercatorGridLevel` selects one discrete level for the whole active weather region. It rounds `zoom + log2(512 / 9)`, clamped to the configured level range: MapLibre's world is 512 CSS pixels wide at zoom zero and the target nominal neighboring-sample spacing is 9 CSS pixels. The mapping is centralized, deterministic, and independent of screen position, viewport, bearing, pan, projection, globe horizon, and `map.project`.
+`zoomToMercatorGridLevel` selects one discrete level for the whole active weather region. It rounds `logical zoom + log2(512 / 9)`, clamped to levels 10 through 13: MapLibre's world is 512 CSS pixels wide at zoom zero and the target nominal neighboring-sample spacing is 9 CSS pixels. The mapping is centralized, deterministic, and independent of screen position, viewport, bearing, pan, projection, globe horizon, and `map.project`.
 
-The active sample set and count remain unchanged when the same zoomed map is panned, rotated, resized, or switched between Globe and Mercator. Zooming across a discrete threshold replaces the active level with the deterministically nested coarser or finer grid.
+The initial logical zoom is 6.2 and selects level 12. Near London, L10/L11/L12/L13 are approximately 24/12/6/3 km between grid vertices. About 4 km is the nominal future provider resolution, so L13 is the maximum meaningful visualization and analysis level; further visual zoom makes those samples larger without inventing sub-provider detail. The Mercator lattice remains independent of a provider grid.
+
+The active sample set and count remain unchanged when the same logical zoom map is panned, rotated, resized, or switched between Globe and Mercator. Zooming across a discrete threshold replaces the active level with the deterministically nested coarser or finer grid.
 
 Grid step is exact and uniform at an active level, so it is stored as each sample's spacing for the marker-radius transfer. There is no screen-space, latitude, horizon, or perspective compensation.
 
@@ -111,6 +115,8 @@ The current Dots mapping remains sourced from `precipitation-mapping.js`, `lod.j
 - hail keeps priority over thunderstorm;
 - storm and hail retain their star/hexagon appearances;
 - marker radius is computed from intensity relative to the active Mercator grid step, so symbol and sampling geometry pass through the same projection together.
+
+Hazards use a fixed native analysis lattice at L13, independently of the active rain display level. The cached L13 probes are assigned to their nearest active dyadic parent using canonical integer Mercator coordinates, with support-edge clamping. Per active sample, visible hail uses the maximum native hail value; otherwise visible storm uses the maximum native storm value. Hail retains priority over storm, so a localized hail cell cannot be averaged away or disappear only because display LOD is reduced.
 
 ## Legacy modules
 

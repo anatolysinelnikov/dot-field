@@ -5,8 +5,9 @@ import { clamp } from './math.js';
 // 1 / 2^level therefore has this nominal screen spacing at a given zoom.
 export const MERCATOR_WORLD_SIZE = 512;
 export const TARGET_GRID_SPACING = 9;
-export const MIN_GRID_LEVEL = 6;
-export const MAX_GRID_LEVEL = 14;
+export const MIN_GRID_LEVEL = 10;
+export const MAX_GRID_LEVEL = 13;
+export const HAZARD_ANALYSIS_LEVEL = 13;
 
 const MAX_GRID_SIZE = 2 ** MAX_GRID_LEVEL;
 const MAX_MERCATOR_LATITUDE = 85.05112878;
@@ -74,6 +75,8 @@ export function selectMercatorGridSamples(level) {
         // Max-resolution integer coordinates give a single compact identity
         // to a point shared by every coarser dyadic level.
         id: `${canonicalX}:${canonicalY}`,
+        canonicalX,
+        canonicalY,
         mercator: [x, y],
         lngLat: mercatorToLngLat(x, y),
         level: boundedLevel,
@@ -82,4 +85,32 @@ export function selectMercatorGridSamples(level) {
     }
   }
   return { samples, level: boundedLevel, gridSize, spacing: step };
+}
+
+// Map native grid probes to the nearest active display vertex using canonical
+// integer coordinates. Clamping at the rectangular support edge means every
+// native probe remains represented when a display level becomes coarser.
+export function groupNativeSamplesByDisplaySample(displaySamples, nativeSamples) {
+  if (!displaySamples.length || !nativeSamples.length) return new Map();
+  const displayLevel = displaySamples[0].level;
+  const nativeLevel = nativeSamples[0].level;
+  if (nativeLevel < displayLevel) throw new Error('Native hazard level must not be coarser than the display level.');
+  const scale = 2 ** (nativeLevel - displayLevel);
+  const ids = new Map(displaySamples.map((sample) => [sample.id, sample]));
+  const minX = Math.min(...displaySamples.map((sample) => sample.canonicalX));
+  const maxX = Math.max(...displaySamples.map((sample) => sample.canonicalX));
+  const minY = Math.min(...displaySamples.map((sample) => sample.canonicalY));
+  const maxY = Math.max(...displaySamples.map((sample) => sample.canonicalY));
+  const groups = new Map();
+
+  for (const probe of nativeSamples) {
+    const canonicalX = clamp(Math.round(probe.canonicalX / scale) * scale, minX, maxX);
+    const canonicalY = clamp(Math.round(probe.canonicalY / scale) * scale, minY, maxY);
+    const parent = ids.get(`${canonicalX}:${canonicalY}`);
+    if (!parent) throw new Error('Native hazard probe could not be assigned to the active display grid.');
+    const group = groups.get(parent.id) || [];
+    group.push(probe);
+    groups.set(parent.id, group);
+  }
+  return groups;
 }
