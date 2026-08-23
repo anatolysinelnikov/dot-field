@@ -322,8 +322,8 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
   .maplibregl-ctrl-top-right { top: max(14px, calc(env(safe-area-inset-top, 0px) + 10px)); right: max(14px, calc(env(safe-area-inset-right, 0px) + 10px)); }
   .area-smooth { position: absolute; right: 0; bottom: calc(100% + 8px); height: 100%; }
   .zoom-controls {
-    top: env(safe-area-inset-top, 0px);
-    right: env(safe-area-inset-right, 0px);
+    top: max(12px, calc(env(safe-area-inset-top, 0px) + 10px));
+    right: max(12px, calc(env(safe-area-inset-right, 0px) + 10px));
     bottom: auto;
   }
   .zoom-stepper { display: none; }
