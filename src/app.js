@@ -18,9 +18,6 @@ const COMPACT_MIN_ZOOM = 1.5;
 const LARGE_MIN_ZOOM = 3.0;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
-const zoomLabel = document.querySelector('#zoomLabel');
-const lodLabel = document.querySelector('#lodLabel');
-const sampleLabel = document.querySelector('#sampleLabel');
 const resetView = document.querySelector('#resetView');
 const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
@@ -98,8 +95,10 @@ const map = new window.maplibregl.Map({
   minZoom: initialMinZoom,
   maxZoom: INITIAL_RAW_MAX_ZOOM,
   maxPitch: 75,
+  attributionControl: false,
   canvasContextAttributes: { antialias: true }
 });
+map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top-right');
 
 const state = {
   playing: true,
@@ -123,13 +122,6 @@ const squaresLayer = new GeographicSquaresLayer();
 const scalarLayer = new GeographicScalarLayer();
 const geographicLayers = [scalarLayer, squaresLayer, weatherLayer];
 let lastMapErrorSignature = '';
-
-function updateReadout() {
-  zoomLabel.textContent = state.logicalSamplingZoom.toFixed(2);
-  const scalarMode = state.renderMode === 'blur' || state.renderMode === 'areas';
-  lodLabel.textContent = scalarMode ? 'fixed L14' : state.lod.level === null ? '–' : String(state.lod.level);
-  sampleLabel.textContent = (scalarMode ? scalarLayer.lattice.length : state.samples.length).toLocaleString();
-}
 
 function cameraState() {
   return {
@@ -164,7 +156,6 @@ function updateLogicalSamplingZoom() {
   const previous = state.camera;
   if (!previous) {
     state.camera = next;
-    updateReadout();
     return;
   }
   let delta = next.rawZoom - previous.rawZoom;
@@ -173,7 +164,6 @@ function updateLogicalSamplingZoom() {
     state.logicalSamplingZoom = Math.min(MAX_LOGICAL_SAMPLING_ZOOM, state.logicalSamplingZoom + delta);
   }
   state.camera = next;
-  updateReadout();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
 }
 
@@ -182,7 +172,6 @@ function commitSamples(level, samples) {
   state.samples = samples;
   weatherLayer.setSamples(samples, state.time / LOOP_SECONDS);
   squaresLayer.setSamples(samples, state.time / LOOP_SECONDS);
-  updateReadout();
 }
 
 function initializeWeatherLayer() {
@@ -367,7 +356,6 @@ function applyRenderMode() {
     scalarLayer.setPresentation(mode === 'areas' ? 'areas' : 'blur', mode === 'areas' && areaSmooth.checked, time);
     scalarLayer.updateWeather(time);
   }
-  updateReadout();
 }
 
 function setRenderMode(mode) {
@@ -463,7 +451,6 @@ map.on('moveend', () => {
   state.resettingView = false;
   state.logicalSamplingZoom = WEATHER_REGION.initialZoom;
   rebaseCamera();
-  updateReadout();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
   updateResetViewControl();
 });
