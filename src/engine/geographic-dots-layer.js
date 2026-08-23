@@ -1,10 +1,8 @@
-import { LOOP_SECONDS } from './config.js';
 import { prepareGeographicFieldFrame } from './geography.js';
+import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { GeographicSymbolPyramid, REFERENCE_GRID_LEVEL, STORM_INNER_RATIO } from './geographic-symbol-pyramid.js';
 
 const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1], storm: [1, 0, 1, 1], hail: [1, 0.831, 0, 1] };
-const TEMPORAL_FRAME_SECONDS = 0.1;
-const TEMPORAL_FRAME_COUNT = Math.round(LOOP_SECONDS / TEMPORAL_FRAME_SECONDS);
 const INSTANCE_STRIDE = 8;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
 const WEATHER_TYPES = ['rain', 'strong', 'storm', 'hail'];
@@ -191,29 +189,8 @@ function makeProgram(gl, shaderData, kind) {
   };
 }
 
-function setMatrix(gl, location, value) {
-  if (location && value) gl.uniformMatrix4fv(location, false, value);
-}
-
-function setProjection(gl, locations, projection) {
-  setMatrix(gl, locations.matrix, projection.mainMatrix);
-  setMatrix(gl, locations.fallbackMatrix, projection.fallbackMatrix);
-  setMatrix(gl, locations.projectionMatrix, projection.mainMatrix);
-  if (locations.tileMercatorCoords) gl.uniform4f(locations.tileMercatorCoords, ...projection.tileMercatorCoords);
-  if (locations.clippingPlane && projection.clippingPlane) gl.uniform4f(locations.clippingPlane, ...projection.clippingPlane);
-  if (locations.projectionTransition) gl.uniform1f(locations.projectionTransition, projection.projectionTransition);
-}
-
 function isHierarchicalTransition(fromLevel, toLevel) {
   return Math.abs(fromLevel - toLevel) === 1 && Math.max(fromLevel, toLevel) <= REFERENCE_GRID_LEVEL;
-}
-
-function temporalFrameAt(time) {
-  const wrapped = ((time % 1) + 1) % 1;
-  const rawScaled = wrapped * TEMPORAL_FRAME_COUNT;
-  const scaled = Math.abs(rawScaled - Math.round(rawScaled)) < 1e-9 ? Math.round(rawScaled) : rawScaled;
-  const index = Math.floor(scaled) % TEMPORAL_FRAME_COUNT;
-  return { index, progress: scaled - Math.floor(scaled) };
 }
 
 export class GeographicDotsLayer {
@@ -262,7 +239,7 @@ export class GeographicDotsLayer {
   }
 
   rebuildTemporal(time) {
-    const frame = temporalFrameAt(time);
+    const frame = geographicTemporalFrameAt(time);
     const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
     this.temporal = {
       index: frame.index,
@@ -301,7 +278,7 @@ export class GeographicDotsLayer {
 
   updateWeather(time) {
     if (!this.samples.length) return;
-    const frame = temporalFrameAt(time);
+    const frame = geographicTemporalFrameAt(time);
     if (!this.temporal || frame.index !== this.temporal.index) {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
         this.temporal.index = frame.index;
@@ -407,7 +384,7 @@ export class GeographicDotsLayer {
   renderInstances(gl, entry, projection, types) {
     const { program, locations } = entry;
     gl.useProgram(program);
-    setProjection(gl, locations, projection);
+    setGeographicProjection(gl, locations, projection);
     gl.uniform1f(locations.temporalProgress, this.temporalProgress);
     gl.uniform1f(locations.lodTransition, this.transitionProgress);
 

@@ -1,9 +1,8 @@
-import { LOOP_SECONDS, RAIN_MODERATE_MAX } from './config.js';
+import { RAIN_MODERATE_MAX } from './config.js';
 import { createAreasReconstructionWorkspace, reconstructAreasChannels } from './areas-reconstruction.js';
+import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { AREA_HAIL_THRESHOLD, AREA_RAIN_THRESHOLDS, AREA_STORM_THRESHOLD, GeographicScalarLattice } from './geographic-scalar-lattice.js';
 
-const TEMPORAL_FRAME_SECONDS = 0.1;
-const TEMPORAL_FRAME_COUNT = Math.round(LOOP_SECONDS / TEMPORAL_FRAME_SECONDS);
 const VALUE_STRIDE = 6;
 const TEXTURE_STRIDE = 4;
 
@@ -13,26 +12,6 @@ function compileShader(gl, type, source) {
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || 'Scalar weather shader compilation failed.');
   return shader;
-}
-
-function setMatrix(gl, location, value) {
-  if (location && value) gl.uniformMatrix4fv(location, false, value);
-}
-
-function setProjection(gl, locations, projection) {
-  setMatrix(gl, locations.matrix, projection.mainMatrix);
-  setMatrix(gl, locations.fallbackMatrix, projection.fallbackMatrix);
-  setMatrix(gl, locations.projectionMatrix, projection.mainMatrix);
-  if (locations.tileMercatorCoords) gl.uniform4f(locations.tileMercatorCoords, ...projection.tileMercatorCoords);
-  if (locations.clippingPlane && projection.clippingPlane) gl.uniform4f(locations.clippingPlane, ...projection.clippingPlane);
-  if (locations.projectionTransition) gl.uniform1f(locations.projectionTransition, projection.projectionTransition);
-}
-
-function temporalFrameAt(time) {
-  const wrapped = ((time % 1) + 1) % 1;
-  const scaled = wrapped * TEMPORAL_FRAME_COUNT;
-  const index = Math.floor(scaled) % TEMPORAL_FRAME_COUNT;
-  return { index, progress: scaled - Math.floor(scaled) };
 }
 
 function makeProgram(gl, shaderData, mode) {
@@ -125,6 +104,7 @@ export class GeographicScalarLayer {
     this.temporalProgress = 0;
     this.values = null;
     this.valuesDirty = false;
+    this.valueBufferCapacity = 0;
     this.areaReconstruction = null;
     this.textureValues0 = null;
     this.textureValues1 = null;
@@ -163,7 +143,7 @@ export class GeographicScalarLayer {
   }
 
   rebuildTemporal(time) {
-    const frame = temporalFrameAt(time);
+    const frame = geographicTemporalFrameAt(time);
     const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
     this.temporal = {
       index: frame.index,
@@ -265,7 +245,7 @@ export class GeographicScalarLayer {
   }
 
   updateWeather(time) {
-    const frame = temporalFrameAt(time);
+    const frame = geographicTemporalFrameAt(time);
     if (!this.temporal || frame.index !== this.temporal.index) {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
         const reusable = this.temporal.state0;
@@ -295,7 +275,11 @@ export class GeographicScalarLayer {
     if (this.mode === 'blur' && this.valuesDirty) {
       if (!this.valueBuffer) this.valueBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, this.valueBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, this.values, gl.DYNAMIC_DRAW);
+      if (this.valueBufferCapacity < this.values.byteLength) {
+        gl.bufferData(gl.ARRAY_BUFFER, this.values.byteLength, gl.DYNAMIC_DRAW);
+        this.valueBufferCapacity = this.values.byteLength;
+      }
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.values);
       this.valuesDirty = false;
     }
     if (this.mode === 'areas') {
@@ -304,7 +288,7 @@ export class GeographicScalarLayer {
     }
     const { program, locations } = this.programFor(gl, args.shaderData);
     gl.useProgram(program);
-    setProjection(gl, {
+    setGeographicProjection(gl, {
       matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix,
       tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition
     }, args.defaultProjectionData);

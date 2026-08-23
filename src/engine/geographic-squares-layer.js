@@ -1,10 +1,9 @@
-import { LOOP_SECONDS, RAIN_MODERATE_MAX } from './config.js';
-import { prepareGeographicFieldFrame, geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
-import { MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
+import { RAIN_MODERATE_MAX } from './config.js';
+import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographicToSynthetic } from './geography.js';
+import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
+import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
 
 const REFERENCE_GRID_LEVEL = 13;
-const TEMPORAL_FRAME_SECONDS = 0.1;
-const TEMPORAL_FRAME_COUNT = Math.round(LOOP_SECONDS / TEMPORAL_FRAME_SECONDS);
 const INSTANCE_STRIDE = 8;
 const CELL_VERTICES = new Float32Array([-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5]);
 
@@ -14,26 +13,6 @@ function compileShader(gl, type, source) {
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || 'Square weather shader compilation failed.');
   return shader;
-}
-
-function setMatrix(gl, location, value) {
-  if (location && value) gl.uniformMatrix4fv(location, false, value);
-}
-
-function setProjection(gl, locations, projection) {
-  setMatrix(gl, locations.matrix, projection.mainMatrix);
-  setMatrix(gl, locations.fallbackMatrix, projection.fallbackMatrix);
-  setMatrix(gl, locations.projectionMatrix, projection.mainMatrix);
-  if (locations.tileMercatorCoords) gl.uniform4f(locations.tileMercatorCoords, ...projection.tileMercatorCoords);
-  if (locations.clippingPlane && projection.clippingPlane) gl.uniform4f(locations.clippingPlane, ...projection.clippingPlane);
-  if (locations.projectionTransition) gl.uniform1f(locations.projectionTransition, projection.projectionTransition);
-}
-
-function temporalFrameAt(time) {
-  const wrapped = ((time % 1) + 1) % 1;
-  const scaled = wrapped * TEMPORAL_FRAME_COUNT;
-  const index = Math.floor(scaled) % TEMPORAL_FRAME_COUNT;
-  return { index, progress: scaled - Math.floor(scaled) };
 }
 
 function makeProgram(gl, shaderData) {
@@ -79,7 +58,7 @@ function parentIdFor(sample, bounds, parentStep) {
 class GeographicSquarePyramid {
   constructor() {
     this.levels = new Map();
-    for (let level = MIN_GRID_LEVEL; level <= MAX_GRID_LEVEL; level++) {
+    for (let level = MIN_GRID_LEVEL; level <= MAX_DISPLAY_GRID_LEVEL; level++) {
       const { samples } = selectMercatorGridSamples(level);
       const fieldPoints = level >= REFERENCE_GRID_LEVEL ? new Float32Array(samples.length * 2) : null;
       for (let index = 0; fieldPoints && index < samples.length; index++) {
@@ -105,7 +84,7 @@ class GeographicSquarePyramid {
   }
 
   evaluate(levels, frame, reusable = null) {
-    const states = new Array(MAX_GRID_LEVEL + 1);
+    const states = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
     const requested = new Set(levels);
     const wantsReduced = levels.some((level) => level <= REFERENCE_GRID_LEVEL);
     if (wantsReduced) {
@@ -113,7 +92,7 @@ class GeographicSquarePyramid {
       const direct = makeState(reference.samples.length, reusable?.[REFERENCE_GRID_LEVEL]);
       const value = { rain: 0, storm: 0, hail: 0 };
       for (let index = 0; index < reference.samples.length; index++) {
-        geographicPreparedIntensityAt(frame, { x: reference.fieldPoints[index * 2], y: reference.fieldPoints[index * 2 + 1] }, value);
+        geographicPreparedIntensityAtXY(frame, reference.fieldPoints[index * 2], reference.fieldPoints[index * 2 + 1], value);
         direct.rain[index] = value.rain; direct.storm[index] = value.storm; direct.hail[index] = value.hail;
       }
       states[REFERENCE_GRID_LEVEL] = direct;
@@ -143,7 +122,7 @@ class GeographicSquarePyramid {
       const state = makeState(entry.samples.length, reusable?.[level]);
       const value = { rain: 0, storm: 0, hail: 0 };
       for (let index = 0; index < entry.samples.length; index++) {
-        geographicPreparedIntensityAt(frame, { x: entry.fieldPoints[index * 2], y: entry.fieldPoints[index * 2 + 1] }, value);
+        geographicPreparedIntensityAtXY(frame, entry.fieldPoints[index * 2], entry.fieldPoints[index * 2 + 1], value);
         state.rain[index] = value.rain; state.storm[index] = value.storm; state.hail[index] = value.hail;
       }
       states[level] = state;
@@ -166,6 +145,7 @@ export class GeographicSquaresLayer {
     this.temporalProgress = 0;
     this.instanceData = [new Float32Array(), new Float32Array()];
     this.instanceCounts = [0, 0];
+    this.instanceBufferCapacity = [0, 0];
     this.instancesDirty = true;
     this.programs = new Map();
   }
@@ -191,7 +171,7 @@ export class GeographicSquaresLayer {
   }
 
   rebuildTemporal(time) {
-    const frame = temporalFrameAt(time);
+    const frame = geographicTemporalFrameAt(time);
     const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
     this.temporal = { index: frame.index, nextIndex, frames0: this.pyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(frame.index / TEMPORAL_FRAME_COUNT)), frames1: this.pyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(nextIndex / TEMPORAL_FRAME_COUNT)) };
     this.temporalProgress = frame.progress;
@@ -202,32 +182,34 @@ export class GeographicSquaresLayer {
   setTransition(fromSamples, toSamples, time, progress = 0) { this.samples = toSamples; this.transition = { fromSamples, toSamples }; this.transitionProgress = progress; if (this.active) this.rebuildTemporal(time); else this.temporal = null; }
   setTransitionProgress(progress) { this.transitionProgress = progress; if (this.active) this.map?.triggerRepaint(); }
 
-  buildGroup(level, state0, state1) {
+  buildGroup(group, level, state0, state1) {
     const samples = this.pyramid.levels.get(level).samples;
-    const result = new Float32Array(samples.length * INSTANCE_STRIDE);
+    const length = samples.length * INSTANCE_STRIDE;
+    let result = this.instanceData[group];
+    if (result.length < length) result = new Float32Array(Math.max(length, result.length * 2, INSTANCE_STRIDE * 256));
     for (let index = 0, offset = 0; index < samples.length; index++, offset += INSTANCE_STRIDE) {
       result[offset] = samples[index].mercator[0]; result[offset + 1] = samples[index].mercator[1];
       result[offset + 2] = state0.rain[index]; result[offset + 3] = state0.storm[index]; result[offset + 4] = state0.hail[index];
       result[offset + 5] = state1.rain[index]; result[offset + 6] = state1.storm[index]; result[offset + 7] = state1.hail[index];
     }
-    return result;
+    this.instanceData[group] = result;
+    this.instanceCounts[group] = samples.length;
   }
 
   rebuildInstances() {
     if (!this.temporal || !this.samples.length) return;
     const levels = this.transition ? [this.transition.fromSamples[0].level, this.transition.toSamples[0].level] : [this.samples[0].level];
     for (let index = 0; index < levels.length; index++) {
-      this.instanceData[index] = this.buildGroup(levels[index], this.temporal.frames0[levels[index]], this.temporal.frames1[levels[index]]);
-      this.instanceCounts[index] = this.instanceData[index].length / INSTANCE_STRIDE;
+      this.buildGroup(index, levels[index], this.temporal.frames0[levels[index]], this.temporal.frames1[levels[index]]);
     }
-    if (levels.length === 1) { this.instanceData[1] = new Float32Array(); this.instanceCounts[1] = 0; }
+    if (levels.length === 1) this.instanceCounts[1] = 0;
     this.instancesDirty = true;
     this.map?.triggerRepaint();
   }
 
   updateWeather(time) {
     if (!this.samples.length) return;
-    const frame = temporalFrameAt(time);
+    const frame = geographicTemporalFrameAt(time);
     if (!this.temporal || frame.index !== this.temporal.index) {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
         const reusable = this.temporal.frames0;
@@ -251,7 +233,7 @@ export class GeographicSquaresLayer {
     if (!this.instanceCounts[group] || opacity <= 0) return;
     const { program, locations } = entry;
     gl.useProgram(program);
-    setProjection(gl, { matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix, tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition }, projection);
+    setGeographicProjection(gl, { matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix, tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition }, projection);
     gl.uniform1f(locations.u_temporalProgress, this.temporalProgress);
     const level = this.transition ? (group === 0 ? this.transition.fromSamples[0].level : this.transition.toSamples[0].level) : this.samples[0].level;
     gl.uniform1f(locations.u_spacing, 1 / 2 ** level);
@@ -273,7 +255,15 @@ export class GeographicSquaresLayer {
   render(gl, args) {
     if (!this.active || !this.temporal) return;
     if (this.instancesDirty) {
-      for (let index = 0; index < 2; index++) { gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[index]); gl.bufferData(gl.ARRAY_BUFFER, this.instanceData[index], gl.DYNAMIC_DRAW); }
+      for (let index = 0; index < 2; index++) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[index]);
+        const byteLength = this.instanceCounts[index] * INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
+        if (byteLength > this.instanceBufferCapacity[index]) {
+          gl.bufferData(gl.ARRAY_BUFFER, byteLength, gl.DYNAMIC_DRAW);
+          this.instanceBufferCapacity[index] = byteLength;
+        }
+        if (byteLength) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData[index].subarray(0, this.instanceCounts[index] * INSTANCE_STRIDE));
+      }
       this.instancesDirty = false;
     }
     const entry = this.programFor(gl, args.shaderData);

@@ -3,7 +3,7 @@
 ## Document status
 
 - Repository: `anatolysinelnikov/dot-field`
-- Architecture: `experiment/globe-layers` geographic weather representations
+- Architecture: `main` geographic weather representations
 - This document is maintained context, not implementation authority. The current code wins when they differ.
 
 ## Project model
@@ -86,6 +86,11 @@ do not evaluate weather, rebuild instance data, or upload temporal GPU data.
 Dots and Squares read out their active LOD/sample count. Blur and Areas report
 their fixed L14 reconstruction lattice instead of camera LOD.
 
+The application-owned RAF runs only while playback advances or a 0.2 s LOD
+transition is active. Paused map navigation and static updates use MapLibre's
+own repaint scheduling; beginning or reversing an LOD transition wakes the
+application RAF so its progress still completes while paused.
+
 ## Geographic field adapter — `src/engine/geography.js`
 
 `WEATHER_REGION` centralizes the Saint Petersburg anchor, synthetic longitude /
@@ -101,16 +106,17 @@ The discrete topology is a globally anchored dyadic grid in normalized
 Web-Mercator coordinates. A sample identity is its integer L15 canonical
 coordinate pair, so inherited vertices retain identity through LOD refinement.
 The camera never reseats the grid. Displayed Dots/Squares levels are L10–L14;
-L15 remains the canonical identity resolution. Logical sampling zoom is
+L15 remains the canonical identity resolution but is not materialized as Dots
+or Squares runtime topology. Logical sampling zoom is
 application-owned and latitude-corrected for Globe camera behavior, so panning
 and rotating do not alter displayed weather density.
 
 ## Dots — `src/engine/geographic-dots-layer.js`
 
 Dots retain the existing symbol-pyramid implementation. `GeographicSymbolPyramid`
-caches L10–L15 topology, direct field points, static anchors, dyadic ownership,
+caches L10–L14 topology, direct field points, static anchors, dyadic ownership,
 and direct level-pair mappings. It evaluates L13 as the reference, recursively
-reduces L10–L12, and directly evaluates L14/L15. Rain and strong-rain areas are
+reduces L10–L12, and directly evaluates L14. Rain and strong-rain areas are
 conserved independently; hail wins hazard priority during reduction.
 
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
@@ -150,6 +156,11 @@ vertex values; Areas reconstructs/uploads only dense texture values. The scalar
 mesh is a surface-attached
 MapLibre custom 3D layer, not a Canvas raster, screen overlay, or
 post-processing effect.
+
+Dots, Squares, and Scalar share the same 100 ms temporal-frame boundary helper
+and MapLibre/WebGL projection-uniform helper. Squares retain CPU and GPU
+instance capacity across updates, and Blur retains its fixed-size GPU value
+buffer allocation; only data contents are updated for ordinary keyframes.
 
 ## Blur — `src/engine/geographic-scalar-layer.js`
 

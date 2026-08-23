@@ -1,5 +1,5 @@
 import { geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
-import { MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
+import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
 import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
 import { geographicHazardRadii } from './hazard-renderer.js';
 
@@ -150,7 +150,7 @@ function averageAnchor(children, anchors) {
 export class GeographicSymbolPyramid {
   constructor() {
     this.levels = new Map();
-    for (let level = MIN_GRID_LEVEL; level <= MAX_GRID_LEVEL; level++) {
+    for (let level = MIN_GRID_LEVEL; level <= MAX_DISPLAY_GRID_LEVEL; level++) {
       const selection = selectMercatorGridSamples(level);
       const anchors = new Float64Array(selection.samples.length * 2);
       const fieldPoints = level >= REFERENCE_GRID_LEVEL ? new Float64Array(selection.samples.length * 2) : null;
@@ -187,11 +187,11 @@ export class GeographicSymbolPyramid {
     }
 
     this.directPairs = new Map();
-    for (let level = REFERENCE_GRID_LEVEL; level < MAX_GRID_LEVEL; level++) {
+    for (let level = REFERENCE_GRID_LEVEL; level < MAX_DISPLAY_GRID_LEVEL; level++) {
       this.directPairs.set(level + 1, buildDirectPairs(this.levels.get(level), this.levels.get(level + 1)));
     }
 
-    this.lastEvaluationCounts = new Uint32Array(MAX_GRID_LEVEL + 1);
+    this.lastEvaluationCounts = new Uint32Array(MAX_DISPLAY_GRID_LEVEL + 1);
   }
 
   samplesFor(level) {
@@ -212,7 +212,7 @@ export class GeographicSymbolPyramid {
   }
 
   evaluate(requestedLevels, frame, reusableStates = null) {
-    const states = new Array(MAX_GRID_LEVEL + 1);
+    const states = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
     let wantsReference = false;
     let minimumRequested = REFERENCE_GRID_LEVEL;
     for (let index = 0; index < requestedLevels.length; index++) {
