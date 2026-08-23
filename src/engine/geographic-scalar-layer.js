@@ -1,4 +1,5 @@
 import { LOOP_SECONDS, RAIN_MODERATE_MAX } from './config.js';
+import { createAreasReconstructionWorkspace, reconstructAreasChannels } from './areas-reconstruction.js';
 import { AREA_HAIL_THRESHOLD, AREA_RAIN_THRESHOLDS, AREA_STORM_THRESHOLD, GeographicScalarLattice } from './geographic-scalar-lattice.js';
 
 const TEMPORAL_FRAME_SECONDS = 0.1;
@@ -126,10 +127,11 @@ export class GeographicScalarLayer {
     this.temporal = null;
     this.temporalProgress = 0;
     this.values = new Float32Array(this.lattice.length * VALUE_STRIDE);
-    this.textureValues0 = new Float32Array(this.lattice.length * TEXTURE_STRIDE);
-    this.textureValues1 = new Float32Array(this.lattice.length * TEXTURE_STRIDE);
+    this.areaReconstruction = createAreasReconstructionWorkspace(this.lattice.width, this.lattice.height);
+    this.textureValues0 = new Float32Array(this.areaReconstruction.width * this.areaReconstruction.height * TEXTURE_STRIDE);
+    this.textureValues1 = new Float32Array(this.areaReconstruction.width * this.areaReconstruction.height * TEXTURE_STRIDE);
     this.valuesDirty = true;
-    this.texturesDirty = true;
+    this.texturesDirty = [true, true];
     this.programs = new Map();
   }
 
@@ -149,7 +151,7 @@ export class GeographicScalarLayer {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, this.lattice.width, this.lattice.height);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, this.areaReconstruction.width, this.areaReconstruction.height);
     }
     if (!this.temporal) this.rebuildTemporal(0);
   }
@@ -187,7 +189,7 @@ export class GeographicScalarLayer {
     this.rebuildValues();
   }
 
-  rebuildValues() {
+  rebuildValues(reusePreviousAreaState = false) {
     const state0 = this.temporal.state0[this.smooth ? 'smooth' : 'raw'];
     const state1 = this.temporal.state1[this.smooth ? 'smooth' : 'raw'];
     for (let index = 0, offset = 0; index < this.lattice.length; index++, offset += VALUE_STRIDE) {
@@ -199,29 +201,43 @@ export class GeographicScalarLayer {
       this.values[offset + 5] = state1.hail[index];
     }
     this.valuesDirty = true;
-    if (this.mode === 'areas') this.rebuildTextureValues(state0, state1);
+    if (this.mode === 'areas') {
+      if (reusePreviousAreaState) this.advanceAreaTextureValues(state1);
+      else this.rebuildTextureValues(state0, state1);
+    }
   }
 
   rebuildTextureValues(state0, state1) {
-    for (let index = 0, offset = 0; index < this.lattice.length; index++, offset += TEXTURE_STRIDE) {
-      this.textureValues0[offset] = state0.rain[index];
-      this.textureValues0[offset + 1] = state0.storm[index];
-      this.textureValues0[offset + 2] = state0.hail[index];
-      this.textureValues1[offset] = state1.rain[index];
-      this.textureValues1[offset + 1] = state1.storm[index];
-      this.textureValues1[offset + 2] = state1.hail[index];
+    reconstructAreasChannels(state0, this.areaReconstruction, this.textureValues0, TEXTURE_STRIDE);
+    reconstructAreasChannels(state1, this.areaReconstruction, this.textureValues1, TEXTURE_STRIDE);
+    this.texturesDirty[0] = true;
+    this.texturesDirty[1] = true;
+  }
+
+  advanceAreaTextureValues(state1) {
+    const reusableValues = this.textureValues0;
+    this.textureValues0 = this.textureValues1;
+    this.textureValues1 = reusableValues;
+    if (this.valueTextures) {
+      const reusableTexture = this.valueTextures[0];
+      this.valueTextures[0] = this.valueTextures[1];
+      this.valueTextures[1] = reusableTexture;
     }
-    this.texturesDirty = true;
+    const state0Dirty = this.texturesDirty[1];
+    reconstructAreasChannels(state1, this.areaReconstruction, this.textureValues1, TEXTURE_STRIDE);
+    this.texturesDirty[0] = state0Dirty;
+    this.texturesDirty[1] = true;
   }
 
   uploadTextures(gl) {
-    if (!this.texturesDirty || !this.valueTextures) return;
+    if (!this.valueTextures) return;
     for (let index = 0; index < this.valueTextures.length; index++) {
+      if (!this.texturesDirty[index]) continue;
       gl.bindTexture(gl.TEXTURE_2D, this.valueTextures[index]);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.lattice.width, this.lattice.height, gl.RGBA, gl.FLOAT,
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.areaReconstruction.width, this.areaReconstruction.height, gl.RGBA, gl.FLOAT,
         index === 0 ? this.textureValues0 : this.textureValues1);
+      this.texturesDirty[index] = false;
     }
-    this.texturesDirty = false;
   }
 
   updateWeather(time) {
@@ -233,7 +249,7 @@ export class GeographicScalarLayer {
         this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
         this.temporal.state0 = this.temporal.state1;
         this.temporal.state1 = this.lattice.evaluate(this.temporal.nextIndex / TEMPORAL_FRAME_COUNT, reusable);
-        this.rebuildValues();
+        this.rebuildValues(true);
       } else this.rebuildTemporal(time);
     }
     this.temporalProgress = frame.progress;
@@ -273,8 +289,8 @@ export class GeographicScalarLayer {
       gl.bindTexture(gl.TEXTURE_2D, this.valueTextures[1]);
       gl.uniform1i(locations.u_valuesTexture1, 1);
       gl.uniform2fv(locations.u_latticeOrigin, this.lattice.origin);
-      gl.uniform1f(locations.u_latticeSpacing, this.lattice.spacing);
-      gl.uniform2i(locations.u_latticeSize, this.lattice.width, this.lattice.height);
+      gl.uniform1f(locations.u_latticeSpacing, this.lattice.spacing / this.areaReconstruction.subdivisions);
+      gl.uniform2i(locations.u_latticeSize, this.areaReconstruction.width, this.areaReconstruction.height);
     }
     const thresholds0 = this.smooth ? this.temporal.state0.rainThresholds : AREA_RAIN_THRESHOLDS;
     const thresholds1 = this.smooth ? this.temporal.state1.rainThresholds : AREA_RAIN_THRESHOLDS;

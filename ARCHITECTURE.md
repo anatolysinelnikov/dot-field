@@ -51,7 +51,8 @@ app.js ----------------------> MapLibre GL JS / Globe camera and basemap
  |      geographic-symbol-pyramid.js      |
  |                                        +-> geographic-dots-layer.js
  +-> geographic-squares-layer.js          +-> geographic-squares-layer.js
- +-> geographic-scalar-lattice.js         +-> geographic-scalar-layer.js
+ +-> geographic-scalar-lattice.js ---+
+ +-> areas-reconstruction.js --------+----> geographic-scalar-layer.js
 ```
 
 ### Application orchestration — `src/app.js`
@@ -147,18 +148,33 @@ to strong blue, then magenta storm and yellow hail composited above it. Hail is
 last. The shader computes final color and opacity directly from reconstructed
 values, avoiding blur of any discrete representation.
 
-## Areas and Smooth — `src/engine/geographic-scalar-layer.js`
+## Areas reconstruction and Smooth — `src/engine/geographic-scalar-layer.js`, `src/engine/areas-reconstruction.js`
 
-Areas uses the same deterministic L14 scalar samples but no longer uses the
-surface triangle diagonal to reconstruct them. Adjacent temporal states are
-uploaded as fixed-size scalar textures; each fragment maps its Mercator surface
-position to a rectangular lattice cell and explicitly bilinearly interpolates
-the four corner samples. The indexed triangles therefore only tessellate the
-MapLibre globe surface, while threshold topology comes from rectangular cells.
-The fragment shader applies the existing five precipitation bands (`#0090FF`
-through `#0000FF`), storm/hail thresholds, translucent magenta/yellow fills,
-hail-over-storm order, and derivative-based edge treatment to that bilinearly
-reconstructed field.
+Areas starts from the same deterministic L14 samples, but its default
+reconstruction is a separate, shape-preserving dense Mercator lattice. The
+explicit `AREA_RECONSTRUCTION_SUBDIVISIONS = 2` constant produces a 359 × 335
+reconstruction grid from the 180 × 168 source grid. Its CPU pass is a
+separable monotone cubic Hermite (PCHIP-style harmonic-slope) interpolator: it
+copies every original L14 node exactly, limits slopes to prevent cubic ringing,
+and constrains between-node values to their rectangular source-cell range.
+This improves continuity for small hail contours without changing the sampled
+field or applying low-pass smoothing.
+
+The expensive reconstruction is performed only when Areas needs a temporal
+state: both adjacent states are rebuilt on Areas activation, arbitrary timeline
+jumps, or a Smooth toggle. During ordinary 100 ms temporal advancement, the
+already reconstructed `state1` buffer/texture becomes `state0`; only the new
+`state1` is reconstructed and uploaded. The two dense RGBA32F textures keep
+rain/storm/hail in RGB. The fragment shader uses portable explicit bilinear
+four-texel sampling of those dense textures, then temporally mixes the results
+before applying the existing five precipitation bands (`#0090FF` through
+`#0000FF`), storm/hail thresholds, translucent magenta/yellow fills,
+hail-over-storm order, and derivative-based edge treatment. This avoids making
+float-linear texture support a requirement.
+
+The static L14 indexed triangles remain projection-only surface tessellation
+for MapLibre Globe. Their diagonals never determine Areas scalar contours, and
+camera movement only reprojects the surface; it does not rebuild scalar data.
 
 Smooth generalizes field data before Areas rendering. For every prepared scalar
 keyframe, each channel receives two deterministic radius-three box-filter passes
@@ -168,7 +184,9 @@ Rain band thresholds and storm/hail presence thresholds are coverage-remapped
 against the unsmoothed lattice, preserving the legacy visual-coverage intent.
 Both filtered values and remapped thresholds are interpolated between temporal
 keyframes, so Smooth does not introduce visible 100 ms contour steps. Its
-deterministic lattice values feed the same Areas-only bilinear reconstruction.
+deterministic generalized L14 values feed the same shape-preserving dense Areas
+reconstruction; Smooth is therefore still distinct from default reconstruction
+quality. Blur remains on its independent triangle-interpolated scalar path.
 
 ## Legacy Canvas modules
 
