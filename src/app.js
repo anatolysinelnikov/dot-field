@@ -154,7 +154,7 @@ function initializeWeatherLayer() {
         filter: waterLayer.filter,
         paint: {
           'fill-color': waterLayer.paint?.['fill-color'] || '#141414',
-          'fill-opacity': 0.20
+          'fill-opacity': 0.30
         }
       }, weatherLayer.id);
     } catch (error) {
