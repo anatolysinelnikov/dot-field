@@ -343,7 +343,7 @@ function updateTimelineFromPointer(clientX) {
 let scrubbingPointerId = null;
 playPause.addEventListener('click', () => setPlaying(!state.playing));
 zoomIn.addEventListener('click', () => map.zoomIn());
-zoomOut.addEventListener('click', () => map.zoomOut());
+zoomOut.addEventListener('click', () => map.zoomTo(Math.max(map.getMinZoom(), map.getZoom() - 1)));
 function resetMapView() {
   if (state.resettingView) return;
   state.resettingView = true;
