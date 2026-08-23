@@ -134,7 +134,7 @@ bearing, perspective, pan, and depth.
 
 The square pyramid evaluates direct L13+ samples and recursively reduces coarse
 levels: rain averages over immediate deterministic children, while storm and
-hail use the legacy average/max-biased intent. The fragment transfer preserves
+hail use the existing average/max-biased intent. The fragment transfer preserves
 the light-blue to strong-blue precipitation hierarchy, magenta storm, yellow
 hail, and hail-over-storm compositing. LOD changes crossfade the deterministic
 parent and child cell sets during the existing 0.2 s transition; no new grid is
@@ -153,9 +153,7 @@ Each temporal keyframe evaluates raw rain/storm/hail at those fixed vertices
 using the prepared geographic field. Smooth state and coverage remapping are
 computed only for Areas with Smooth enabled. Blur packs/uploads only its L14
 vertex values; Areas reconstructs/uploads only dense texture values. The scalar
-mesh is a surface-attached
-MapLibre custom 3D layer, not a Canvas raster, screen overlay, or
-post-processing effect.
+mesh is a surface-attached MapLibre custom 3D layer.
 
 Dots, Squares, and Scalar share the same 100 ms temporal-frame boundary helper
 and MapLibre/WebGL projection-uniform helper. Squares retain CPU and GPU
@@ -165,7 +163,7 @@ buffer allocation; only data contents are updated for ordinary keyframes.
 ## Blur — `src/engine/geographic-scalar-layer.js`
 
 In Blur mode the fragment shader retains the existing vertex-varying triangle
-interpolation path and applies the legacy continuous visibility and
+interpolation path and applies the continuous visibility and
 color-transfer intent: a soft rain support edge, light-blue rain transitioning
 to strong blue, then magenta storm and yellow hail composited above it. Hail is
 last. The shader computes final color and opacity directly from reconstructed
@@ -208,17 +206,9 @@ low-pass scale). The filter uses running separable windows while retaining the
 same edge-clamping semantics. This
 removes local detail without changing the lattice or responding to camera zoom.
 Rain band thresholds and storm/hail presence thresholds are coverage-remapped
-against the unsmoothed lattice, preserving the legacy visual-coverage intent.
+against the unsmoothed lattice, preserving the visual-coverage intent.
 Both filtered values and remapped thresholds are interpolated between temporal
 keyframes, so Smooth does not introduce visible 100 ms contour steps. Its
 deterministic generalized L14 values feed the same shape-preserving dense Areas
 reconstruction; Smooth is therefore still distinct from default reconstruction
 quality. Blur remains on its independent triangle-interpolated scalar path.
-
-## Legacy Canvas modules
-
-`dots-renderer.js`, `squares-renderer.js`, `blur-renderer.js`,
-`areas-renderer.js`, and `scalar-reconstruction.js` remain inactive reference
-implementations of the old fixed-viewport Canvas path. Their pure transfer and
-semantic intent informs the geographic layers, but no geographic renderer draws
-through a Canvas viewport/raster path.
