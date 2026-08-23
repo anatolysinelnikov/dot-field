@@ -17,16 +17,20 @@
       <span class="hail"><i></i>Hail</span>
     </div>
 
-    <div id="modeControls" class="mode-controls" role="group" aria-label="Weather representation">
-      <button type="button" data-mode="dots" data-selected="true" aria-pressed="true">Dots</button>
-      <button type="button" data-mode="squares" data-selected="false" aria-pressed="false">Squares</button>
-      <button type="button" data-mode="blur" data-selected="false" aria-pressed="false">Blur</button>
-      <button type="button" data-mode="areas" data-selected="false" aria-pressed="false">Areas</button>
+    <div class="render-mode-controls">
+      <div id="renderModeSelector" class="render-mode" role="radiogroup" aria-label="Weather rendering mode" data-mode="dots">
+        <button type="button" role="radio" aria-checked="true" data-render-mode="dots">Dots</button>
+        <button type="button" role="radio" aria-checked="false" data-render-mode="squares">Squares</button>
+        <button type="button" role="radio" aria-checked="false" data-render-mode="blur">Blur</button>
+        <button type="button" role="radio" aria-checked="false" data-render-mode="areas">Areas</button>
+      </div>
+      <label id="areaSmoothControl" class="area-smooth" hidden>
+        <span class="area-smooth-content">
+          <input id="areaSmooth" type="checkbox">
+          <span>Smooth</span>
+        </span>
+      </label>
     </div>
-    <label id="smoothControl" class="smooth-control" hidden>
-      <input id="smoothToggle" type="checkbox">
-      <span>Smooth</span>
-    </label>
 
     <div class="zoom-controls" role="group" aria-label="Map controls">
       <button id="resetView" class="zoom-reset" type="button" aria-label="Reset view" hidden>↺</button>

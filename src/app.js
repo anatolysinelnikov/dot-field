@@ -24,9 +24,10 @@ const sampleLabel = document.querySelector('#sampleLabel');
 const resetView = document.querySelector('#resetView');
 const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
-const modeControls = document.querySelector('#modeControls');
-const smoothControl = document.querySelector('#smoothControl');
-const smoothToggle = document.querySelector('#smoothToggle');
+const renderModeSelector = document.querySelector('#renderModeSelector');
+const renderModeButtons = [...renderModeSelector.querySelectorAll('[data-render-mode]')];
+const areaSmoothControl = document.querySelector('#areaSmoothControl');
+const areaSmooth = document.querySelector('#areaSmooth');
 
 const mapContainer = document.querySelector('#map');
 const shortSide = Math.min(
@@ -116,18 +117,18 @@ const state = {
   rawMaxZoom: INITIAL_RAW_MAX_ZOOM,
   resettingView: false,
   mapReady: false,
-  weatherQueued: false
+  weatherQueued: false,
+  renderMode: 'dots'
 };
 const weatherLayer = new GeographicDotsLayer();
 const squaresLayer = new GeographicSquaresLayer();
 const scalarLayer = new GeographicScalarLayer();
 const geographicLayers = [scalarLayer, squaresLayer, weatherLayer];
-state.mode = 'dots';
 let lastMapErrorSignature = '';
 
 function updateReadout() {
   zoomLabel.textContent = state.logicalSamplingZoom.toFixed(2);
-  const scalarMode = state.mode === 'blur' || state.mode === 'areas';
+  const scalarMode = state.renderMode === 'blur' || state.renderMode === 'areas';
   lodLabel.textContent = scalarMode ? 'fixed L14' : state.lod.level === null ? '–' : String(state.lod.level);
   sampleLabel.textContent = (scalarMode ? scalarLayer.lattice.length : state.samples.length).toLocaleString();
 }
@@ -355,18 +356,22 @@ function queueWeatherUpdate() {
 }
 
 function applyRenderMode() {
-  const mode = state.mode;
+  const mode = state.renderMode;
   weatherLayer.setActive(mode === 'dots');
   squaresLayer.setActive(mode === 'squares');
-  scalarLayer.setPresentation(mode === 'areas' ? 'areas' : 'blur', mode === 'areas' && smoothToggle.checked, state.time / LOOP_SECONDS);
+  scalarLayer.setPresentation(mode === 'areas' ? 'areas' : 'blur', mode === 'areas' && areaSmooth.checked, state.time / LOOP_SECONDS);
   scalarLayer.setActive(mode === 'blur' || mode === 'areas');
-  smoothControl.hidden = mode !== 'areas';
-  for (const button of modeControls.querySelectorAll('button[data-mode]')) {
-    const selected = button.dataset.mode === mode;
-    button.dataset.selected = String(selected);
-    button.setAttribute('aria-pressed', String(selected));
-  }
   updateReadout();
+}
+
+function setRenderMode(mode) {
+  state.renderMode = mode;
+  renderModeSelector.dataset.mode = mode;
+  areaSmoothControl.hidden = mode !== 'areas';
+  for (const button of renderModeButtons) {
+    button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
+  }
+  applyRenderMode();
 }
 
 function setPlaying(playing) {
@@ -400,14 +405,11 @@ function resetMapView() {
   });
 }
 resetView.addEventListener('click', resetMapView);
-modeControls.addEventListener('click', (event) => {
-  const button = event.target.closest('button[data-mode]');
-  if (!button || button.dataset.mode === state.mode) return;
-  state.mode = button.dataset.mode;
-  applyRenderMode();
-});
-smoothToggle.addEventListener('change', () => {
-  if (state.mode === 'areas') applyRenderMode();
+for (const button of renderModeButtons) {
+  button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
+}
+areaSmooth.addEventListener('change', () => {
+  if (state.renderMode === 'areas') applyRenderMode();
 });
 timeSlider.addEventListener('pointerdown', (event) => {
   if (state.playing) setPlaying(false);
