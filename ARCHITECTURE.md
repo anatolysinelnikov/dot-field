@@ -35,7 +35,7 @@ index.html + styles.css
         v
 app.js ----------------------> MapLibre GL JS
  |                                  |
- |                                  +-- camera / pan / zoom / projection / navigation
+ |                                  +-- camera / pan / zoom / rotation / navigation
  |                                  +-- MapTiler Dataviz Dark basemap + attribution/logo
  |
  +-> geographic-lod.js
@@ -49,15 +49,15 @@ app.js ----------------------> MapLibre GL JS
 
 ### Application orchestration — `src/app.js`
 
-`app.js` owns UI state, play/pause, timeline scrubbing, projection buttons, MapLibre construction, logical sampling-zoom selection, weather refresh scheduling, and readouts. It does not implement camera controls; MapLibre owns those.
+`app.js` owns UI state, play/pause, timeline scrubbing, custom map zoom/rotation controls, MapLibre construction, logical sampling-zoom selection, weather refresh scheduling, and readouts. MapLibre owns camera navigation; the custom buttons invoke its zoom and bearing-reset APIs.
 
 The map loads the MapTiler Dataviz Dark MapLibre style (`dataviz-v4-dark`) from the Maps API using the local-only `config.local.json` key; the normal compact MapLibre attribution control and a visible MapTiler logo remain enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context; camera zoom is constrained to raw MapLibre zoom 1.5 or higher. The custom weather layer is attached from the style-ready lifecycle (`style.load`) with an idempotent `getLayer` check. The MapTiler-specific context step leaves native MapTiler paint styling unchanged while moving selected geographic and water labels plus verified country/regional administrative boundaries above weather. The `Other border` regional layer is allowed to use its source geometry beyond the original style maxzoom; finer administrative levels remain in the native lower stack. One low-opacity derived water fill at 0.30 and a derived water-boundary outline sit above weather. The current Dataviz road layers combine major and minor classes, so no clean major-only group is promoted; roads and the rest of the native basemap remain below weather until the provider exposes separable geometry. Unavailable optional context layers are skipped without preventing weather initialization. MapLibre error events remain visible in the console without exposing the authenticated style URL.
 
-The initial projection is Globe. The explicit UI switches between `globe` and `mercator` through `map.setProjection`. The center/zoom are retained by MapLibre, and no weather/sample data is regenerated for a projection switch. Projection changes temporarily suppress sampling-zoom deltas and rebase the raw camera baseline after two render frames, so the visual A/B does not change LOD.
+The geographic experiment is Globe-only. `app.js` sets MapLibre's projection to `globe` during style initialization; there is no projection selector. MapLibre retains camera center and zoom while its normal pan, pinch, wheel, and rotation navigation remain active. Custom controls call MapLibre's zoom and bearing-reset APIs without changing weather state.
 
-Animation is deterministic and has the existing 18-second loop. CPU weather evaluation produces adjacent 100 ms temporal keyframes; the custom layer interpolates their symbol radii every rendered frame. Grid samples are rebuilt only when the discrete logical-zoom-derived grid level changes. MapLibre camera movement and projection changes only reproject the existing layer geometry.
+Animation is deterministic and has the existing 18-second loop. CPU weather evaluation produces adjacent 100 ms temporal keyframes; the custom layer interpolates their symbol radii every rendered frame. Grid samples are rebuilt only when the discrete logical-zoom-derived grid level changes. MapLibre camera movement only reprojects the existing layer geometry.
 
-MapLibre raw zoom is not used directly for weather LOD. `app.js` maintains an application-owned logical sampling zoom. In Globe mode, each raw zoom delta is corrected by `log2(cos(new latitude) / cos(old latitude))`, matching MapLibre's latitude adjustment; a camera pan/rotation therefore does not alter weather density. Mercator applies the raw zoom delta directly. The UI `zoom` readout shows this logical sampling zoom rather than MapLibre's internal raw zoom.
+MapLibre raw zoom is not used directly for weather LOD. `app.js` maintains an application-owned logical sampling zoom. On the Globe projection, each raw zoom delta is corrected by `log2(cos(new latitude) / cos(old latitude))`, matching MapLibre's latitude adjustment; a camera pan/rotation therefore does not alter weather density. The UI `zoom` readout shows this logical sampling zoom rather than MapLibre's internal raw zoom.
 
 ## Geographic synthetic field adapter — `src/engine/geography.js`
 
@@ -71,7 +71,7 @@ trajectory: x = 0.33..0.67
 field support: x radius 0.92, y radius 0.76
 ```
 
-The exported `WEATHER_SUPPORT` bounds are derived from that same configuration and are the only support bounds consumed by the geographic lattice sampler. Moving the experiment to another region requires changing this one geographic configuration. `geographicIntensityAt(longitude, latitude, time)` remains available for legacy use. Geographic Dots instead caches every node's geographic-to-synthetic coordinate and evaluates it against a prepared temporal field frame. Its deterministic horizontal travel is derived only from time. Pan, zoom, viewport size, and Globe/Mercator mode do not affect it.
+The exported `WEATHER_SUPPORT` bounds are derived from that same configuration and are the only support bounds consumed by the geographic lattice sampler. Moving the experiment to another region requires changing this one geographic configuration. `geographicIntensityAt(longitude, latitude, time)` remains available for legacy use. Geographic Dots instead caches every node's geographic-to-synthetic coordinate and evaluates it against a prepared temporal field frame. Its deterministic horizontal travel is derived only from time. Pan, zoom, viewport size, and Globe camera movement do not affect it.
 
 `field.js` remains independent of MapLibre, WebGL, UI, and sampling topology. `prepareFieldFrame` precomputes time-only component amplitudes, widths, rotations, trigonometry, and inverse variances once per temporal keyframe; `evaluatePreparedField` then performs only the spatial evaluation.
 
@@ -89,7 +89,7 @@ Mercator render sampling is intentionally not equal-area on the Earth surface. I
 
 The initial logical zoom is 6.2 and selects level 12. Near Saint Petersburg, L10 through L15 are approximately 24, 12, 6, 3, 1.5, and 0.75 km between grid vertices. L13 is approximately the nominal future provider scale. L14 and L15 are finer deterministic render/reconstruction sampling of an interpolated field, not additional measured provider observations. The Mercator lattice remains independent of a provider grid.
 
-The active sample set and count remain unchanged when the same logical zoom map is panned, rotated, resized, or switched between Globe and Mercator. Zooming across a discrete threshold replaces the active level with the deterministically nested coarser or finer grid.
+The active sample set and count remain unchanged when the same logical zoom map is panned, rotated, or resized on Globe. Zooming across a discrete threshold replaces the active level with the deterministically nested coarser or finer grid.
 
 Grid step is exact and uniform at an active level, so it is stored as each sample's spacing for the marker-radius transfer. There is no screen-space, latitude, horizon, or perspective compensation.
 

@@ -82,13 +82,20 @@ button {
 button:hover { background: #1c2434; border-color: rgba(176, 193, 220, .32); }
 button:active { transform: translateY(1px); }
 
-.projection-control {
+.zoom-stepper button,
+.zoom-reset { touch-action: manipulation; }
+
+.zoom-controls {
   position: absolute;
   z-index: 2;
-  top: max(52px, calc(env(safe-area-inset-top, 0px) + 44px));
-  left: max(20px, calc(env(safe-area-inset-left, 0px) + 12px));
+  right: max(20px, calc(env(safe-area-inset-right, 0px) + 20px));
+  bottom: max(82px, calc(env(safe-area-inset-bottom, 0px) + 76px));
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.zoom-stepper {
+  display: grid;
   gap: 2px;
   padding: 4px;
   border: var(--control-border);
@@ -98,8 +105,38 @@ button:active { transform: translateY(1px); }
   backdrop-filter: var(--control-backdrop);
 }
 
-.projection-control button { border: 0; background: transparent; color: #9ba9bc; }
-.projection-control button[aria-checked="true"] { background: var(--control-inset); color: #f1f5fb; }
+.zoom-stepper button {
+  width: 44px;
+  height: 42px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--control-inset-radius);
+  outline: 0;
+  box-shadow: none;
+  background: transparent;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.zoom-stepper button:hover,
+.zoom-stepper button:focus-visible,
+.zoom-stepper button:active { background: rgba(37, 49, 73, .72); }
+
+.zoom-reset {
+  width: 54px;
+  height: 54px;
+  justify-self: end;
+  padding: 0;
+  border: var(--control-border);
+  border-radius: var(--control-radius);
+  background: var(--control-panel);
+  font-size: 22px;
+  line-height: 1;
+  box-shadow: var(--control-shadow);
+  backdrop-filter: var(--control-backdrop);
+}
+
+.zoom-reset[hidden] { display: none; }
 
 .controls {
   position: absolute;
@@ -151,9 +188,14 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
 
 @media (max-width: 680px) {
   .legend { top: max(14px, calc(env(safe-area-inset-top, 0px) + 10px)); left: max(14px, calc(env(safe-area-inset-left, 0px) + 10px)); gap: 9px; font-size: 10px; }
-  .projection-control { top: max(43px, calc(env(safe-area-inset-top, 0px) + 40px)); left: max(14px, calc(env(safe-area-inset-left, 0px) + 10px)); }
   .readout { top: max(14px, calc(env(safe-area-inset-top, 0px) + 10px)); right: max(14px, calc(env(safe-area-inset-right, 0px) + 10px)); gap: 8px; }
   .readout span:first-child { display: none; }
+  .zoom-controls {
+    top: max(56px, calc(env(safe-area-inset-top, 0px) + 52px));
+    right: max(14px, calc(env(safe-area-inset-right, 0px) + 10px));
+    bottom: auto;
+  }
+  .zoom-stepper { display: none; }
   .maplibregl-ctrl-bottom-right { bottom: max(70px, calc(env(safe-area-inset-bottom, 0px) + 64px)); right: max(12px, calc(env(safe-area-inset-right, 0px) + 10px)); }
   .maptiler-logo { left: max(14px, calc(env(safe-area-inset-left, 0px) + 10px)); bottom: max(68px, calc(env(safe-area-inset-bottom, 0px) + 62px)); width: 68px; }
   .controls { left: max(12px, calc(env(safe-area-inset-left, 0px) + 10px)); right: max(12px, calc(env(safe-area-inset-right, 0px) + 10px)); bottom: max(12px, calc(env(safe-area-inset-bottom, 0px) + 10px)); }

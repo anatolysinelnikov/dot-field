@@ -17,9 +17,12 @@
       <span class="hail"><i></i>Hail</span>
     </div>
 
-    <div id="projectionSelector" class="projection-control" role="radiogroup" aria-label="Map projection" data-projection="globe">
-      <button type="button" role="radio" aria-checked="true" data-projection="globe">Globe</button>
-      <button type="button" role="radio" aria-checked="false" data-projection="mercator">Mercator</button>
+    <div class="zoom-controls" role="group" aria-label="Map controls">
+      <button id="resetRotation" class="zoom-reset" type="button" aria-label="Reset rotation" hidden>↺</button>
+      <div class="zoom-stepper">
+        <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
+        <button id="zoomOut" type="button" aria-label="Zoom out">−</button>
+      </div>
     </div>
 
     <div class="readout" aria-live="polite">

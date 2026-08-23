@@ -10,8 +10,9 @@ const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
 const lodLabel = document.querySelector('#lodLabel');
 const sampleLabel = document.querySelector('#sampleLabel');
-const projectionSelector = document.querySelector('#projectionSelector');
-const projectionButtons = [...projectionSelector.querySelectorAll('[data-projection]')];
+const resetRotation = document.querySelector('#resetRotation');
+const zoomIn = document.querySelector('#zoomIn');
+const zoomOut = document.querySelector('#zoomOut');
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 
@@ -66,7 +67,6 @@ const map = new window.maplibregl.Map({
   canvasContextAttributes: { antialias: true },
   attributionControl: { compact: true }
 });
-map.addControl(new window.maplibregl.NavigationControl({ showCompass: true }), 'bottom-right');
 map.once('load', () => document.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show'));
 
 const state = {
@@ -80,7 +80,6 @@ const state = {
   lodTransition: null,
   logicalSamplingZoom: WEATHER_REGION.initialZoom,
   camera: null,
-  projectionSwitching: false,
   mapReady: false,
   weatherQueued: false
 };
@@ -96,8 +95,7 @@ function updateReadout() {
 function cameraState() {
   return {
     rawZoom: map.getZoom(),
-    latitude: clamp(map.getCenter().lat, -MAX_SAMPLING_LATITUDE, MAX_SAMPLING_LATITUDE),
-    projection: map.getProjection().type
+    latitude: clamp(map.getCenter().lat, -MAX_SAMPLING_LATITUDE, MAX_SAMPLING_LATITUDE)
   };
 }
 
@@ -108,17 +106,15 @@ function rebaseCamera() {
 function updateLogicalSamplingZoom() {
   const next = cameraState();
   const previous = state.camera;
-  if (!previous || state.projectionSwitching || previous.projection !== next.projection) {
+  if (!previous) {
     state.camera = next;
     updateReadout();
     return;
   }
   let delta = next.rawZoom - previous.rawZoom;
-  if (next.projection === 'globe') {
-    const nextCosine = Math.max(0.001, Math.cos(next.latitude * Math.PI / 180));
-    const previousCosine = Math.max(0.001, Math.cos(previous.latitude * Math.PI / 180));
-    delta -= Math.log2(nextCosine / previousCosine);
-  }
+  const nextCosine = Math.max(0.001, Math.cos(next.latitude * Math.PI / 180));
+  const previousCosine = Math.max(0.001, Math.cos(previous.latitude * Math.PI / 180));
+  delta -= Math.log2(nextCosine / previousCosine);
   if (Number.isFinite(delta)) state.logicalSamplingZoom += delta;
   state.camera = next;
   updateReadout();
@@ -298,24 +294,11 @@ function updateTimelineFromPointer(clientX) {
   queueWeatherUpdate();
 }
 
-function setProjection(type) {
-  if (map.getProjection().type === type) return;
-  state.projectionSwitching = true;
-  map.setProjection({ type });
-  projectionSelector.dataset.projection = type;
-  for (const button of projectionButtons) button.setAttribute('aria-checked', String(button.dataset.projection === type));
-  // MapLibre may adjust raw camera zoom while changing projections. Its
-  // projection update is applied in the render cycle, while this custom layer
-  // continuously requests repaints, so do not wait for an idle event here.
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    rebaseCamera();
-    state.projectionSwitching = false;
-    updateReadout();
-  }));
-}
-
 let scrubbingPointerId = null;
 playPause.addEventListener('click', () => setPlaying(!state.playing));
+zoomIn.addEventListener('click', () => map.zoomIn());
+zoomOut.addEventListener('click', () => map.zoomOut());
+resetRotation.addEventListener('click', () => map.resetNorth());
 timeSlider.addEventListener('pointerdown', (event) => {
   if (state.playing) setPlaying(false);
   state.scrubbing = true;
@@ -338,13 +321,18 @@ for (const eventName of ['pointerup', 'pointercancel']) {
     scrubbingPointerId = null;
   });
 }
-for (const button of projectionButtons) button.addEventListener('click', () => setProjection(button.dataset.projection));
-
 map.on('style.load', () => {
   if (!state.mapReady) map.setProjection({ type: 'globe' });
   initializeWeatherLayer();
 });
 map.on('move', updateLogicalSamplingZoom);
+function updateRotationControl() {
+  const bearing = ((map.getBearing() + 180) % 360) - 180;
+  resetRotation.hidden = Math.abs(bearing) < 0.01;
+}
+map.on('rotate', updateRotationControl);
+map.on('rotateend', updateRotationControl);
+map.on('load', updateRotationControl);
 map.on('error', (event) => {
   const error = event?.error;
   const details = [];
