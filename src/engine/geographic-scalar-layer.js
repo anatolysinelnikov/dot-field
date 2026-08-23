@@ -4,6 +4,7 @@ import { AREA_HAIL_THRESHOLD, AREA_RAIN_THRESHOLDS, AREA_STORM_THRESHOLD, Geogra
 const TEMPORAL_FRAME_SECONDS = 0.1;
 const TEMPORAL_FRAME_COUNT = Math.round(LOOP_SECONDS / TEMPORAL_FRAME_SECONDS);
 const VALUE_STRIDE = 6;
+const TEXTURE_STRIDE = 4;
 
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -36,12 +37,22 @@ function temporalFrameAt(time) {
 function makeProgram(gl, shaderData) {
   const vertexSource = [
     '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
-    'in vec2 a_position;\nin vec3 a_values0;\nin vec3 a_values1;\nuniform float u_temporalProgress;\nout vec3 v_values;\nvoid main() {\n  v_values = mix(a_values0, a_values1, u_temporalProgress);\n  gl_Position = projectTile(a_position);\n}'
+    'in vec2 a_position;\nin vec3 a_values0;\nin vec3 a_values1;\nuniform float u_temporalProgress;\nout vec3 v_values;\nout vec2 v_mercator;\nvoid main() {\n  v_values = mix(a_values0, a_values1, u_temporalProgress);\n  v_mercator = a_position;\n  gl_Position = projectTile(a_position);\n}'
   ].join('\n');
   const fragmentSource = [
     '#version 300 es', 'precision highp float;',
-    'in vec3 v_values;\nuniform int u_mode;\nuniform vec4 u_rainThresholds;\nuniform float u_rainThresholdLast;\nuniform float u_stormThreshold;\nuniform float u_hailThreshold;\nout vec4 fragColor;',
-    `float soften(float edge, float value) { float width = max(fwidth(value) * 1.25, 0.00001); return smoothstep(edge - width, edge + width, value); }
+    'in vec3 v_values;\nin vec2 v_mercator;\nuniform int u_mode;\nuniform float u_temporalProgress;\nuniform sampler2D u_valuesTexture0;\nuniform sampler2D u_valuesTexture1;\nuniform vec2 u_latticeOrigin;\nuniform float u_latticeSpacing;\nuniform ivec2 u_latticeSize;\nuniform vec4 u_rainThresholds;\nuniform float u_rainThresholdLast;\nuniform float u_stormThreshold;\nuniform float u_hailThreshold;\nout vec4 fragColor;',
+    `vec3 bilinearScalar(sampler2D scalarTexture, vec2 mercatorPosition) {
+  vec2 maximum = vec2(u_latticeSize - ivec2(1));
+  vec2 grid = clamp((mercatorPosition - u_latticeOrigin) / u_latticeSpacing, vec2(0.0), maximum);
+  ivec2 low = ivec2(min(floor(grid), maximum - vec2(1.0)));
+  ivec2 high = low + ivec2(1);
+  vec2 fraction = grid - vec2(low);
+  vec3 top = mix(texelFetch(scalarTexture, low, 0).rgb, texelFetch(scalarTexture, ivec2(high.x, low.y), 0).rgb, fraction.x);
+  vec3 bottom = mix(texelFetch(scalarTexture, ivec2(low.x, high.y), 0).rgb, texelFetch(scalarTexture, high, 0).rgb, fraction.x);
+  return mix(top, bottom, fraction.y);
+}
+float soften(float edge, float value) { float width = max(fwidth(value) * 1.25, 0.00001); return smoothstep(edge - width, edge + width, value); }
 float hazardOpacity(float value, float onset, float visibleOnset, float strongAnchor, float core, float exponent) {
   if (value < visibleOnset) return 0.4 * pow(smoothstep(onset, visibleOnset, value), exponent);
   if (value < strongAnchor) return mix(0.4, 0.65, smoothstep(visibleOnset, strongAnchor, value));
@@ -82,7 +93,15 @@ vec4 areasColor(float rain, float storm, float hail) {
   color.a = hailColor.a + color.a * (1.0 - hailColor.a);
   return color;
 }
-void main() { vec3 values = max(v_values, vec3(0.0)); fragColor = u_mode == 0 ? blurColor(values.x, values.y, values.z) : areasColor(values.x, values.y, values.z); }`
+void main() {
+  if (u_mode == 0) {
+    vec3 values = max(v_values, vec3(0.0));
+    fragColor = blurColor(values.x, values.y, values.z);
+    return;
+  }
+  vec3 values = max(mix(bilinearScalar(u_valuesTexture0, v_mercator), bilinearScalar(u_valuesTexture1, v_mercator), u_temporalProgress), vec3(0.0));
+  fragColor = areasColor(values.x, values.y, values.z);
+}`
   ].join('\n');
   const program = gl.createProgram();
   gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
@@ -91,7 +110,7 @@ void main() { vec3 values = max(v_values, vec3(0.0)); fragColor = u_mode == 0 ? 
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'Scalar weather shader linking failed.');
   return {
     program,
-    locations: Object.fromEntries(['a_position', 'a_values0', 'a_values1', 'u_temporalProgress', 'u_mode', 'u_rainThresholds', 'u_rainThresholdLast', 'u_stormThreshold', 'u_hailThreshold', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)]))
+    locations: Object.fromEntries(['a_position', 'a_values0', 'a_values1', 'u_temporalProgress', 'u_mode', 'u_valuesTexture0', 'u_valuesTexture1', 'u_latticeOrigin', 'u_latticeSpacing', 'u_latticeSize', 'u_rainThresholds', 'u_rainThresholdLast', 'u_stormThreshold', 'u_hailThreshold', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)]))
   };
 }
 
@@ -107,7 +126,10 @@ export class GeographicScalarLayer {
     this.temporal = null;
     this.temporalProgress = 0;
     this.values = new Float32Array(this.lattice.length * VALUE_STRIDE);
+    this.textureValues0 = new Float32Array(this.lattice.length * TEXTURE_STRIDE);
+    this.textureValues1 = new Float32Array(this.lattice.length * TEXTURE_STRIDE);
     this.valuesDirty = true;
+    this.texturesDirty = true;
     this.programs = new Map();
   }
 
@@ -116,16 +138,26 @@ export class GeographicScalarLayer {
     this.positionBuffer = gl.createBuffer();
     this.indexBuffer = gl.createBuffer();
     this.valueBuffer = gl.createBuffer();
+    this.valueTextures = [gl.createTexture(), gl.createTexture()];
     gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.lattice.positions, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, this.lattice.indices, gl.STATIC_DRAW);
+    for (const texture of this.valueTextures) {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, this.lattice.width, this.lattice.height);
+    }
     if (!this.temporal) this.rebuildTemporal(0);
   }
 
   onRemove(map, gl) {
     for (const entry of this.programs.values()) gl.deleteProgram(entry.program);
     for (const buffer of [this.positionBuffer, this.indexBuffer, this.valueBuffer]) if (buffer) gl.deleteBuffer(buffer);
+    for (const texture of this.valueTextures || []) if (texture) gl.deleteTexture(texture);
   }
 
   setActive(active) {
@@ -167,6 +199,29 @@ export class GeographicScalarLayer {
       this.values[offset + 5] = state1.hail[index];
     }
     this.valuesDirty = true;
+    if (this.mode === 'areas') this.rebuildTextureValues(state0, state1);
+  }
+
+  rebuildTextureValues(state0, state1) {
+    for (let index = 0, offset = 0; index < this.lattice.length; index++, offset += TEXTURE_STRIDE) {
+      this.textureValues0[offset] = state0.rain[index];
+      this.textureValues0[offset + 1] = state0.storm[index];
+      this.textureValues0[offset + 2] = state0.hail[index];
+      this.textureValues1[offset] = state1.rain[index];
+      this.textureValues1[offset + 1] = state1.storm[index];
+      this.textureValues1[offset + 2] = state1.hail[index];
+    }
+    this.texturesDirty = true;
+  }
+
+  uploadTextures(gl) {
+    if (!this.texturesDirty || !this.valueTextures) return;
+    for (let index = 0; index < this.valueTextures.length; index++) {
+      gl.bindTexture(gl.TEXTURE_2D, this.valueTextures[index]);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.lattice.width, this.lattice.height, gl.RGBA, gl.FLOAT,
+        index === 0 ? this.textureValues0 : this.textureValues1);
+    }
+    this.texturesDirty = false;
   }
 
   updateWeather(time) {
@@ -201,6 +256,7 @@ export class GeographicScalarLayer {
       gl.bufferData(gl.ARRAY_BUFFER, this.values, gl.DYNAMIC_DRAW);
       this.valuesDirty = false;
     }
+    if (this.mode === 'areas') this.uploadTextures(gl);
     const { program, locations } = this.programFor(gl, args.shaderData);
     gl.useProgram(program);
     setProjection(gl, {
@@ -209,6 +265,17 @@ export class GeographicScalarLayer {
     }, args.defaultProjectionData);
     gl.uniform1f(locations.u_temporalProgress, this.temporalProgress);
     gl.uniform1i(locations.u_mode, this.mode === 'areas' ? 1 : 0);
+    if (this.mode === 'areas') {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.valueTextures[0]);
+      gl.uniform1i(locations.u_valuesTexture0, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.valueTextures[1]);
+      gl.uniform1i(locations.u_valuesTexture1, 1);
+      gl.uniform2fv(locations.u_latticeOrigin, this.lattice.origin);
+      gl.uniform1f(locations.u_latticeSpacing, this.lattice.spacing);
+      gl.uniform2i(locations.u_latticeSize, this.lattice.width, this.lattice.height);
+    }
     const thresholds0 = this.smooth ? this.temporal.state0.rainThresholds : AREA_RAIN_THRESHOLDS;
     const thresholds1 = this.smooth ? this.temporal.state1.rainThresholds : AREA_RAIN_THRESHOLDS;
     const progress = this.temporalProgress;
@@ -235,5 +302,6 @@ export class GeographicScalarLayer {
     gl.drawElements(gl.TRIANGLES, this.lattice.indices.length, gl.UNSIGNED_INT, 0);
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.depthMask(true);
+    if (this.mode === 'areas') gl.activeTexture(gl.TEXTURE0);
   }
 }

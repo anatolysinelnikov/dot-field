@@ -98,10 +98,12 @@ export class GeographicScalarLattice {
     const selection = selectMercatorGridSamples(SCALAR_GRID_LEVEL);
     this.samples = selection.samples;
     this.length = selection.samples.length;
+    this.spacing = selection.spacing;
     this.width = 1;
     const firstY = selection.samples[0].canonicalY;
     while (this.width < this.length && selection.samples[this.width].canonicalY === firstY) this.width++;
     this.height = this.length / this.width;
+    this.origin = new Float32Array(selection.samples[0].mercator);
     this.positions = new Float32Array(this.length * 2);
     this.fieldPoints = new Float32Array(this.length * 2);
     for (let index = 0; index < this.length; index++) {

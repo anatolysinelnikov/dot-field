@@ -63,10 +63,11 @@ changes their active state instead of recreating the map or layers when the
 render mode changes. `Dots` is the initial mode; the selector order is Dots,
 Squares, Blur, Areas. The Smooth control is visible only in Areas mode.
 
-The MapTiler Dataviz Dark Globe basemap, attribution/logo, native label and
+The MapTiler Dataviz Dark Globe basemap, native label and
 administrative-boundary ordering, water tint/boundary context, camera controls,
 reset behavior, and raw camera zoom constraints remain owned by the existing
-MapLibre setup. Weather layers remain inserted below the promoted context.
+MapLibre setup. This local prototype disables MapLibre attribution and does not
+render a provider logo. Weather layers remain inserted below the promoted context.
 
 Animation remains an 18-second deterministic loop. The application creates
 adjacent 100 ms keyframes and updates all weather layers together; switching a
@@ -133,28 +134,31 @@ they do not rebuild it or reevaluate weather values.
 
 Each temporal keyframe evaluates rain/storm/hail at those fixed vertices using
 the prepared geographic field. The scalar layer uploads adjacent keyframe
-channels and interpolates them in the vertex shader, then interpolates over the
-static surface triangles. This keeps Blur and Areas continuous between 100 ms
-evaluations. The scalar mesh is a surface-attached MapLibre custom 3D layer,
-not a Canvas raster, screen overlay, or post-processing effect.
+channels without camera-dependent work. The scalar mesh is a surface-attached
+MapLibre custom 3D layer, not a Canvas raster, screen overlay, or
+post-processing effect.
 
 ## Blur — `src/engine/geographic-scalar-layer.js`
 
-In Blur mode the fragment shader applies the legacy continuous visibility and
-color-transfer intent to the interpolated scalar channels: a soft rain support
-edge, light-blue rain transitioning to strong blue, then magenta storm and
-yellow hail composited above it. Hail is last. The shader computes final color
-and opacity directly from reconstructed values, avoiding blur of any discrete
-representation.
+In Blur mode the fragment shader retains the existing vertex-varying triangle
+interpolation path and applies the legacy continuous visibility and
+color-transfer intent: a soft rain support edge, light-blue rain transitioning
+to strong blue, then magenta storm and yellow hail composited above it. Hail is
+last. The shader computes final color and opacity directly from reconstructed
+values, avoiding blur of any discrete representation.
 
 ## Areas and Smooth — `src/engine/geographic-scalar-layer.js`
 
-Areas uses the same scalar mesh but applies the existing five precipitation
-threshold bands (`#0090FF` through `#0000FF`) in the fragment shader. This
-creates world-stable nested discrete regions without CPU Path2D or polygon
-triangulation. Storm and hail use their existing presence thresholds, translucent
-magenta/yellow fills, hail-over-storm order, and derivative-based threshold
-edges for approximately screen-stable readable boundaries.
+Areas uses the same deterministic L14 scalar samples but no longer uses the
+surface triangle diagonal to reconstruct them. Adjacent temporal states are
+uploaded as fixed-size scalar textures; each fragment maps its Mercator surface
+position to a rectangular lattice cell and explicitly bilinearly interpolates
+the four corner samples. The indexed triangles therefore only tessellate the
+MapLibre globe surface, while threshold topology comes from rectangular cells.
+The fragment shader applies the existing five precipitation bands (`#0090FF`
+through `#0000FF`), storm/hail thresholds, translucent magenta/yellow fills,
+hail-over-storm order, and derivative-based edge treatment to that bilinearly
+reconstructed field.
 
 Smooth generalizes field data before Areas rendering. For every prepared scalar
 keyframe, each channel receives two deterministic radius-three box-filter passes
@@ -163,7 +167,8 @@ removes local detail without changing the lattice or responding to camera zoom.
 Rain band thresholds and storm/hail presence thresholds are coverage-remapped
 against the unsmoothed lattice, preserving the legacy visual-coverage intent.
 Both filtered values and remapped thresholds are interpolated between temporal
-keyframes, so Smooth does not introduce visible 100 ms contour steps.
+keyframes, so Smooth does not introduce visible 100 ms contour steps. Its
+deterministic lattice values feed the same Areas-only bilinear reconstruction.
 
 ## Legacy Canvas modules
 

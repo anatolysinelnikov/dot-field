@@ -99,9 +99,8 @@ const map = new window.maplibregl.Map({
   maxZoom: INITIAL_RAW_MAX_ZOOM,
   maxPitch: 75,
   canvasContextAttributes: { antialias: true },
-  attributionControl: { compact: true }
+  attributionControl: false
 });
-map.once('load', () => document.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show'));
 
 const state = {
   playing: true,
