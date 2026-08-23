@@ -39,6 +39,19 @@ html, body { overflow: hidden; background: #080b12; }
 
 .maplibregl-map { font: inherit; }
 
+.maptiler-logo {
+  position: absolute;
+  z-index: 2;
+  top: max(18px, calc(env(safe-area-inset-top, 0px) + 10px));
+  right: max(20px, calc(env(safe-area-inset-right, 0px) + 12px));
+  display: block;
+  width: 78px;
+  line-height: 0;
+  filter: drop-shadow(0 1px 3px #000);
+}
+
+.maptiler-logo img { display: block; width: 100%; height: auto; }
+
 .legend {
   position: absolute;
   z-index: 2;

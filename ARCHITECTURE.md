@@ -67,8 +67,15 @@ Squares, Blur, Areas. The Smooth control is visible only in Areas mode.
 The MapTiler Dataviz Dark Globe basemap, native label and
 administrative-boundary ordering, water tint/boundary context, camera controls,
 reset behavior, and raw camera zoom constraints remain owned by the existing
-MapLibre setup. This local prototype disables MapLibre attribution and does not
-render a provider logo. Weather layers remain inserted below the promoted context.
+MapLibre setup. MapLibre's default attribution control displays the style's
+source attribution, and the application includes the linked MapTiler logo
+required for Free accounts. Weather layers remain inserted below the promoted
+context.
+
+Local development and the static GitHub Pages deployment both load the same
+runtime `config.local.json` shape. The ignored local file is supplied by the
+developer; the Pages workflow writes the deployment key into the staged site
+artifact only, without adding it to the repository.
 
 Animation remains an 18-second deterministic loop. The application creates
 adjacent 100 ms keyframes only for the active representation; switching a mode

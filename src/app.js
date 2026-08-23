@@ -98,8 +98,7 @@ const map = new window.maplibregl.Map({
   minZoom: initialMinZoom,
   maxZoom: INITIAL_RAW_MAX_ZOOM,
   maxPitch: 75,
-  canvasContextAttributes: { antialias: true },
-  attributionControl: false
+  canvasContextAttributes: { antialias: true }
 });
 
 const state = {
