@@ -11,6 +11,9 @@ import {
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
 const MAX_SAMPLING_LATITUDE = 85;
+const COMPACT_MAP_SHORT_SIDE = 680;
+const COMPACT_MIN_ZOOM = 1.5;
+const LARGE_MIN_ZOOM = 3.0;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
@@ -19,6 +22,17 @@ const sampleLabel = document.querySelector('#sampleLabel');
 const resetView = document.querySelector('#resetView');
 const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
+
+const mapContainer = document.querySelector('#map');
+const shortSide = Math.min(
+  mapContainer.clientWidth,
+  mapContainer.clientHeight
+);
+
+const initialMinZoom =
+  shortSide <= COMPACT_MAP_SHORT_SIDE
+    ? COMPACT_MIN_ZOOM
+    : LARGE_MIN_ZOOM;
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 
@@ -75,7 +89,7 @@ const map = new window.maplibregl.Map({
   style: MAP_STYLE,
   center: WEATHER_REGION.center,
   zoom: WEATHER_REGION.initialZoom,
-  minZoom: 1.5,
+  minZoom: initialMinZoom,
   maxZoom: INITIAL_RAW_MAX_ZOOM,
   maxPitch: 75,
   canvasContextAttributes: { antialias: true },
@@ -343,7 +357,7 @@ function updateTimelineFromPointer(clientX) {
 let scrubbingPointerId = null;
 playPause.addEventListener('click', () => setPlaying(!state.playing));
 zoomIn.addEventListener('click', () => map.zoomIn());
-zoomOut.addEventListener('click', () => map.zoomTo(Math.max(map.getMinZoom(), map.getZoom() - 1)));
+zoomOut.addEventListener('click', () => map.zoomOut());
 function resetMapView() {
   if (state.resettingView) return;
   state.resettingView = true;
