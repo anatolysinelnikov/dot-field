@@ -3,29 +3,41 @@
 ## Document status
 
 - Repository: `anatolysinelnikov/dot-field`
-- Architecture: `experiment/globe-dots` geographic Dots experiment
+- Architecture: `experiment/globe-layers` geographic weather representations
 - This document is maintained context, not implementation authority. The current code wins when they differ.
 
 ## Project model
 
-This branch is a browser-native geographic weather visualization prototype. It keeps the deterministic synthetic weather field, but replaces the active Canvas/fixed-square-grid path with MapLibre GL JS, a globally anchored square Mercator render lattice, and a custom WebGL weather layer.
+This is a browser-native geographic weather prototype. It uses MapLibre GL JS in
+Globe projection, the deterministic synthetic field in `field.js`, a globally
+anchored Mercator sampling topology, and projection-aware MapLibre custom WebGL
+layers. The active modes are **Dots**, **Squares**, **Blur**, and **Areas**.
 
-Only **Dots** is active in this experiment. Squares, Blur, Areas, their reconstruction code, and the older fixed-grid Dots renderer remain as legacy modules and are not routed by `src/app.js`.
-
-The data channels remain:
+The weather channels are always independent data channels:
 
 - rain;
 - thunderstorm (`storm` in code);
 - hail.
 
-The intended future boundary remains:
+The active renderer split is intentional:
+
+```text
+synthetic geographic field
+        |
+        +-- discrete Mercator LOD --> Dots / Squares
+        |
+        +-- fixed L14 scalar lattice --> Blur / Areas (+ optional Smooth)
+```
+
+The intended provider boundary remains:
 
 ```text
 provider format -> normalization -> temporal/spatial interpolation
--> geographic sampling -> rendering
+-> geographic sampling/reconstruction -> rendering
 ```
 
-`field.js` is only the current synthetic implementation of the data-source side of that boundary.
+`field.js` is only the current deterministic synthetic data-source side of that
+boundary and remains independent of MapLibre, WebGL, and UI.
 
 ## Runtime ownership
 
@@ -33,111 +45,130 @@ provider format -> normalization -> temporal/spatial interpolation
 index.html + styles.css
         |
         v
-app.js ----------------------> MapLibre GL JS
+app.js ----------------------> MapLibre GL JS / Globe camera and basemap
  |                                  |
- |                                  +-- camera / pan / zoom / rotation / navigation
- |                                  +-- MapTiler Dataviz Dark basemap + attribution/logo
- |
- +-> geographic-lod.js
- |          |
- |          +-> globally anchored Mercator grid samples
- |
- +-> geographic-dots-layer.js -> MapLibre custom 3D WebGL layer
-            |
-            +-> geography.js -> field.js
+ +-> geographic-lod.js              +-> MapLibre custom 3D layers
+ |      geographic-symbol-pyramid.js      |
+ |                                        +-> geographic-dots-layer.js
+ +-> geographic-squares-layer.js          +-> geographic-squares-layer.js
+ +-> geographic-scalar-lattice.js         +-> geographic-scalar-layer.js
 ```
 
 ### Application orchestration — `src/app.js`
 
-`app.js` owns UI state, play/pause, timeline scrubbing, custom map zoom/rotation controls, MapLibre construction, logical sampling-zoom selection, weather refresh scheduling, and readouts. MapLibre owns camera navigation; the custom buttons invoke its zoom and bearing-reset APIs.
+`app.js` owns UI state, playback, timeline scrubbing, custom camera controls,
+logical weather zoom, MapLibre construction, active-layer routing, and readouts.
+It creates all three geographic custom layers once after the style loads and
+changes their active state instead of recreating the map or layers when the
+render mode changes. `Dots` is the initial mode; the selector order is Dots,
+Squares, Blur, Areas. The Smooth control is visible only in Areas mode.
 
-The map loads the MapTiler Dataviz Dark MapLibre style (`dataviz-v4-dark`) from the Maps API using the local-only `config.local.json` key; the normal compact MapLibre attribution control and a visible MapTiler logo remain enabled. MapLibre handles desktop and touch navigation, resize, DPR, and the map WebGL context; camera zoom uses a raw MapLibre minimum selected once at startup from the map container short side: 1.5 when the short side is at most 680 CSS pixels, otherwise 3.0, plus a dynamic globe-aware upper bound. This is a UI/camera constraint independent of weather LOD and logical sampling zoom; it is not adjusted dynamically when the viewport resizes. The custom weather layer is attached from the style-ready lifecycle (`style.load`) with an idempotent `getLayer` check. The MapTiler-specific context step leaves native MapTiler paint styling unchanged while moving selected geographic and water labels plus verified country/regional administrative boundaries above weather. The `Other border` regional layer is allowed to use its source geometry beyond the original style maxzoom; finer administrative levels remain in the native lower stack. A black derived water tint fill at 0.16 and a neutral-gray derived water-boundary line sit above weather; both mirror the native Water geometry selection and map-anchored translation, and the native Water shadow is disabled. The current Dataviz road layers combine major and minor classes, so no clean major-only group is promoted; roads and the rest of the native basemap remain below weather until the provider exposes separable geometry. Unavailable optional context layers are skipped without preventing weather initialization. MapLibre error events remain visible in the console without exposing the authenticated style URL.
+The MapTiler Dataviz Dark Globe basemap, attribution/logo, native label and
+administrative-boundary ordering, water tint/boundary context, camera controls,
+reset behavior, and raw camera zoom constraints remain owned by the existing
+MapLibre setup. Weather layers remain inserted below the promoted context.
 
-The geographic experiment is Globe-only. `app.js` sets MapLibre's projection to `globe` during style initialization; there is no projection selector. MapLibre retains camera center and zoom while its normal pan, pinch, wheel, and rotation navigation remain active. Custom controls call MapLibre's zoom and bearing-reset APIs without changing weather state.
+Animation remains an 18-second deterministic loop. The application creates
+adjacent 100 ms keyframes and updates all weather layers together; switching a
+mode preserves time, play/pause state, camera state, and logical weather zoom.
+Dots and Squares read out their active LOD/sample count. Blur and Areas report
+their fixed L14 reconstruction lattice instead of camera LOD.
 
-Animation is deterministic and has the existing 18-second loop. CPU weather evaluation produces adjacent 100 ms temporal keyframes; the custom layer interpolates their symbol radii every rendered frame. Grid samples are rebuilt only when the discrete logical-zoom-derived grid level changes. MapLibre camera movement only reprojects the existing layer geometry.
+## Geographic field adapter — `src/engine/geography.js`
 
-MapLibre raw zoom is not used directly for weather LOD. `app.js` maintains an application-owned logical sampling zoom. On the Globe projection, each raw zoom delta is corrected by `log2(cos(new latitude) / cos(old latitude))`, matching MapLibre's latitude adjustment; a camera pan/rotation therefore does not alter weather density. The UI `zoom` readout shows this logical sampling zoom rather than MapLibre's internal raw zoom.
+`WEATHER_REGION` centralizes the Saint Petersburg anchor, synthetic longitude /
+latitude scale, deterministic trajectory, and support. `WEATHER_SUPPORT` is the
+only support envelope consumed by the geographic topology. A fixed Mercator
+point maps to a fixed synthetic coordinate; camera movement never participates
+in that mapping. `prepareGeographicFieldFrame` prepares time-only field values,
+and `geographicPreparedIntensityAt` evaluates those frames at stable points.
 
-The startup-selected raw MapLibre minimum is a camera-only constraint: the compact branch (map container short side `<= 680`) uses `1.5`, and the larger-viewport branch uses `3.0`. It has no latitude correction, no logical-weather-zoom coupling, and no resize-time adjustment. The raw `maxZoom` is derived from the fixed logical boundary before L15 would be selected: `MAX_LOGICAL_SAMPLING_ZOOM = 14.5 - log2(512 / 9)` (approximately `8.669925`) plus the current-latitude adjustment relative to `WEATHER_REGION.center[1]`. Displayed weather LOD is capped at L14, while L15 remains available to the canonical grid and internal symbol-pyramid topology.
+## Shared geographic Mercator topology — `src/engine/geographic-lod.js`
 
-## Geographic synthetic field adapter — `src/engine/geography.js`
+The discrete topology is a globally anchored dyadic grid in normalized
+Web-Mercator coordinates. A sample identity is its integer L15 canonical
+coordinate pair, so inherited vertices retain identity through LOD refinement.
+The camera never reseats the grid. Displayed Dots/Squares levels are L10–L14;
+L15 remains the canonical identity resolution. Logical sampling zoom is
+application-owned and latitude-corrected for Globe camera behavior, so panning
+and rotating do not alter displayed weather density.
 
-`WEATHER_REGION` centralizes the test anchor, scale, trajectory, and normalized synthetic support:
+## Dots — `src/engine/geographic-dots-layer.js`
 
-```text
-center: [30.3158, 59.9391]    # Saint Petersburg
-longitudeSpan: 1.8 degrees
-latitudeSpan: 1.2 degrees
-trajectory: x = 0.33..0.67
-field support: x radius 0.92, y radius 0.76
-```
+Dots retain the existing symbol-pyramid implementation. `GeographicSymbolPyramid`
+caches L10–L15 topology, direct field points, static anchors, dyadic ownership,
+and direct level-pair mappings. It evaluates L13 as the reference, recursively
+reduces L10–L12, and directly evaluates L14/L15. Rain and strong-rain areas are
+conserved independently; hail wins hazard priority during reduction.
 
-The exported `WEATHER_SUPPORT` bounds are derived from that same configuration and are the only support bounds consumed by the geographic lattice sampler. Moving the experiment to another region requires changing this one geographic configuration. `geographicIntensityAt(longitude, latitude, time)` remains available for legacy use. Geographic Dots instead caches every node's geographic-to-synthetic coordinate and evaluates it against a prepared temporal field frame. Its deterministic horizontal travel is derived only from time. Pan, zoom, viewport size, and Globe camera movement do not affect it.
+The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
+and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
+transitions use deterministic parent/child topology and squared-radius morphs.
 
-`field.js` remains independent of MapLibre, WebGL, UI, and sampling topology. `prepareFieldFrame` precomputes time-only component amplitudes, widths, rotations, trigonometry, and inverse variances once per temporal keyframe; `evaluatePreparedField` then performs only the spatial evaluation.
+## Squares — `src/engine/geographic-squares-layer.js`
 
-## Square Mercator render sampling — `src/engine/geographic-lod.js`
+Squares use the same active globally anchored L10–L14 Mercator topology as
+Dots, but are a discrete sampled representation rather than a scalar mesh.
+Each active sample instantiates a square centered on its Mercator grid point;
+the cell side equals the active grid spacing. Geometry is projected by the same
+MapLibre custom-layer shader path, so it follows Globe curvature, pitch,
+bearing, perspective, pan, and depth.
 
-Active weather samples are vertices of a globally anchored dyadic grid in normalized Web-Mercator world coordinates. At level `L`, the step is `1 / 2^L`; only the centralized `WEATHER_SUPPORT` converted to Mercator bounds, plus a fixed conservative canonical-resolution overscan, is enumerated. The grid is independent of viewport visibility, pan, globe rotation, and projection mode.
+The square pyramid evaluates direct L13+ samples and recursively reduces coarse
+levels: rain averages over immediate deterministic children, while storm and
+hail use the legacy average/max-biased intent. The fragment transfer preserves
+the light-blue to strong-blue precipitation hierarchy, magenta storm, yellow
+hail, and hail-over-storm compositing. LOD changes crossfade the deterministic
+parent and child cell sets during the existing 0.2 s transition; no new grid is
+created and no camera-dependent identity is introduced.
 
-Each sample stores its Mercator coordinate and its converted longitude/latitude. Its identity is a compact `canonicalX:canonicalY` integer pair at the fixed maximum grid resolution. A point inherited by a finer level therefore keeps exactly the same identity; IDs do not depend on enumeration order, camera history, device, or projection. Finer levels contain every coarser grid vertex, so refinement never moves existing samples.
+## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`
 
-Mercator render sampling is intentionally not equal-area on the Earth surface. It is a visualization choice that preserves the stable orthogonal Dot Field lattice, not a claim about physical sample area or a future provider's native grid.
+Blur and Areas share one fixed L14 lattice with 30,240 vertices. Its rows,
+columns, Mercator positions, and triangle indices are created once from the
+globally anchored geographic topology and cached for the life of the layer.
+L14 gives a roughly 3 km local grid near the experiment anchor. Panning,
+rotation, pitch, resizing, and ordinary camera zoom only reproject this mesh;
+they do not rebuild it or reevaluate weather values.
 
-## Uniform zoom LOD — `src/engine/geographic-lod.js`
+Each temporal keyframe evaluates rain/storm/hail at those fixed vertices using
+the prepared geographic field. The scalar layer uploads adjacent keyframe
+channels and interpolates them in the vertex shader, then interpolates over the
+static surface triangles. This keeps Blur and Areas continuous between 100 ms
+evaluations. The scalar mesh is a surface-attached MapLibre custom 3D layer,
+not a Canvas raster, screen overlay, or post-processing effect.
 
-`zoomToMercatorGridLevel` selects one discrete displayed level for the whole active weather region. It rounds `logical zoom + log2(512 / 9)`, clamped to levels 10 through 14: MapLibre's world is 512 CSS pixels wide at zoom zero and the target nominal neighboring-sample spacing is 9 CSS pixels. The mapping is centralized, deterministic, and independent of screen position, viewport, bearing, pan, projection, globe horizon, and `map.project`. The canonical grid still uses level 15 for fixed-resolution identity and internal topology; the display cap is separate from `MAX_GRID_LEVEL`.
+## Blur — `src/engine/geographic-scalar-layer.js`
 
-The initial logical zoom is 6.2 and selects level 12. Near Saint Petersburg, L10 through L15 are approximately 24, 12, 6, 3, 1.5, and 0.75 km between grid vertices. L13 is approximately the nominal future provider scale. L14 and L15 are finer deterministic render/reconstruction sampling of an interpolated field, not additional measured provider observations. The Mercator lattice remains independent of a provider grid.
+In Blur mode the fragment shader applies the legacy continuous visibility and
+color-transfer intent to the interpolated scalar channels: a soft rain support
+edge, light-blue rain transitioning to strong blue, then magenta storm and
+yellow hail composited above it. Hail is last. The shader computes final color
+and opacity directly from reconstructed values, avoiding blur of any discrete
+representation.
 
-The active sample set and count remain unchanged when the same logical zoom map is panned, rotated, or resized on Globe. Zooming across a discrete threshold replaces the active level with the deterministically nested coarser or finer grid.
+## Areas and Smooth — `src/engine/geographic-scalar-layer.js`
 
-Grid step is exact and uniform at an active level, so it is stored as each sample's spacing for the marker-radius transfer. There is no screen-space, latitude, horizon, or perspective compensation.
+Areas uses the same scalar mesh but applies the existing five precipitation
+threshold bands (`#0090FF` through `#0000FF`) in the fragment shader. This
+creates world-stable nested discrete regions without CPU Path2D or polygon
+triangulation. Storm and hail use their existing presence thresholds, translucent
+magenta/yellow fills, hail-over-storm order, and derivative-based threshold
+edges for approximately screen-stable readable boundaries.
 
-## Dots rendering — `src/engine/geographic-dots-layer.js`
+Smooth generalizes field data before Areas rendering. For every prepared scalar
+keyframe, each channel receives two deterministic radius-three box-filter passes
+on the fixed L14 lattice (an approximately 10 km local low-pass scale). This
+removes local detail without changing the lattice or responding to camera zoom.
+Rain band thresholds and storm/hail presence thresholds are coverage-remapped
+against the unsmoothed lattice, preserving the legacy visual-coverage intent.
+Both filtered values and remapped thresholds are interpolated between temporal
+keyframes, so Smooth does not introduce visible 100 ms contour steps.
 
-`GeographicDotsLayer` is a MapLibre `type: 'custom'`, `renderingMode: '3d'` layer. It builds geometry directly in whole-world Mercator surface coordinates and uses MapLibre’s projection-aware `projectTile` shader interface. The injected MapLibre shader code handles Globe, Mercator, and their internal transition/depth semantics.
+## Legacy Canvas modules
 
-Rain and strong rain each use one shared unit quad and an instanced start/end center-and-radius buffer. The vertex shader interpolates the center and expands that quad in Mercator surface coordinates; the fragment shader evaluates an antialiased analytic circle. This keeps rain circular in Mercator, surface-attached in both projections, and naturally foreshortened near the globe horizon without a screen-facing billboard or polygon facets.
-
-Storm and hail use static unit polygon meshes with the same instanced start/end center-and-radius transition attributes as rain. Storm's long tips remain north/east/south/west in the Mercator lattice with diagonal inner points; hail remains a hexagon. The layer emits at most four draw calls per frame:
-
-1. rain circles (`#0090FF`);
-2. strong-rain circles (`#0000FF`);
-3. thunderstorm eight-point stars (`#FF00FF`);
-4. hail hexagons (`#FFD400`).
-
-There is no draw call per symbol. Geometry is planar in the sample’s local surface tangent frame, so symbols follow the map surface and naturally distort toward the globe horizon. A polygon depth offset prevents surface z-fighting; this is not a weather altitude model.
-
-The current Dots mapping remains sourced from `precipitation-mapping.js`, `lod.js`, and `hazard-renderer.js`:
-
-- visibility thresholds and nonlinear intensity transfer are retained;
-- rain / strong-rain color split is retained;
-- hail keeps priority over thunderstorm;
-- storm and hail retain their star/hexagon appearances;
-- marker radius is computed from intensity relative to the active Mercator grid step, so symbol and sampling geometry pass through the same projection together.
-
-`geographic-symbol-pyramid.js` caches the L10–L15 samples, immediate dyadic ownership below L13, static packed render anchors, direct-grid pair indices, and packed synthetic field coordinates for direct levels. Temporal weather state is separate from this topology: each evaluated level contains four `Float64Array` radius channels (`rain`, `strong`, `storm`, and `hail`) and no per-sample symbol objects. Normal playback rolls the old `time1` state to `time0` and reuses the retired `time0` arrays for the new `time1`; static topology is never rebuilt for a temporal update. L13 is evaluated directly as the provider-scale reference. L12 through L10 recursively reduce only from the immediately finer reference representation required for the current display or adjacent transition. L14 and L15 independently evaluate the reconstructed geographic field directly; neither needs L15 as a source for coarser levels. A fine grid vertex below L13 owns exactly one parent chosen by canonical Mercator coordinates with `floor` ownership; interior parents own their stable 2×2 child group, while support-edge groups are deterministically partial.
-
-Topology identity and render position are deliberately separate for reduced symbols. The parent retains its canonical lattice ID, while its cached render anchor is the unweighted geometric mean of its immediate child anchors. This is applied recursively from L13 down to L10, including partial support-edge groups. Anchors are static topology data, never weighted by weather values, so animation cannot move a representation's spatial identity.
-
-Rain and strong precipitation conserve their visible areas independently: each parent radius is `sqrt(sum(child radius²))`. Hazards separate priority from footprint. Direct temporal state stores storm and hail radii in independent channels, with only the resolved direct hazard channel nonzero. A parent is hail if any child has a hail radius, otherwise storm if any child has a storm radius; its winning channel radius preserves the sum of all child hazard painted areas. The hail hexagon coefficient is `3√3/2`; the current eight-point storm star coefficient is `2 * 0.38 * √2`, derived from its alternating outer/inner polygon geometry. The winning parent glyph radius is converted from the combined area using its own coefficient.
-
-This produces a demand-driven deterministic symbol pyramid: L14 and L15 both carry finer reconstructed storm/hail symbols; L13 remains the useful provider-scale reference rather than a hard hazard ceiling; and L12 through L10 are recursive reductions rather than direct reassignment from an arbitrary source level. A normal coarse update evaluates only the L13 reference set and the reductions it needs; it does not build the full L15-to-L10 hierarchy.
-
-Adjacent display levels morph over `LOD_MORPH_SECONDS` (currently 0.2 seconds). For reduced-level transitions L10 through L13, the cached immediate parent/child ownership explicitly controls the transition instead of matching endpoint IDs. Each coarse parent shrinks at its centered anchor while every child, including the child sharing the parent's canonical ID, grows from that same anchor and moves to its own cached anchor. Circle and polygon radii interpolate in squared-radius (area) space, so the parent contribution falls with `1 - progress` while child contributions rise with `progress`.
-
-Storm and hail use that same true split/merge rather than an endpoint crossfade. Each contribution retains its endpoint glyph type during the morph: a hail parent can shrink while storm and hail children grow, preserving hail-over-storm endpoint priority without inventing an intermediate shape. The renderer stores two temporal radii for each LOD endpoint and independently interpolates weather time and LOD progress in squared-radius space. Storm and hail can therefore transition through zero radius at a fixed anchor when their weather state changes, with hail still drawn after storm. Pure temporal-progress and LOD-transition-progress updates only update shader uniforms and request a repaint; weather values and dynamic instance data rebuild when a temporal keyframe rolls forward or active LOD topology changes through `setSamples()` / `setTransition()`. L13–L14 and L14–L15 remain direct vertex-grid transitions, using cached direct pair indices and zero-radius growth/shrink for fine-only samples; they are not claimed to be centered four-to-one reductions.
-
-Normal same-level playback uses a dedicated indexed fast path rather than generic endpoint joining. Instance construction reads the numeric temporal channels and cached packed anchors directly. Program attribute/uniform locations are cached at creation, and dynamic instance buffers retain capacity and use `bufferSubData` when possible. The timeline uses a continuous normalized range and spans the viewport between compact margins.
-
-## Legacy modules
-
-The following files remain for comparison or future work but are inactive in this experiment:
-
-- `dots-renderer.js`, `squares-renderer.js`, `blur-renderer.js`, `areas-renderer.js`;
-- `scalar-reconstruction.js`;
-- fixed-grid portions of `lod.js` and `hazard-renderer.js`.
-
-They still describe the pre-experiment square-grid / Canvas architecture. Do not route new geographic Dots behavior through them beyond the shared pure weather-transfer helpers noted above.
+`dots-renderer.js`, `squares-renderer.js`, `blur-renderer.js`,
+`areas-renderer.js`, and `scalar-reconstruction.js` remain inactive reference
+implementations of the old fixed-viewport Canvas path. Their pure transfer and
+semantic intent informs the geographic layers, but no geographic renderer draws
+through a Canvas viewport/raster path.

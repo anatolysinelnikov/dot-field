@@ -67,6 +67,52 @@ html, body { overflow: hidden; background: #080b12; }
 .storm i { background: #FF00FF; clip-path: polygon(50% 0, 63.5% 36.5%, 100% 50%, 63.5% 63.5%, 50% 100%, 36.5% 63.5%, 0 50%, 36.5% 36.5%); transform: scale(1.18); }
 .hail i { background: #FFD400; clip-path: polygon(50% 0, 93.3% 25%, 93.3% 75%, 50% 100%, 6.7% 75%, 6.7% 25%); }
 
+.mode-controls,
+.smooth-control {
+  position: absolute;
+  z-index: 2;
+  left: max(20px, calc(env(safe-area-inset-left, 0px) + 12px));
+  display: flex;
+  align-items: center;
+  border: var(--control-border);
+  background: var(--control-panel);
+  box-shadow: var(--control-shadow);
+  backdrop-filter: var(--control-backdrop);
+}
+
+.mode-controls {
+  top: max(46px, calc(env(safe-area-inset-top, 0px) + 38px));
+  padding: 3px;
+  gap: 2px;
+  border-radius: var(--control-radius);
+}
+
+.mode-controls button {
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #aeb9cb;
+  font-size: 11px;
+}
+
+.mode-controls button[data-selected="true"] { background: var(--control-inset); color: #f1f5fb; }
+
+.smooth-control {
+  top: max(84px, calc(env(safe-area-inset-top, 0px) + 76px));
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  color: #c0cad8;
+  font-size: 11px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.smooth-control[hidden] { display: none; }
+.smooth-control input { margin: 0; accent-color: #4d91ff; }
+
 button {
   height: 34px;
   padding: 0 12px;
@@ -190,6 +236,9 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
   .legend { top: max(14px, calc(env(safe-area-inset-top, 0px) + 10px)); left: max(14px, calc(env(safe-area-inset-left, 0px) + 10px)); gap: 9px; font-size: 10px; }
   .readout { top: max(14px, calc(env(safe-area-inset-top, 0px) + 10px)); right: max(14px, calc(env(safe-area-inset-right, 0px) + 10px)); gap: 8px; }
   .readout span:first-child { display: none; }
+  .mode-controls { top: max(38px, calc(env(safe-area-inset-top, 0px) + 32px)); left: max(14px, calc(env(safe-area-inset-left, 0px) + 10px)); }
+  .mode-controls button { padding: 0 7px; font-size: 10px; }
+  .smooth-control { top: max(74px, calc(env(safe-area-inset-top, 0px) + 68px)); left: max(14px, calc(env(safe-area-inset-left, 0px) + 10px)); }
   .zoom-controls {
     top: max(56px, calc(env(safe-area-inset-top, 0px) + 52px));
     right: max(14px, calc(env(safe-area-inset-right, 0px) + 10px));

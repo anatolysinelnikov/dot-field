@@ -233,6 +233,7 @@ export class GeographicDotsLayer {
     this.temporal = null;
     this.temporalProgress = 0;
     this.buffersDirty = true;
+    this.active = true;
   }
 
   onAdd(map, gl) {
@@ -277,6 +278,11 @@ export class GeographicDotsLayer {
     this.samples = samples;
     this.transition = null;
     this.rebuildTemporal(time);
+  }
+
+  setActive(active) {
+    this.active = active;
+    this.map?.triggerRepaint();
   }
 
   setTransition(fromSamples, toSamples, time, progress = 0) {
@@ -437,6 +443,7 @@ export class GeographicDotsLayer {
   }
 
   render(gl, args) {
+    if (!this.active) return;
     this.uploadBuffers(gl);
     const programs = this.programsFor(gl, args.shaderData);
     gl.enable(gl.BLEND);

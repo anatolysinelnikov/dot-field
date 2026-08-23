@@ -9,6 +9,8 @@ import {
   zoomToMercatorGridLevel
 } from './engine/geographic-lod.js';
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
+import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
+import { GeographicScalarLayer } from './engine/geographic-scalar-layer.js';
 
 const MAX_SAMPLING_LATITUDE = 85;
 const COMPACT_MAP_SHORT_SIDE = 680;
@@ -22,6 +24,9 @@ const sampleLabel = document.querySelector('#sampleLabel');
 const resetView = document.querySelector('#resetView');
 const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
+const modeControls = document.querySelector('#modeControls');
+const smoothControl = document.querySelector('#smoothControl');
+const smoothToggle = document.querySelector('#smoothToggle');
 
 const mapContainer = document.querySelector('#map');
 const shortSide = Math.min(
@@ -114,12 +119,17 @@ const state = {
   weatherQueued: false
 };
 const weatherLayer = new GeographicDotsLayer();
+const squaresLayer = new GeographicSquaresLayer();
+const scalarLayer = new GeographicScalarLayer();
+const geographicLayers = [scalarLayer, squaresLayer, weatherLayer];
+state.mode = 'dots';
 let lastMapErrorSignature = '';
 
 function updateReadout() {
   zoomLabel.textContent = state.logicalSamplingZoom.toFixed(2);
-  lodLabel.textContent = state.lod.level === null ? '–' : String(state.lod.level);
-  sampleLabel.textContent = state.samples.length.toLocaleString();
+  const scalarMode = state.mode === 'blur' || state.mode === 'areas';
+  lodLabel.textContent = scalarMode ? 'fixed L14' : state.lod.level === null ? '–' : String(state.lod.level);
+  sampleLabel.textContent = (scalarMode ? scalarLayer.lattice.length : state.samples.length).toLocaleString();
 }
 
 function cameraState() {
@@ -172,15 +182,15 @@ function commitSamples(level, samples) {
   state.lod = { level };
   state.samples = samples;
   weatherLayer.setSamples(samples, state.time / LOOP_SECONDS);
+  squaresLayer.setSamples(samples, state.time / LOOP_SECONDS);
   updateReadout();
 }
 
 function initializeWeatherLayer() {
   const styleLayers = map.getStyle().layers || [];
-  const layerAlreadyPresent = Boolean(map.getLayer(weatherLayer.id));
-  if (!layerAlreadyPresent) {
-    const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');
-    map.addLayer(weatherLayer, firstSymbol?.id);
+  const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');
+  for (const layer of geographicLayers) {
+    if (!map.getLayer(layer.id)) map.addLayer(layer, firstSymbol?.id);
   }
 
   const waterLayer = styleLayers.find((layer) => layer.id === 'Water' && layer.type === 'fill');
@@ -268,6 +278,7 @@ function initializeWeatherLayer() {
 
   if (state.mapReady) return;
   state.mapReady = true;
+  applyRenderMode();
   rebaseCamera();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
 }
@@ -285,6 +296,7 @@ function startAdjacentTransition(level, now) {
     rawProgress: 0
   };
   weatherLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
+  squaresLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
 }
 
 function rebuildSamples(level, now = performance.now()) {
@@ -313,6 +325,7 @@ function rebuildSamples(level, now = performance.now()) {
       rawProgress
     };
     weatherLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
+    squaresLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
   }
 }
 
@@ -322,6 +335,7 @@ function updateLODTransition(now) {
   const rawProgress = clamp((now - transition.start) / (LOD_MORPH_SECONDS * 1000), 0, 1);
   transition.rawProgress = rawProgress;
   weatherLayer.setTransitionProgress(smoothstep(0, 1, rawProgress));
+  squaresLayer.setTransitionProgress(smoothstep(0, 1, rawProgress));
   if (rawProgress < 1) return;
   state.lodTransition = null;
   commitSamples(transition.toLevel, transition.toSamples);
@@ -335,7 +349,24 @@ function queueWeatherUpdate() {
     state.weatherQueued = false;
     if (!state.mapReady) return;
     weatherLayer.updateWeather(state.time / LOOP_SECONDS);
+    squaresLayer.updateWeather(state.time / LOOP_SECONDS);
+    scalarLayer.updateWeather(state.time / LOOP_SECONDS);
   });
+}
+
+function applyRenderMode() {
+  const mode = state.mode;
+  weatherLayer.setActive(mode === 'dots');
+  squaresLayer.setActive(mode === 'squares');
+  scalarLayer.setPresentation(mode === 'areas' ? 'areas' : 'blur', mode === 'areas' && smoothToggle.checked, state.time / LOOP_SECONDS);
+  scalarLayer.setActive(mode === 'blur' || mode === 'areas');
+  smoothControl.hidden = mode !== 'areas';
+  for (const button of modeControls.querySelectorAll('button[data-mode]')) {
+    const selected = button.dataset.mode === mode;
+    button.dataset.selected = String(selected);
+    button.setAttribute('aria-pressed', String(selected));
+  }
+  updateReadout();
 }
 
 function setPlaying(playing) {
@@ -369,6 +400,15 @@ function resetMapView() {
   });
 }
 resetView.addEventListener('click', resetMapView);
+modeControls.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-mode]');
+  if (!button || button.dataset.mode === state.mode) return;
+  state.mode = button.dataset.mode;
+  applyRenderMode();
+});
+smoothToggle.addEventListener('change', () => {
+  if (state.mode === 'areas') applyRenderMode();
+});
 timeSlider.addEventListener('pointerdown', (event) => {
   if (state.playing) setPlaying(false);
   state.scrubbing = true;
@@ -449,7 +489,12 @@ function frame(now) {
   // A paused static layer has no temporal uniform to advance. Leaving its
   // repaint scheduling to MapLibre prevents the application RAF from keeping
   // an otherwise idle map rendering continuously.
-  if (state.mapReady && state.playing && !state.scrubbing) weatherLayer.updateWeather(state.time / LOOP_SECONDS);
+  if (state.mapReady && state.playing && !state.scrubbing) {
+    const normalizedTime = state.time / LOOP_SECONDS;
+    weatherLayer.updateWeather(normalizedTime);
+    squaresLayer.updateWeather(normalizedTime);
+    scalarLayer.updateWeather(normalizedTime);
+  }
   updateLODTransition(now);
   if (!state.scrubbing) timeSlider.value = String(state.time / LOOP_SECONDS);
   requestAnimationFrame(frame);

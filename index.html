@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Geographic weather dots</title>
+  <title>Geographic weather layers</title>
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
   <link rel="stylesheet" href="./styles.css">
 </head>
@@ -16,6 +16,17 @@
       <span class="storm"><i></i>Thunderstorm</span>
       <span class="hail"><i></i>Hail</span>
     </div>
+
+    <div id="modeControls" class="mode-controls" role="group" aria-label="Weather representation">
+      <button type="button" data-mode="dots" data-selected="true" aria-pressed="true">Dots</button>
+      <button type="button" data-mode="squares" data-selected="false" aria-pressed="false">Squares</button>
+      <button type="button" data-mode="blur" data-selected="false" aria-pressed="false">Blur</button>
+      <button type="button" data-mode="areas" data-selected="false" aria-pressed="false">Areas</button>
+    </div>
+    <label id="smoothControl" class="smooth-control" hidden>
+      <input id="smoothToggle" type="checkbox">
+      <span>Smooth</span>
+    </label>
 
     <div class="zoom-controls" role="group" aria-label="Map controls">
       <button id="resetView" class="zoom-reset" type="button" aria-label="Reset view" hidden>↺</button>
