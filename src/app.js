@@ -285,6 +285,7 @@ function startAdjacentTransition(level, now) {
   };
   weatherLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
   squaresLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
+  wakeApplicationFrame();
 }
 
 function rebuildSamples(level, now = performance.now()) {
@@ -314,6 +315,7 @@ function rebuildSamples(level, now = performance.now()) {
     };
     weatherLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
     squaresLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
+    wakeApplicationFrame();
   }
 }
 
@@ -372,6 +374,7 @@ function setPlaying(playing) {
   state.playing = playing;
   playPause.dataset.state = playing ? 'playing' : 'paused';
   playPause.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+  if (playing) wakeApplicationFrame();
 }
 
 function updateTimelineFromPointer(clientX) {
@@ -475,7 +478,17 @@ map.on('error', (event) => {
   console.error(`MapLibre ${category} error${details.length ? ` (${details.join(', ')})` : ''}: ${message}`);
 });
 
+let applicationFrameQueued = false;
+
+function wakeApplicationFrame() {
+  if (applicationFrameQueued) return;
+  state.lastFrame = performance.now();
+  applicationFrameQueued = true;
+  requestAnimationFrame(frame);
+}
+
 function frame(now) {
+  applicationFrameQueued = false;
   const delta = Math.min((now - state.lastFrame) / 1000, 0.1);
   state.lastFrame = now;
   if (state.playing && !state.scrubbing) {
@@ -492,7 +505,7 @@ function frame(now) {
   }
   updateLODTransition(now);
   if (!state.scrubbing) timeSlider.value = String(state.time / LOOP_SECONDS);
-  requestAnimationFrame(frame);
+  if ((state.playing && !state.scrubbing) || state.lodTransition) wakeApplicationFrame();
 }
 
-requestAnimationFrame(frame);
+wakeApplicationFrame();
