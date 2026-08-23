@@ -1,7 +1,13 @@
 import { LOD_MORPH_SECONDS, LOOP_SECONDS } from './engine/config.js';
 import { clamp, smoothstep } from './engine/math.js';
 import { WEATHER_REGION } from './engine/geography.js';
-import { selectMercatorGridSamples, zoomToMercatorGridLevel } from './engine/geographic-lod.js';
+import {
+  MAX_LOGICAL_SAMPLING_ZOOM,
+  logicalZoomLatitudeAdjustment,
+  rawZoomForLogicalSamplingZoom,
+  selectMercatorGridSamples,
+  zoomToMercatorGridLevel
+} from './engine/geographic-lod.js';
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 
 const MAX_SAMPLING_LATITUDE = 85;
@@ -57,6 +63,12 @@ const MAPTILER_WATER_LABEL_IDS = [
 const MAPTILER_WATER_WASH_ID = 'geographic-water-wash';
 const MAPTILER_WATER_BOUNDARY_ID = 'geographic-water-boundaries';
 const MAPTILER_WATER_TINT_ID = 'geographic-water-tint';
+const REFERENCE_LATITUDE = WEATHER_REGION.center[1];
+const INITIAL_RAW_MAX_ZOOM = rawZoomForLogicalSamplingZoom(
+  MAX_LOGICAL_SAMPLING_ZOOM,
+  REFERENCE_LATITUDE,
+  REFERENCE_LATITUDE
+);
 
 const map = new window.maplibregl.Map({
   container: 'map',
@@ -64,6 +76,7 @@ const map = new window.maplibregl.Map({
   center: WEATHER_REGION.center,
   zoom: WEATHER_REGION.initialZoom,
   minZoom: 1.5,
+  maxZoom: INITIAL_RAW_MAX_ZOOM,
   maxPitch: 75,
   canvasContextAttributes: { antialias: true },
   attributionControl: { compact: true }
@@ -81,6 +94,7 @@ const state = {
   lodTransition: null,
   logicalSamplingZoom: WEATHER_REGION.initialZoom,
   camera: null,
+  rawMaxZoom: INITIAL_RAW_MAX_ZOOM,
   resettingView: false,
   mapReady: false,
   weatherQueued: false
@@ -105,8 +119,20 @@ function rebaseCamera() {
   state.camera = cameraState();
 }
 
+function updateRawMapMaxZoom(latitude) {
+  const nextRawMaxZoom = rawZoomForLogicalSamplingZoom(
+    MAX_LOGICAL_SAMPLING_ZOOM,
+    latitude,
+    REFERENCE_LATITUDE
+  );
+  if (!Number.isFinite(nextRawMaxZoom) || Math.abs(nextRawMaxZoom - state.rawMaxZoom) < 1e-6) return;
+  state.rawMaxZoom = nextRawMaxZoom;
+  map.setMaxZoom(nextRawMaxZoom);
+}
+
 function updateLogicalSamplingZoom() {
   const next = cameraState();
+  updateRawMapMaxZoom(next.latitude);
   if (state.resettingView) {
     state.camera = next;
     updateResetViewControl();
@@ -119,10 +145,10 @@ function updateLogicalSamplingZoom() {
     return;
   }
   let delta = next.rawZoom - previous.rawZoom;
-  const nextCosine = Math.max(0.001, Math.cos(next.latitude * Math.PI / 180));
-  const previousCosine = Math.max(0.001, Math.cos(previous.latitude * Math.PI / 180));
-  delta -= Math.log2(nextCosine / previousCosine);
-  if (Number.isFinite(delta)) state.logicalSamplingZoom += delta;
+  delta -= logicalZoomLatitudeAdjustment(next.latitude, previous.latitude);
+  if (Number.isFinite(delta)) {
+    state.logicalSamplingZoom = Math.min(MAX_LOGICAL_SAMPLING_ZOOM, state.logicalSamplingZoom + delta);
+  }
   state.camera = next;
   updateReadout();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
@@ -317,7 +343,7 @@ function updateTimelineFromPointer(clientX) {
 let scrubbingPointerId = null;
 playPause.addEventListener('click', () => setPlaying(!state.playing));
 zoomIn.addEventListener('click', () => map.zoomIn());
-zoomOut.addEventListener('click', () => map.zoomOut());
+zoomOut.addEventListener('click', () => map.zoomTo(Math.max(map.getMinZoom(), map.getZoom() - 1)));
 function resetMapView() {
   if (state.resettingView) return;
   state.resettingView = true;

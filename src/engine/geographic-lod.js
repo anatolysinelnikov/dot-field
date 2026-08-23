@@ -7,6 +7,11 @@ export const MERCATOR_WORLD_SIZE = 512;
 export const TARGET_GRID_SPACING = 9;
 export const MIN_GRID_LEVEL = 10;
 export const MAX_GRID_LEVEL = 15;
+export const MAX_DISPLAY_GRID_LEVEL = 14;
+
+const LOD_LEVEL_OFFSET = Math.log2(MERCATOR_WORLD_SIZE / TARGET_GRID_SPACING);
+// The rounded zoom mapping first reaches the next level at N + 0.5.
+export const MAX_LOGICAL_SAMPLING_ZOOM = MAX_DISPLAY_GRID_LEVEL + 0.5 - LOD_LEVEL_OFFSET;
 
 const MAX_GRID_SIZE = 2 ** MAX_GRID_LEVEL;
 const MAX_MERCATOR_LATITUDE = 85.05112878;
@@ -25,6 +30,20 @@ export function mercatorToLngLat(x, y) {
     x * 360 - 180,
     Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI
   ];
+}
+
+function latitudeCosine(latitude) {
+  return Math.max(0.001, Math.cos(latitude * Math.PI / 180));
+}
+
+// MapLibre Globe's latitude adjustment is kept here so logical zoom tracking
+// and the raw camera limit use exactly the same correction.
+export function logicalZoomLatitudeAdjustment(newLatitude, oldLatitude) {
+  return Math.log2(latitudeCosine(newLatitude) / latitudeCosine(oldLatitude));
+}
+
+export function rawZoomForLogicalSamplingZoom(logicalZoom, latitude, referenceLatitude) {
+  return logicalZoom + logicalZoomLatitudeAdjustment(latitude, referenceLatitude);
 }
 
 function supportMercatorBounds() {
@@ -49,8 +68,9 @@ const canonicalSupport = Object.freeze({
 // Choose the nearest dyadic step to the requested CSS-pixel density. This
 // depends only on zoom, so map navigation and projection never reseat samples.
 export function zoomToMercatorGridLevel(zoom) {
-  const desired = Number(zoom) + Math.log2(MERCATOR_WORLD_SIZE / TARGET_GRID_SPACING);
-  return clamp(Math.round(desired), MIN_GRID_LEVEL, MAX_GRID_LEVEL);
+  const boundedZoom = Math.min(Number(zoom), MAX_LOGICAL_SAMPLING_ZOOM);
+  const desired = boundedZoom + LOD_LEVEL_OFFSET;
+  return clamp(Math.round(desired), MIN_GRID_LEVEL, MAX_DISPLAY_GRID_LEVEL);
 }
 
 export function selectMercatorGridSamples(level) {
