@@ -56,6 +56,7 @@ const MAPTILER_WATER_LABEL_IDS = [
 ];
 const MAPTILER_WATER_WASH_ID = 'geographic-water-wash';
 const MAPTILER_WATER_BOUNDARY_ID = 'geographic-water-boundaries';
+const MAPTILER_WATER_TINT_ID = 'geographic-water-tint';
 
 const map = new window.maplibregl.Map({
   container: 'map',
@@ -143,10 +144,17 @@ function initializeWeatherLayer() {
   }
 
   const waterLayer = styleLayers.find((layer) => layer.id === 'Water' && layer.type === 'fill');
-  if (waterLayer && !map.getLayer(MAPTILER_WATER_WASH_ID)) {
+  if (map.getLayer(MAPTILER_WATER_WASH_ID)) map.removeLayer(MAPTILER_WATER_WASH_ID);
+
+  const nativeWaterShadow = styleLayers.find((layer) => layer.id === 'Water shadow');
+  if (nativeWaterShadow && map.getLayer(nativeWaterShadow.id)) {
+    map.setLayoutProperty(nativeWaterShadow.id, 'visibility', 'none');
+  }
+
+  if (waterLayer && !map.getLayer(MAPTILER_WATER_TINT_ID)) {
     try {
       map.addLayer({
-        id: MAPTILER_WATER_WASH_ID,
+        id: MAPTILER_WATER_TINT_ID,
         type: 'fill',
         source: waterLayer.source,
         'source-layer': waterLayer['source-layer'],
@@ -154,12 +162,14 @@ function initializeWeatherLayer() {
         ...(waterLayer.maxzoom === undefined ? {} : { maxzoom: waterLayer.maxzoom }),
         filter: waterLayer.filter,
         paint: {
-          'fill-color': waterLayer.paint?.['fill-color'] || '#141414',
-          'fill-opacity': 0.30
+          'fill-color': '#000000',
+          'fill-opacity': 0.16,
+          ...(waterLayer.paint?.['fill-translate'] === undefined ? {} : { 'fill-translate': waterLayer.paint['fill-translate'] }),
+          ...(waterLayer.paint?.['fill-translate-anchor'] === undefined ? {} : { 'fill-translate-anchor': waterLayer.paint['fill-translate-anchor'] })
         }
       }, weatherLayer.id);
     } catch (error) {
-      console.warn('MapTiler water-wash context is unavailable.', error instanceof Error ? error.message : error);
+      console.warn('MapTiler water-tint context is unavailable.', error instanceof Error ? error.message : error);
     }
   }
 
@@ -174,9 +184,13 @@ function initializeWeatherLayer() {
         ...(waterLayer.maxzoom === undefined ? {} : { maxzoom: waterLayer.maxzoom }),
         filter: waterLayer.filter,
         paint: {
-          'line-color': waterLayer.paint?.['fill-color'] || '#141414',
+          'line-color': '#707070',
           'line-opacity': 0.75,
-          'line-width': 1
+          'line-width': 1,
+          'line-blur': 0,
+          'line-offset': 0,
+          ...(waterLayer.paint?.['fill-translate'] === undefined ? {} : { 'line-translate': waterLayer.paint['fill-translate'] }),
+          ...(waterLayer.paint?.['fill-translate-anchor'] === undefined ? {} : { 'line-translate-anchor': waterLayer.paint['fill-translate-anchor'] })
         }
       }, weatherLayer.id);
     } catch (error) {
@@ -202,7 +216,7 @@ function initializeWeatherLayer() {
   }
 
   const upperOrder = [
-    MAPTILER_WATER_WASH_ID,
+    MAPTILER_WATER_TINT_ID,
     MAPTILER_WATER_BOUNDARY_ID,
     ...MAPTILER_ADMIN_BOUNDARY_IDS,
     ...MAPTILER_WATER_LABEL_IDS,
