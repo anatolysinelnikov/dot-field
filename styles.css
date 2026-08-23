@@ -314,8 +314,8 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
   .readout span:first-child { display: none; }
   .area-smooth { position: absolute; right: 0; bottom: calc(100% + 8px); height: 100%; }
   .zoom-controls {
-    top: max(56px, calc(env(safe-area-inset-top, 0px) + 52px));
-    right: max(14px, calc(env(safe-area-inset-right, 0px) + 10px));
+    top: env(safe-area-inset-top, 0px);
+    right: env(safe-area-inset-right, 0px);
     bottom: auto;
   }
   .zoom-stepper { display: none; }
