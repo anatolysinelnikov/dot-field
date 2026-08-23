@@ -53,3 +53,9 @@ export function prepareGeographicFieldFrame(time) {
 export function geographicPreparedIntensityAt(frame, point, output) {
   return evaluatePreparedField(frame, point.x, point.y, output);
 }
+
+// Hot lattice evaluators already keep coordinates in typed arrays.  Avoid
+// constructing a short-lived point object for every scalar sample.
+export function geographicPreparedIntensityAtXY(frame, x, y, output) {
+  return evaluatePreparedField(frame, x, y, output);
+}

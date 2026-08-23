@@ -71,8 +71,11 @@ MapLibre setup. This local prototype disables MapLibre attribution and does not
 render a provider logo. Weather layers remain inserted below the promoted context.
 
 Animation remains an 18-second deterministic loop. The application creates
-adjacent 100 ms keyframes and updates all weather layers together; switching a
-mode preserves time, play/pause state, camera state, and logical weather zoom.
+adjacent 100 ms keyframes only for the active representation; switching a mode
+lazily synchronizes that representation to the exact global time before its
+next repaint, while preserving time, play/pause state, camera state, and
+logical weather zoom. Inactive layers retain lightweight topology/LOD state but
+do not evaluate weather, rebuild instance data, or upload temporal GPU data.
 Dots and Squares read out their active LOD/sample count. Blur and Areas report
 their fixed L14 reconstruction lattice instead of camera LOD.
 
@@ -133,9 +136,11 @@ L14 gives a roughly 3 km local grid near the experiment anchor. Panning,
 rotation, pitch, resizing, and ordinary camera zoom only reproject this mesh;
 they do not rebuild it or reevaluate weather values.
 
-Each temporal keyframe evaluates rain/storm/hail at those fixed vertices using
-the prepared geographic field. The scalar layer uploads adjacent keyframe
-channels without camera-dependent work. The scalar mesh is a surface-attached
+Each temporal keyframe evaluates raw rain/storm/hail at those fixed vertices
+using the prepared geographic field. Smooth state and coverage remapping are
+computed only for Areas with Smooth enabled. Blur packs/uploads only its L14
+vertex values; Areas reconstructs/uploads only dense texture values. The scalar
+mesh is a surface-attached
 MapLibre custom 3D layer, not a Canvas raster, screen overlay, or
 post-processing effect.
 
@@ -160,11 +165,13 @@ and constrains between-node values to their rectangular source-cell range.
 This improves continuity for small hail contours without changing the sampled
 field or applying low-pass smoothing.
 
-The expensive reconstruction is performed only when Areas needs a temporal
-state: both adjacent states are rebuilt on Areas activation, arbitrary timeline
-jumps, or a Smooth toggle. During ordinary 100 ms temporal advancement, the
-already reconstructed `state1` buffer/texture becomes `state0`; only the new
-`state1` is reconstructed and uploaded. The two dense RGBA32F textures keep
+The expensive reconstruction workspace, dense temporal arrays, and two RGBA32F
+textures are allocated lazily on first Areas activation and retained thereafter.
+Reconstruction is performed only when Areas needs a temporal state: both
+adjacent states are rebuilt on Areas activation, arbitrary timeline jumps, or a
+Smooth toggle. During ordinary 100 ms temporal advancement, the already
+reconstructed `state1` buffer/texture becomes `state0`; only the new `state1`
+is reconstructed and uploaded. The two dense RGBA32F textures keep
 rain/storm/hail in RGB. The fragment shader uses portable explicit bilinear
 four-texel sampling of those dense textures, then temporally mixes the results
 before applying the existing five precipitation bands (`#0090FF` through
@@ -176,9 +183,11 @@ The static L14 indexed triangles remain projection-only surface tessellation
 for MapLibre Globe. Their diagonals never determine Areas scalar contours, and
 camera movement only reprojects the surface; it does not rebuild scalar data.
 
-Smooth generalizes field data before Areas rendering. For every prepared scalar
-keyframe, each channel receives two deterministic radius-three box-filter passes
-on the fixed L14 lattice (an approximately 10 km local low-pass scale). This
+Smooth generalizes field data before Areas rendering. Only while Areas Smooth is
+enabled, each needed scalar keyframe receives two deterministic radius-three
+box-filter passes on the fixed L14 lattice (an approximately 10 km local
+low-pass scale). The filter uses running separable windows while retaining the
+same edge-clamping semantics. This
 removes local detail without changing the lattice or responding to camera zoom.
 Rain band thresholds and storm/hail presence thresholds are coverage-remapped
 against the unsmoothed lattice, preserving the legacy visual-coverage intent.

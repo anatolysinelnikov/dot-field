@@ -277,7 +277,8 @@ export class GeographicDotsLayer {
   setSamples(samples, time) {
     this.samples = samples;
     this.transition = null;
-    this.rebuildTemporal(time);
+    if (this.active) this.rebuildTemporal(time);
+    else this.temporal = null;
   }
 
   setActive(active) {
@@ -289,7 +290,8 @@ export class GeographicDotsLayer {
     this.samples = toSamples;
     this.transition = { fromSamples, toSamples };
     this.transitionProgress = progress;
-    this.rebuildTemporal(time);
+    if (this.active) this.rebuildTemporal(time);
+    else this.temporal = null;
   }
 
   setTransitionProgress(progress) {

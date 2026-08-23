@@ -1,5 +1,5 @@
 import { AREA_PRECIPITATION_BANDS } from './config.js';
-import { prepareGeographicFieldFrame, geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
+import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographicToSynthetic } from './geography.js';
 import { MAX_DISPLAY_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
 
 // Blur and Areas share one L14 lattice.  Unlike the display LOD, this grid is
@@ -25,7 +25,8 @@ function makeChannels(length) {
 function makeState(length) {
   return {
     raw: makeChannels(length),
-    smooth: makeChannels(length),
+    smooth: null,
+    smoothReady: false,
     rainThresholds: new Float32Array(AREA_RAIN_THRESHOLDS),
     stormThreshold: AREA_STORM_THRESHOLD,
     hailThreshold: AREA_HAIL_THRESHOLD
@@ -33,23 +34,26 @@ function makeState(length) {
 }
 
 function blurHorizontal(source, target, width, height, radius) {
+  const windowSize = radius * 2 + 1;
   for (let row = 0; row < height; row++) {
     const offset = row * width;
+    let total = source[offset] * (radius + 1);
+    for (let column = 1; column <= radius; column++) total += source[offset + Math.min(width - 1, column)];
     for (let column = 0; column < width; column++) {
-      let total = 0;
-      for (let k = -radius; k <= radius; k++) total += source[offset + Math.max(0, Math.min(width - 1, column + k))];
-      target[offset + column] = total / (radius * 2 + 1);
+      target[offset + column] = total / windowSize;
+      total += source[offset + Math.min(width - 1, column + radius + 1)] - source[offset + Math.max(0, column - radius)];
     }
   }
 }
 
 function blurVertical(source, target, width, height, radius) {
-  for (let row = 0; row < height; row++) {
-    const offset = row * width;
-    for (let column = 0; column < width; column++) {
-      let total = 0;
-      for (let k = -radius; k <= radius; k++) total += source[Math.max(0, Math.min(height - 1, row + k)) * width + column];
-      target[offset + column] = total / (radius * 2 + 1);
+  const windowSize = radius * 2 + 1;
+  for (let column = 0; column < width; column++) {
+    let total = source[column] * (radius + 1);
+    for (let row = 1; row <= radius; row++) total += source[Math.min(height - 1, row) * width + column];
+    for (let row = 0; row < height; row++) {
+      target[row * width + column] = total / windowSize;
+      total += source[Math.min(height - 1, row + radius + 1) * width + column] - source[Math.max(0, row - radius) * width + column];
     }
   }
 }
@@ -64,14 +68,7 @@ function smoothChannel(source, output, scratchA, scratchB, width, height) {
   }
 }
 
-function coverageThreshold(raw, generalized, threshold, histogram) {
-  histogram.fill(0);
-  let coverage = 0;
-  for (let index = 0; index < raw.length; index++) {
-    const value = Math.max(0, Math.min(1, generalized[index]));
-    histogram[Math.min(HISTOGRAM_BINS - 1, Math.floor(value * HISTOGRAM_BINS))]++;
-    if (raw[index] >= threshold) coverage++;
-  }
+function coverageThresholdFromHistogram(coverage, histogram) {
   if (!coverage) return 1;
   let accumulated = 0;
   for (let bin = HISTOGRAM_BINS - 1; bin >= 0; bin--) {
@@ -82,10 +79,31 @@ function coverageThreshold(raw, generalized, threshold, histogram) {
   return 0;
 }
 
-function remapThresholds(state, histogram) {
+function coverageThreshold(raw, generalized, threshold, histogram) {
+  histogram.fill(0);
+  let coverage = 0;
+  for (let index = 0; index < raw.length; index++) {
+    const value = Math.max(0, Math.min(1, generalized[index]));
+    histogram[Math.min(HISTOGRAM_BINS - 1, Math.floor(value * HISTOGRAM_BINS))]++;
+    if (raw[index] >= threshold) coverage++;
+  }
+  return coverageThresholdFromHistogram(coverage, histogram);
+}
+
+function remapThresholds(state, histogram, rainCoverage) {
+  histogram.fill(0);
+  rainCoverage.fill(0);
+  for (let index = 0; index < state.raw.rain.length; index++) {
+    const value = Math.max(0, Math.min(1, state.smooth.rain[index]));
+    histogram[Math.min(HISTOGRAM_BINS - 1, Math.floor(value * HISTOGRAM_BINS))]++;
+    const raw = state.raw.rain[index];
+    for (let thresholdIndex = 0; thresholdIndex < AREA_RAIN_THRESHOLDS.length; thresholdIndex++) {
+      if (raw >= AREA_RAIN_THRESHOLDS[thresholdIndex]) rainCoverage[thresholdIndex]++;
+    }
+  }
   let previous = 0;
   for (let index = 0; index < AREA_RAIN_THRESHOLDS.length; index++) {
-    const threshold = coverageThreshold(state.raw.rain, state.smooth.rain, AREA_RAIN_THRESHOLDS[index], histogram);
+    const threshold = coverageThresholdFromHistogram(rainCoverage[index], histogram);
     state.rainThresholds[index] = Math.max(previous + (index ? 1e-5 : 0), Math.min(1, threshold));
     previous = state.rainThresholds[index];
   }
@@ -130,6 +148,7 @@ export class GeographicScalarLattice {
     this.scratchA = new Float32Array(this.length);
     this.scratchB = new Float32Array(this.length);
     this.histogram = new Uint32Array(HISTOGRAM_BINS);
+    this.rainCoverage = new Uint32Array(AREA_RAIN_THRESHOLDS.length);
   }
 
   evaluate(time, reusable = null) {
@@ -137,15 +156,23 @@ export class GeographicScalarLattice {
     const frame = prepareGeographicFieldFrame(time);
     const value = { rain: 0, storm: 0, hail: 0 };
     for (let index = 0; index < this.length; index++) {
-      geographicPreparedIntensityAt(frame, { x: this.fieldPoints[index * 2], y: this.fieldPoints[index * 2 + 1] }, value);
+      geographicPreparedIntensityAtXY(frame, this.fieldPoints[index * 2], this.fieldPoints[index * 2 + 1], value);
       state.raw.rain[index] = value.rain;
       state.raw.storm[index] = value.storm;
       state.raw.hail[index] = value.hail;
     }
+    state.smoothReady = false;
+    return state;
+  }
+
+  ensureSmooth(state) {
+    if (state.smoothReady) return state;
+    if (!state.smooth) state.smooth = makeChannels(this.length);
     for (const channel of ['rain', 'storm', 'hail']) {
       smoothChannel(state.raw[channel], state.smooth[channel], this.scratchA, this.scratchB, this.width, this.height);
     }
-    remapThresholds(state, this.histogram);
+    remapThresholds(state, this.histogram, this.rainCoverage);
+    state.smoothReady = true;
     return state;
   }
 }

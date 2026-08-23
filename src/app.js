@@ -348,18 +348,26 @@ function queueWeatherUpdate() {
   requestAnimationFrame(() => {
     state.weatherQueued = false;
     if (!state.mapReady) return;
-    weatherLayer.updateWeather(state.time / LOOP_SECONDS);
-    squaresLayer.updateWeather(state.time / LOOP_SECONDS);
-    scalarLayer.updateWeather(state.time / LOOP_SECONDS);
+    const time = state.time / LOOP_SECONDS;
+    if (state.renderMode === 'dots') weatherLayer.updateWeather(time);
+    else if (state.renderMode === 'squares') squaresLayer.updateWeather(time);
+    else scalarLayer.updateWeather(time);
   });
 }
 
 function applyRenderMode() {
   const mode = state.renderMode;
+  const time = state.time / LOOP_SECONDS;
+  const scalarActive = mode === 'blur' || mode === 'areas';
   weatherLayer.setActive(mode === 'dots');
   squaresLayer.setActive(mode === 'squares');
-  scalarLayer.setPresentation(mode === 'areas' ? 'areas' : 'blur', mode === 'areas' && areaSmooth.checked, state.time / LOOP_SECONDS);
-  scalarLayer.setActive(mode === 'blur' || mode === 'areas');
+  scalarLayer.setActive(scalarActive);
+  if (mode === 'dots') weatherLayer.updateWeather(time);
+  else if (mode === 'squares') squaresLayer.updateWeather(time);
+  else {
+    scalarLayer.setPresentation(mode === 'areas' ? 'areas' : 'blur', mode === 'areas' && areaSmooth.checked, time);
+    scalarLayer.updateWeather(time);
+  }
   updateReadout();
 }
 
@@ -492,9 +500,9 @@ function frame(now) {
   // an otherwise idle map rendering continuously.
   if (state.mapReady && state.playing && !state.scrubbing) {
     const normalizedTime = state.time / LOOP_SECONDS;
-    weatherLayer.updateWeather(normalizedTime);
-    squaresLayer.updateWeather(normalizedTime);
-    scalarLayer.updateWeather(normalizedTime);
+    if (state.renderMode === 'dots') weatherLayer.updateWeather(normalizedTime);
+    else if (state.renderMode === 'squares') squaresLayer.updateWeather(normalizedTime);
+    else scalarLayer.updateWeather(normalizedTime);
   }
   updateLODTransition(now);
   if (!state.scrubbing) timeSlider.value = String(state.time / LOOP_SECONDS);

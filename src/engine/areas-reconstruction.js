@@ -55,24 +55,28 @@ export function createAreasReconstructionWorkspace(sourceWidth, sourceHeight, su
     subdivisions,
     width,
     height,
-    horizontal: new Float32Array(width * sourceHeight)
+    horizontal: new Float32Array(width * sourceHeight),
+    horizontalSlopes: new Float64Array(sourceWidth * sourceHeight),
+    verticalSlopes: new Float64Array(width * sourceHeight),
+    denseSourceColumns: Uint16Array.from({ length: width }, (_, column) => Math.min(sourceWidth - 2, Math.floor(column / subdivisions)))
   };
 }
 
 // Writes one scalar channel into an interleaved texture buffer. Original L14
 // nodes are copied exactly; only between-node values are cubic reconstructed.
 export function reconstructAreasChannel(source, workspace, target, targetChannel, targetStride) {
-  const { sourceWidth, sourceHeight, subdivisions, width, height, horizontal } = workspace;
+  const { sourceWidth, sourceHeight, subdivisions, width, height, horizontal, horizontalSlopes, verticalSlopes, denseSourceColumns } = workspace;
 
   for (let row = 0; row < sourceHeight; row++) {
     const sourceOffset = row * sourceWidth;
     const horizontalOffset = row * width;
+    for (let column = 0; column < sourceWidth; column++) horizontalSlopes[sourceOffset + column] = sourceRowSlope(source, sourceOffset, sourceWidth, column);
     for (let column = 0; column < sourceWidth; column++) horizontal[horizontalOffset + column * subdivisions] = source[sourceOffset + column];
     for (let column = 0; column < sourceWidth - 1; column++) {
       const first = source[sourceOffset + column];
       const second = source[sourceOffset + column + 1];
-      const firstSlope = sourceRowSlope(source, sourceOffset, sourceWidth, column);
-      const secondSlope = sourceRowSlope(source, sourceOffset, sourceWidth, column + 1);
+      const firstSlope = horizontalSlopes[sourceOffset + column];
+      const secondSlope = horizontalSlopes[sourceOffset + column + 1];
       for (let step = 1; step < subdivisions; step++) {
         const value = hermite(first, second, firstSlope, secondSlope, step / subdivisions);
         horizontal[horizontalOffset + column * subdivisions + step] = Math.max(Math.min(first, second), Math.min(Math.max(first, second), value));
@@ -80,14 +84,17 @@ export function reconstructAreasChannel(source, workspace, target, targetChannel
     }
   }
 
+  for (let row = 0; row < sourceHeight; row++) {
+    for (let column = 0; column < width; column++) verticalSlopes[row * width + column] = horizontalColumnSlope(horizontal, width, sourceHeight, row, column);
+  }
   for (let column = 0; column < width; column++) {
     for (let row = 0; row < sourceHeight; row++) target[(row * subdivisions * width + column) * targetStride + targetChannel] = horizontal[row * width + column];
     for (let row = 0; row < sourceHeight - 1; row++) {
       const first = horizontal[row * width + column];
       const second = horizontal[(row + 1) * width + column];
-      const firstSlope = horizontalColumnSlope(horizontal, width, sourceHeight, row, column);
-      const secondSlope = horizontalColumnSlope(horizontal, width, sourceHeight, row + 1, column);
-      const sourceColumn = Math.min(sourceWidth - 2, Math.floor(column / subdivisions));
+      const firstSlope = verticalSlopes[row * width + column];
+      const secondSlope = verticalSlopes[(row + 1) * width + column];
+      const sourceColumn = denseSourceColumns[column];
       const topOffset = row * sourceWidth + sourceColumn;
       const bottomOffset = topOffset + sourceWidth;
       for (let step = 1; step < subdivisions; step++) {

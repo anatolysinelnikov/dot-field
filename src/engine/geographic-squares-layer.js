@@ -198,8 +198,8 @@ export class GeographicSquaresLayer {
     this.rebuildInstances();
   }
 
-  setSamples(samples, time) { this.samples = samples; this.transition = null; this.rebuildTemporal(time); }
-  setTransition(fromSamples, toSamples, time, progress = 0) { this.samples = toSamples; this.transition = { fromSamples, toSamples }; this.transitionProgress = progress; this.rebuildTemporal(time); }
+  setSamples(samples, time) { this.samples = samples; this.transition = null; if (this.active) this.rebuildTemporal(time); else this.temporal = null; }
+  setTransition(fromSamples, toSamples, time, progress = 0) { this.samples = toSamples; this.transition = { fromSamples, toSamples }; this.transitionProgress = progress; if (this.active) this.rebuildTemporal(time); else this.temporal = null; }
   setTransitionProgress(progress) { this.transitionProgress = progress; if (this.active) this.map?.triggerRepaint(); }
 
   buildGroup(level, state0, state1) {
