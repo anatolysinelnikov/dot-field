@@ -10,7 +10,7 @@ const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
 const lodLabel = document.querySelector('#lodLabel');
 const sampleLabel = document.querySelector('#sampleLabel');
-const resetRotation = document.querySelector('#resetRotation');
+const resetView = document.querySelector('#resetView');
 const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
 
@@ -80,6 +80,7 @@ const state = {
   lodTransition: null,
   logicalSamplingZoom: WEATHER_REGION.initialZoom,
   camera: null,
+  resettingView: false,
   mapReady: false,
   weatherQueued: false
 };
@@ -105,6 +106,11 @@ function rebaseCamera() {
 
 function updateLogicalSamplingZoom() {
   const next = cameraState();
+  if (state.resettingView) {
+    state.camera = next;
+    updateResetViewControl();
+    return;
+  }
   const previous = state.camera;
   if (!previous) {
     state.camera = next;
@@ -298,7 +304,17 @@ let scrubbingPointerId = null;
 playPause.addEventListener('click', () => setPlaying(!state.playing));
 zoomIn.addEventListener('click', () => map.zoomIn());
 zoomOut.addEventListener('click', () => map.zoomOut());
-resetRotation.addEventListener('click', () => map.resetNorth());
+function resetMapView() {
+  if (state.resettingView) return;
+  state.resettingView = true;
+  map.easeTo({
+    center: WEATHER_REGION.center,
+    zoom: WEATHER_REGION.initialZoom,
+    bearing: 0,
+    pitch: 0
+  });
+}
+resetView.addEventListener('click', resetMapView);
 timeSlider.addEventListener('pointerdown', (event) => {
   if (state.playing) setPlaying(false);
   state.scrubbing = true;
@@ -325,14 +341,31 @@ map.on('style.load', () => {
   if (!state.mapReady) map.setProjection({ type: 'globe' });
   initializeWeatherLayer();
 });
-map.on('move', updateLogicalSamplingZoom);
-function updateRotationControl() {
+function updateResetViewControl() {
+  const center = map.getCenter();
   const bearing = ((map.getBearing() + 180) % 360) - 180;
-  resetRotation.hidden = Math.abs(bearing) < 0.01;
+  const [initialLongitude, initialLatitude] = WEATHER_REGION.center;
+  const differs = Math.abs(center.lng - initialLongitude) > 0.0001
+    || Math.abs(center.lat - initialLatitude) > 0.0001
+    || Math.abs(map.getZoom() - WEATHER_REGION.initialZoom) > 0.01
+    || Math.abs(bearing) > 0.1
+    || Math.abs(map.getPitch()) > 0.1;
+  resetView.hidden = !differs;
 }
-map.on('rotate', updateRotationControl);
-map.on('rotateend', updateRotationControl);
-map.on('load', updateRotationControl);
+map.on('move', updateLogicalSamplingZoom);
+map.on('move', updateResetViewControl);
+map.on('rotate', updateResetViewControl);
+map.on('pitch', updateResetViewControl);
+map.on('moveend', () => {
+  if (!state.resettingView) return;
+  state.resettingView = false;
+  state.logicalSamplingZoom = WEATHER_REGION.initialZoom;
+  rebaseCamera();
+  updateReadout();
+  rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
+  updateResetViewControl();
+});
+map.on('load', updateResetViewControl);
 map.on('error', (event) => {
   const error = event?.error;
   const details = [];
