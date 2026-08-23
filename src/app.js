@@ -43,9 +43,7 @@ const MAPTILER_GEOGRAPHIC_LABEL_IDS = [
   'Village labels',
   'Place labels'
 ];
-const MAPTILER_HYDROGRAPHY_IDS = ['River intermittent', 'River'];
 const MAPTILER_ADMIN_BOUNDARY_IDS = ['Other border', 'Disputed border', 'Country border'];
-const MAPTILER_WATER_BOUNDARY_ID = 'geographic-water-boundaries';
 const MAPTILER_WATER_LABEL_IDS = [
   'Ocean labels',
   'Bay labels (lines)',
@@ -56,9 +54,7 @@ const MAPTILER_WATER_LABEL_IDS = [
   'Pond labels',
   'Lake labels'
 ];
-const MAPTILER_WATER_SHADOW_ID = 'Water shadow';
 const MAPTILER_WATER_WASH_ID = 'geographic-water-wash';
-const MAPTILER_WATER_EDGE_SHADOW_ID = 'geographic-water-edge-shadow';
 
 const map = new window.maplibregl.Map({
   container: 'map',
@@ -146,7 +142,6 @@ function initializeWeatherLayer() {
   }
 
   const waterLayer = styleLayers.find((layer) => layer.id === 'Water' && layer.type === 'fill');
-  const waterShadowLayer = styleLayers.find((layer) => layer.id === MAPTILER_WATER_SHADOW_ID);
   if (waterLayer && !map.getLayer(MAPTILER_WATER_WASH_ID)) {
     try {
       map.addLayer({
@@ -159,7 +154,7 @@ function initializeWeatherLayer() {
         filter: waterLayer.filter,
         paint: {
           'fill-color': waterLayer.paint?.['fill-color'] || '#141414',
-          'fill-opacity': 0.08
+          'fill-opacity': 0.10
         }
       }, weatherLayer.id);
     } catch (error) {
@@ -167,53 +162,7 @@ function initializeWeatherLayer() {
     }
   }
 
-  if (waterLayer && !map.getLayer(MAPTILER_WATER_BOUNDARY_ID)) {
-    try {
-      map.addLayer({
-        id: MAPTILER_WATER_BOUNDARY_ID,
-        type: 'line',
-        source: waterLayer.source,
-        'source-layer': waterLayer['source-layer'],
-        ...(waterLayer.minzoom === undefined ? {} : { minzoom: waterLayer.minzoom }),
-        ...(waterLayer.maxzoom === undefined ? {} : { maxzoom: waterLayer.maxzoom }),
-        filter: waterLayer.filter,
-        paint: {
-          'line-color': waterLayer.paint?.['fill-color'] || '#141414',
-          'line-opacity': 0.75,
-          'line-width': 1
-        }
-      }, weatherLayer.id);
-    } catch (error) {
-      console.warn('MapTiler water-boundary context is unavailable.', error instanceof Error ? error.message : error);
-    }
-  }
-
-  if (waterLayer && !map.getLayer(MAPTILER_WATER_EDGE_SHADOW_ID)) {
-    try {
-      map.addLayer({
-        id: MAPTILER_WATER_EDGE_SHADOW_ID,
-        type: 'line',
-        source: waterLayer.source,
-        'source-layer': waterLayer['source-layer'],
-        ...(waterLayer.minzoom === undefined ? {} : { minzoom: waterLayer.minzoom }),
-        ...(waterLayer.maxzoom === undefined ? {} : { maxzoom: waterLayer.maxzoom }),
-        filter: waterLayer.filter,
-        paint: {
-          'line-color': waterShadowLayer?.paint?.['fill-color'] || '#000000',
-          'line-opacity': 1,
-          'line-width': 3,
-          'line-blur': 1.5,
-          'line-offset': -1.5
-        }
-      }, weatherLayer.id);
-    } catch (error) {
-      console.warn('MapTiler water-edge shadow context is unavailable.', error instanceof Error ? error.message : error);
-    }
-  }
-
   const upperContextIds = new Set([
-    ...MAPTILER_HYDROGRAPHY_IDS,
-    MAPTILER_WATER_BOUNDARY_ID,
     ...MAPTILER_WATER_LABEL_IDS,
     ...MAPTILER_ADMIN_BOUNDARY_IDS,
     ...MAPTILER_GEOGRAPHIC_LABEL_IDS
@@ -227,9 +176,6 @@ function initializeWeatherLayer() {
 
   const upperOrder = [
     MAPTILER_WATER_WASH_ID,
-    MAPTILER_WATER_EDGE_SHADOW_ID,
-    MAPTILER_WATER_BOUNDARY_ID,
-    ...MAPTILER_HYDROGRAPHY_IDS,
     ...MAPTILER_ADMIN_BOUNDARY_IDS,
     ...MAPTILER_WATER_LABEL_IDS,
     ...MAPTILER_GEOGRAPHIC_LABEL_IDS
