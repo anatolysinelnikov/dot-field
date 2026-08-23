@@ -154,12 +154,17 @@ function initializeWeatherLayer() {
         filter: waterLayer.filter,
         paint: {
           'fill-color': waterLayer.paint?.['fill-color'] || '#141414',
-          'fill-opacity': 0.10
+          'fill-opacity': 0.20
         }
       }, weatherLayer.id);
     } catch (error) {
       console.warn('MapTiler water-wash context is unavailable.', error instanceof Error ? error.message : error);
     }
+  }
+
+  const regionalBoundaryLayer = styleLayers.find((layer) => layer.id === 'Other border');
+  if (regionalBoundaryLayer && map.getLayer(regionalBoundaryLayer.id)) {
+    map.setLayerZoomRange(regionalBoundaryLayer.id, regionalBoundaryLayer.minzoom ?? 0, 24);
   }
 
   const upperContextIds = new Set([
