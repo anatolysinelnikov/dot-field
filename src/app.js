@@ -55,6 +55,7 @@ const MAPTILER_WATER_LABEL_IDS = [
   'Lake labels'
 ];
 const MAPTILER_WATER_WASH_ID = 'geographic-water-wash';
+const MAPTILER_WATER_BOUNDARY_ID = 'geographic-water-boundaries';
 
 const map = new window.maplibregl.Map({
   container: 'map',
@@ -162,6 +163,27 @@ function initializeWeatherLayer() {
     }
   }
 
+  if (waterLayer && !map.getLayer(MAPTILER_WATER_BOUNDARY_ID)) {
+    try {
+      map.addLayer({
+        id: MAPTILER_WATER_BOUNDARY_ID,
+        type: 'line',
+        source: waterLayer.source,
+        'source-layer': waterLayer['source-layer'],
+        ...(waterLayer.minzoom === undefined ? {} : { minzoom: waterLayer.minzoom }),
+        ...(waterLayer.maxzoom === undefined ? {} : { maxzoom: waterLayer.maxzoom }),
+        filter: waterLayer.filter,
+        paint: {
+          'line-color': waterLayer.paint?.['fill-color'] || '#141414',
+          'line-opacity': 0.75,
+          'line-width': 1
+        }
+      }, weatherLayer.id);
+    } catch (error) {
+      console.warn('MapTiler water-boundary context is unavailable.', error instanceof Error ? error.message : error);
+    }
+  }
+
   const regionalBoundaryLayer = styleLayers.find((layer) => layer.id === 'Other border');
   if (regionalBoundaryLayer && map.getLayer(regionalBoundaryLayer.id)) {
     map.setLayerZoomRange(regionalBoundaryLayer.id, regionalBoundaryLayer.minzoom ?? 0, 24);
@@ -181,6 +203,7 @@ function initializeWeatherLayer() {
 
   const upperOrder = [
     MAPTILER_WATER_WASH_ID,
+    MAPTILER_WATER_BOUNDARY_ID,
     ...MAPTILER_ADMIN_BOUNDARY_IDS,
     ...MAPTILER_WATER_LABEL_IDS,
     ...MAPTILER_GEOGRAPHIC_LABEL_IDS
