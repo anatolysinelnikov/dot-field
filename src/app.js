@@ -8,7 +8,6 @@ const MAX_SAMPLING_LATITUDE = 85;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
 const zoomLabel = document.querySelector('#zoomLabel');
-const mapZoomLabel = document.querySelector('#mapZoomLabel');
 const lodLabel = document.querySelector('#lodLabel');
 const sampleLabel = document.querySelector('#sampleLabel');
 const projectionSelector = document.querySelector('#projectionSelector');
@@ -90,7 +89,6 @@ let lastMapErrorSignature = '';
 
 function updateReadout() {
   zoomLabel.textContent = state.logicalSamplingZoom.toFixed(2);
-  mapZoomLabel.textContent = map.getZoom().toFixed(2);
   lodLabel.textContent = state.lod.level === null ? '–' : String(state.lod.level);
   sampleLabel.textContent = state.samples.length.toLocaleString();
 }
