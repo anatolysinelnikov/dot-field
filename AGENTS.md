@@ -101,7 +101,7 @@ When working on rendering or spatial algorithms, explicitly inspect:
 
 ## Verification
 
-There is currently no automated test/build pipeline in the repository, so verification is primarily static review plus manual smoke testing.
+The GitHub Pages workflow includes dependency-free JavaScript syntax validation. There is still no automated rendering or behavior test suite, so verification is primarily static review plus manual smoke testing.
 
 At minimum for code changes:
 

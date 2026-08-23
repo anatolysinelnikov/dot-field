@@ -1,6 +1,11 @@
 import { RAIN_MODERATE_MAX } from './config.js';
-import { INTENSITY_THRESHOLDS, intensityToStrength } from './lod.js';
-import { clamp } from './math.js';
+import { clamp, smoothstep } from './math.js';
+
+export const INTENSITY_THRESHOLDS = Object.freeze({ rain: 0.045, storm: 0.075, hail: 0.11 });
+
+export function intensityToStrength(intensity, layer, thresholds = INTENSITY_THRESHOLDS) {
+  return smoothstep(thresholds[layer] * 0.45, 0.93, intensity);
+}
 
 export function intensityToRadius(intensity, spacing, layer) {
   // Adjust thresholds and radius mapping here. Rain intentionally overlaps most.

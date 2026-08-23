@@ -88,8 +88,8 @@ export function evaluatePreparedField(frame, x, y, output = {}) {
   return output;
 }
 
-// Preserve the legacy public API for older renderers. Geographic Dots uses
-// prepared frames so this allocation-heavy convenience path is not hot.
+// Direct evaluation remains available for callers that do not use prepared
+// frames; this allocation-heavy convenience path is not hot.
 export function intensityAt(x, y, t, travelX) {
   return evaluatePreparedField(prepareFieldFrame(t, travelX), x, y);
 }
