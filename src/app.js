@@ -7,12 +7,14 @@ import { GeographicRainLayer } from './engine/geographic-rain-layer.js';
 const FIXED_WEATHER_TIME = 0.5;
 // Camera inspection is intentionally independent from the L14 weather cap.
 const CAMERA_MAX_ZOOM = 13;
+const AUTO_ROTATE_DEGREES_PER_SECOND = 2.5;
 const MAX_SAMPLING_LATITUDE = 85;
 const shortSide = Math.min(document.querySelector('#map').clientWidth, document.querySelector('#map').clientHeight);
 const initialMinZoom = shortSide <= 680 ? 1.5 : 3;
 const resetView = document.querySelector('#resetView');
 const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
+const autoRotate = document.querySelector('#autoRotate');
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 async function loadMapTilerKey() {
@@ -35,8 +37,9 @@ map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top
 
 const rainLayer = new GeographicRainLayer();
 rainLayer.setFixedWeatherTime(FIXED_WEATHER_TIME);
-const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, resettingView: false, mapReady: false };
+const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, resettingView: false, mapReady: false, autoRotating: false };
 let applicationFrameQueued = false;
+let lastApplicationFrame = null;
 let lastMapErrorSignature = '';
 
 function cameraState() { return { rawZoom: map.getZoom(), latitude: clamp(map.getCenter().lat, -MAX_SAMPLING_LATITUDE, MAX_SAMPLING_LATITUDE) }; }
@@ -104,14 +107,31 @@ function updateResetViewControl() {
   const [longitude, latitude] = WEATHER_REGION.center;
   resetView.hidden = !(Math.abs(center.lng - longitude) > 0.0001 || Math.abs(center.lat - latitude) > 0.0001 || Math.abs(map.getZoom() - WEATHER_REGION.initialZoom) > 0.01 || Math.abs(bearing) > 0.1 || Math.abs(map.getPitch()) > 0.1);
 }
+function setAutoRotation(autoRotating) {
+  state.autoRotating = autoRotating;
+  autoRotate.textContent = autoRotating ? '●' : '○';
+  autoRotate.setAttribute('aria-pressed', String(autoRotating));
+  autoRotate.setAttribute('aria-label', autoRotating ? 'Disable auto rotation' : 'Enable auto rotation');
+  if (autoRotating) wakeApplicationFrame();
+}
 function wakeApplicationFrame() {
   if (applicationFrameQueued) return;
+  if (lastApplicationFrame === null) lastApplicationFrame = performance.now();
   applicationFrameQueued = true;
-  requestAnimationFrame((now) => { applicationFrameQueued = false; updateLODTransition(now); if (state.lodTransition) wakeApplicationFrame(); });
+  requestAnimationFrame((now) => {
+    applicationFrameQueued = false;
+    const delta = Math.min((now - lastApplicationFrame) / 1000, 0.1);
+    lastApplicationFrame = now;
+    if (state.autoRotating) map.setBearing(map.getBearing() + AUTO_ROTATE_DEGREES_PER_SECOND * delta);
+    updateLODTransition(now);
+    if (state.lodTransition || state.autoRotating) wakeApplicationFrame();
+    else lastApplicationFrame = null;
+  });
 }
 
 zoomIn.addEventListener('click', () => map.zoomIn());
 zoomOut.addEventListener('click', () => map.zoomOut());
+autoRotate.addEventListener('click', () => setAutoRotation(!state.autoRotating));
 resetView.addEventListener('click', resetMapView);
 map.on('style.load', () => { if (!state.mapReady) map.setProjection({ type: 'globe' }); initializeRainLayer(); });
 map.on('move', updateLogicalSamplingZoom);

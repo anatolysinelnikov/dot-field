@@ -20,8 +20,10 @@ app/UI -> GeographicRainLayer -> geographic LOD / geography -> field -> math/con
 `src/app.js` owns MapLibre construction, the fixed `t = 0.5` weather frame,
 camera/reset controls, logical sampling zoom, and LOD transition scheduling. It
 does not run a continuous playback RAF or expose a timeline/mode selector. Its
-only RAF is the existing 0.2-second LOD transition while a zoom crossing is in
-progress.
+RAF runs only for the existing 0.2-second LOD transition or while the compact
+auto-rotation toggle is enabled. Auto-rotation changes only camera bearing at
+2.5 degrees per second; it never changes weather coordinates or rebuilds
+instance sets.
 
 ## Geographic sampling and LOD
 
@@ -37,11 +39,11 @@ On a level transition the renderer builds deterministic old and new instance
 sets once, and crossfades them with the existing smooth 0.2-second transition.
 No weather values are reevaluated during camera movement or transition frames.
 Rain population is area-normalized instead of using a per-level slot table.
-Each sample receives a deterministic rounded budget of
-`1.7 × rainStrength × (sampleSpacing / L14Spacing)²`, bounded at 512 droplets.
+Each cell receives a deterministic rounded budget of
+`1.7 × averageCornerRainStrength × (sampleSpacing / L14Spacing)²`, bounded at 512 droplets.
 Four finer cells therefore replace one coarse cell without materially changing
 the total rain population. At the fixed frame this produces approximately
-3,031 / 2,992 / 2,976 / 2,951 / 2,960 droplets from L10 through L14.
+2,411 / 2,738 / 2,844 / 2,903 / 2,959 droplets from L10 through L14.
 
 ## Static 3D rain — `src/engine/geographic-rain-layer.js`
 
@@ -50,6 +52,14 @@ when an LOD set is built. Each rain-bearing geographic sample is a conceptual
 column from 180 m to 10,000 m; intensity never alters that vertical range.
 Instead it controls deterministic slot activation (the strongest signal), then
 restrained opacity, length, and width. Empty/insignificant slots are omitted.
+
+Rain density is reconstructed per cell, rather than treating a sample value as
+a constant square footprint. The renderer caches one synthetic rain value at
+each geographic lattice point, then evaluates each candidate with the shared
+top-left/top-right/bottom-left/bottom-right bilinear field. Its local strength
+both deterministically accepts the candidate and drives the existing droplet
+appearance mapping. Neighboring cells therefore share exactly the same corner
+values without per-droplet synthetic field evaluations.
 
 Every potential droplet derives its selector, column phase, length/width,
 opacity variation, and two-axis visual scatter from

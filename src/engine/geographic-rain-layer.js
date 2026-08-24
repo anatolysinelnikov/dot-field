@@ -40,7 +40,20 @@ function lowDiscrepancyCellPosition(sample, slot) {
   // miniature pattern while keeping candidates evenly distributed.
   const x = fract(index / PLASTIC_RATIO + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x2545f491));
   const y = fract(index / (PLASTIC_RATIO * PLASTIC_RATIO) + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x369dea0f));
-  return [(x - 0.5) * sample.spacing * CELL_FOOTPRINT, (y - 0.5) * sample.spacing * CELL_FOOTPRINT];
+  return [0.5 + (x - 0.5) * CELL_FOOTPRINT, 0.5 + (y - 0.5) * CELL_FOOTPRINT];
+}
+
+function gridDimensions(samples) {
+  let columns = 1;
+  while (columns < samples.length && samples[columns].canonicalY === samples[0].canonicalY) columns++;
+  return { columns, rows: samples.length / columns };
+}
+
+function bilinear(topLeft, topRight, bottomLeft, bottomRight, u, v) {
+  return topLeft * (1 - u) * (1 - v)
+    + topRight * u * (1 - v)
+    + bottomLeft * (1 - u) * v
+    + bottomRight * u * v;
 }
 
 function compileShader(gl, type, source) {
@@ -144,25 +157,45 @@ export class GeographicRainLayer {
   buildInstances(samples) {
     if (!this.fixedFrame || !samples.length) return new Float32Array();
     const value = { rain: 0, storm: 0, hail: 0 };
-    this.writer.reset();
-    for (const sample of samples) {
-      const point = geographicToSynthetic(...sample.lngLat);
+    const rain = new Float32Array(samples.length);
+    for (let index = 0; index < samples.length; index++) {
+      const point = geographicToSynthetic(...samples[index].lngLat);
       geographicPreparedIntensityAt(this.fixedFrame, point, value);
-      const strength = smoothstep(0.035, 0.90, value.rain);
-      if (strength <= 0) continue;
-      const count = dropletCount(sample, strength);
-      for (let slot = 0; slot < count; slot++) {
-        const phase = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x85ebca6b);
-        const variation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xc2b2ae35);
-        const opacityVariation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x27d4eb2f);
-        // Field evaluation stays at the fixed sample center; this only moves
-        // rendered droplets through a stable low-discrepancy cell footprint.
-        const [scatterX, scatterY] = lowDiscrepancyCellPosition(sample, slot);
-        const length = 145 + strength * 370 + variation * 95;
-        const altitude = COLUMN_BOTTOM_METRES + phase * Math.max(1, COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES - length);
-        const width = 0.85 + strength * 1.35 + variation * 0.3;
-        const opacity = (0.24 + strength * 0.58) * (0.78 + opacityVariation * 0.22);
-        this.writer.push(sample.mercator[0] + scatterX, sample.mercator[1] + scatterY, altitude, length, width, opacity);
+      rain[index] = value.rain;
+    }
+    const { columns, rows } = gridDimensions(samples);
+    this.writer.reset();
+    for (let row = 0; row < rows - 1; row++) {
+      for (let column = 0; column < columns - 1; column++) {
+        const topLeftIndex = row * columns + column;
+        const sample = samples[topLeftIndex];
+        const rain00 = rain[topLeftIndex];
+        const rain10 = rain[topLeftIndex + 1];
+        const rain01 = rain[topLeftIndex + columns];
+        const rain11 = rain[topLeftIndex + columns + 1];
+        const averageStrength = smoothstep(0.035, 0.90, (rain00 + rain10 + rain01 + rain11) * 0.25);
+        if (averageStrength <= 0) continue;
+        const count = dropletCount(sample, averageStrength);
+        for (let slot = 0; slot < count; slot++) {
+          const [u, v] = lowDiscrepancyCellPosition(sample, slot);
+          const localRain = bilinear(rain00, rain10, rain01, rain11, u, v);
+          const strength = smoothstep(0.035, 0.90, localRain);
+          if (strength <= 0) continue;
+          const selector = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x9e3779b9);
+          if (selector > Math.min(1, strength / averageStrength)) continue;
+          const phase = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x85ebca6b);
+          const variation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xc2b2ae35);
+          const opacityVariation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x27d4eb2f);
+          // The field is cached only at shared grid corners. This position is a
+          // stable low-discrepancy candidate inside the reconstructed cell.
+          const scatterX = u * sample.spacing;
+          const scatterY = v * sample.spacing;
+          const length = 145 + strength * 370 + variation * 95;
+          const altitude = COLUMN_BOTTOM_METRES + phase * Math.max(1, COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES - length);
+          const width = 0.85 + strength * 1.35 + variation * 0.3;
+          const opacity = (0.24 + strength * 0.58) * (0.78 + opacityVariation * 0.22);
+          this.writer.push(sample.mercator[0] + scatterX, sample.mercator[1] + scatterY, altitude, length, width, opacity);
+        }
       }
     }
     return this.writer.finish();
