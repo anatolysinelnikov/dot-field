@@ -3,14 +3,14 @@
 ## Document status
 
 - Repository: `anatolysinelnikov/dot-field`
-- Architecture: `experiment/3d-rain`, Step 1 static 3D rain experiment
+- Architecture: `experiment/3d-dot-rain`, static Dot-emitter 3D rain experiment
 - This document is maintained context, not implementation authority. Current code wins when they differ.
 
 ## Project model
 
 This branch is a marketing-oriented, frozen-weather rain scene on a MapLibre
 Globe. It uses the main-compatible surface Dots precipitation renderer at every
-display LOD, with deterministic 3D rain streaks added at close LODs.
+display LOD, with deterministic 3D Dot-emitter rain added at close LODs.
 The synthetic geographic field remains independent of MapLibre and rendering,
 and the existing time-aware field API remains available for later steps.
 
@@ -47,12 +47,8 @@ sets once, and crossfades them with the existing smooth 0.2-second transition.
 No weather values are reevaluated during camera movement or transition frames.
 Surface Dots receive each L10–L14 level and the app-owned adjacent-level
 transition directly, retaining their normal deterministic parent/child or
-direct-pair LOD behavior. Rain population is area-normalized instead of using
-a per-level slot table.
-Each cell receives a deterministic rounded budget of
-`1.7 × averageCornerRainStrength × (sampleSpacing / L14Spacing)²`, bounded at 512 droplets.
-Four finer cells therefore replace one coarse cell without materially changing
-the detailed-rain population when L13/L14 is active.
+direct-pair LOD behavior. Rain is absent at L10–L12, fades at L12↔L13, and
+crossfades independently built emitter sets at L13↔L14.
 
 ## Surface Dots and 3D rain representations
 
@@ -64,66 +60,39 @@ polygon offset. This experiment constructs it with `renderHazards: false`, so
 only its rain and strong-rain passes are drawn; its default behavior still
 renders storm and hail for normal usage.
 
-`GeographicRainLayer` is independent and 3D-only. It evaluates the same frozen
-field directly, never Dots geometry. It produces no instances at L10–L12 and
-draws the reconstructed streak population at L13–L14 (2,903 / 2,959 instances
-at the frozen frame). Surface Dots remain visible underneath it at every LOD.
-The app routes the same 0.2-second transition to both layers: Dots transition
-normally throughout, while rain crossfades between empty and populated 3D sets
-at L12↔L13 and between deterministic streak sets at L13↔L14.
+`GeographicRainLayer` is independent and 3D-only. It owns a separate
+`GeographicSymbolPyramid`, evaluates the fixed `t = 0.5` frame, and consumes
+that pyramid's exact `anchors`, `rainRadius`, and `strongRadius` states. It
+never reads `GeographicDotsLayer` buffers. At L13/L14 every active Surface Dot
+owns exactly one emitter at the same anchor; there is no horizontal scatter,
+bilinear candidate reconstruction, random motion, or camera-dependent identity.
 
-Each close-LOD rain cell is a conceptual column from 180 m to 10,000 m;
-intensity never alters that vertical range. Instead it controls deterministic
-slot activation (the strongest signal), then restrained opacity, length, and
-width. Empty/insignificant slots are omitted.
+An emitter produces 3, 4, or 5 large teardrops from `rainRadius / sampleSpacing`
+(weak, medium, strongest visible rain). Each slot gets a deterministic positive
+0.8–1.2 gap weight; normalized cumulative weights make irregular cyclic phases
+that retain their order. All slots in an emitter share one 0.90×–1.10× speed,
+hashed from stable sample identity, while different emitters are asynchronous.
+`strongFraction = strongRadius² / rainRadius²` deterministically quantizes to
+distributed dark-blue slots; remaining drops use the existing normal-rain blue.
 
-Rain density is reconstructed per cell, rather than treating a sample value as
-a constant square footprint. The renderer caches one synthetic rain value at
-each geographic lattice point, then evaluates each candidate with the shared
-top-left/top-right/bottom-left/bottom-right bilinear field. Its local strength
-both deterministically accepts the candidate and drives the existing droplet
-appearance mapping. Neighboring cells therefore share exactly the same corner
-values without per-droplet synthetic field evaluations.
+The vertical column is deliberately exaggerated from 150 m to 15,000 m for the
+normal main-compatible camera. `projectTileFor3D(vec2 posInTile, float elevation)`
+follows the local Globe radial direction. One instanced quad per drop is
+screen-facing but aligned to that projected radial direction. Its width is
+projected every frame from world-space `rainRadius` (target 52% of the Surface
+Dot diameter), with a 1.65× teardrop height and small deterministic slot
+variation. The fragment shader gives it anti-aliased procedural coverage: a
+rounded lower bulb toward Earth and a pointed upper end away from it, with no trail.
 
-Every potential droplet derives its selector, column phase, length/width,
-opacity variation, speed factor, upper trail opacity, and two-axis visual scatter from
-`(canonicalX, canonicalY, slotIndex)` through a stable integer hash. Field
-evaluation remains at the unmodified sample center; only droplet geometry is
-placed across 90% of the cell by an R2/plastic-ratio low-discrepancy sequence
-with a stable per-cell Cranley-Patterson shift. There is no runtime randomness,
-camera-dependent placement, or jitter. The `phase` is retained as the future
-basis for Step 2 motion equivalent
-to `fract(globalTime * speed + phase)`.
-
-MapLibre GL JS 5.24.0's custom shader prelude provides
-`projectTileFor3D(vec2 posInTile, float elevation)`. The layer uses that exact
-function with metre altitudes. On Globe it creates a radial spherical offset,
-which means both the common upper shell and each streak follow local Earth
-normals; MapLibre handles the projection-transition fallback. Each droplet is
-one instanced four-vertex triangle strip. The vertex shader projects its two radial ends
-then faces the narrow dimension toward the camera in clip space; the fragment
-shader supplies anti-aliased rounded-capsule coverage plus a smooth vertical
-trail gradient: the lower Earth-facing end is fully opaque and the upper end is
-individually derived from deterministic droplet identity. The result avoids 3D
-capsule meshes while retaining
-local-radial streak direction and depth testing.
-
-The close-LOD instance stores a deterministic base vertical phase, a stable
-0.85×–1.15× speed factor, and 0.00–0.20 upper trail opacity instead of a
-CPU-updated altitude. A continuously accumulated renderer-local falling-cycle
-uniform uses `fract(basePhase - fallingCycles * speedFactor)` to move each
-droplet down to Earth and wrap it individually back to the common shell, with
-no global 0–1 reset. The 0×–2× rain-speed slider defaults to 2× and advances
-that uniform at a four-second full-column cycle at 1× (two seconds at 2×), only
-when L13/L14 is visible; it never rebuilds instances or advances synthetic
-weather time. The fragment shader keeps each Earth-facing lower end at full
-base opacity and smoothly fades its upper end to that streak's deterministic
-upper-opacity value.
+Instances store only anchor, deterministic phase, shared column speed,
+`rainRadius`, size variation, and normal/strong color choice. The shader uses
+`fract(phase - fallingCycles * speed)` for altitude, so accumulated app-owned
+`fallingCycles` moves rain without rebuilding instances. The 0×–2× slider
+defaults to 2×; 0× freezes exactly in place. Ripples, splashes, storm, hail,
+lightning, clouds, wind, and weather-time animation are not implemented.
 
 Both renderers use reusable buffers and rebuild only when an LOD set changes.
-The static surface Dots never drive an animation RAF. The per-cell 3D budget is
-bounded at 512, while the area-normalized close-LOD target keeps actual work
-near 3,000 visible streaks. The layers follow current-main MapTiler context
+The static surface Dots never drive an animation RAF. The layers follow current-main MapTiler context
 ordering: basemap/background, surface Dots, 3D rain, semi-transparent water
 tint, coastline/water boundary, administrative boundaries, water labels, then
 geographic/place labels. Native `Water shadow` is hidden, and other symbol

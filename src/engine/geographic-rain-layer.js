@@ -1,266 +1,200 @@
-import { prepareGeographicFieldFrame, geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
+import { prepareGeographicFieldFrame } from './geography.js';
 import { setGeographicProjection } from './geographic-layer-utils.js';
-import { smoothstep } from './math.js';
+import { GeographicSymbolPyramid } from './geographic-symbol-pyramid.js';
+import { clamp } from './math.js';
 
-// Metres. MapLibre 5.24's projectTileFor3D accepts this altitude directly and
-// turns it into a radial Globe offset, so the cloud base follows the Earth.
-const COLUMN_BOTTOM_METRES = 180;
-const COLUMN_TOP_METRES = 10000;
-const L14_SPACING = 1 / (2 ** 14);
-const RAIN_DROPLETS_PER_L14_CELL = 1.7;
-const MAX_DROPLETS_PER_SAMPLE = 512;
-const CELL_FOOTPRINT = 0.9;
-const PLASTIC_RATIO = 1.3247179572447458;
-const INSTANCE_STRIDE = 8;
+// Deliberately exaggerated visual composition for the main-compatible camera.
+const COLUMN_BOTTOM_METRES = 150;
+const COLUMN_TOP_METRES = 15000;
+const DROP_WIDTH_OF_DOT_DIAMETER = 0.52;
+const DROP_HEIGHT_OF_WIDTH = 1.65;
+const COLUMN_SPEED_MIN = 0.90;
+const COLUMN_SPEED_MAX = 1.10;
+const MIN_DROP_COUNT = 3;
+const INSTANCE_STRIDE = 7;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
 const QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
 
-function hashUnit(canonicalX, canonicalY, slot, salt) {
-  let value = (canonicalX * 73856093) ^ (canonicalY * 19349663) ^ (slot * 83492791) ^ salt;
+function fract(value) { return value - Math.floor(value); }
+function hashUnit(x, y, slot, salt) {
+  let value = (x * 73856093) ^ (y * 19349663) ^ (slot * 83492791) ^ salt;
   value = Math.imul(value ^ (value >>> 16), 2246822519);
   value = Math.imul(value ^ (value >>> 13), 3266489917);
   return ((value ^ (value >>> 16)) >>> 0) / 4294967296;
 }
-
-function fract(value) { return value - Math.floor(value); }
-
-function dropletCount(sample, strength) {
-  const areaScale = (sample.spacing / L14_SPACING) ** 2;
-  const expected = strength * RAIN_DROPLETS_PER_L14_CELL * areaScale;
-  const whole = Math.floor(expected);
-  const fractional = expected - whole;
-  const extra = hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x7f4a7c15) < fractional ? 1 : 0;
-  return Math.min(MAX_DROPLETS_PER_SAMPLE, whole + extra);
+function dropCountForRadius(radius, spacing) {
+  const coverage = spacing > 0 ? radius / spacing : 0;
+  return coverage < 0.34 ? 3 : coverage < 0.62 ? 4 : 5;
 }
-
-function lowDiscrepancyCellPosition(sample, slot) {
-  const start = Math.floor(hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x94d049bb) * 8192);
-  const index = start + slot + 1;
-  // R2 sequence with a per-cell Cranley-Patterson shift avoids a repeated
-  // miniature pattern while keeping candidates evenly distributed.
-  const x = fract(index / PLASTIC_RATIO + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x2545f491));
-  const y = fract(index / (PLASTIC_RATIO * PLASTIC_RATIO) + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x369dea0f));
-  return [0.5 + (x - 0.5) * CELL_FOOTPRINT, 0.5 + (y - 0.5) * CELL_FOOTPRINT];
+function darkSlotMask(count, fraction, x, y) {
+  const desired = fraction * count;
+  const whole = Math.floor(desired);
+  const darkCount = Math.min(count, whole + (hashUnit(x, y, 0, 0x4cf5ad43) < desired - whole ? 1 : 0));
+  const mask = new Array(count).fill(false);
+  const offset = hashUnit(x, y, 0, 0x94d049bb);
+  for (let index = 0; index < darkCount; index++) mask[Math.floor((index + offset) * count / darkCount) % count] = true;
+  return mask;
 }
-
-function gridDimensions(samples) {
-  let columns = 1;
-  while (columns < samples.length && samples[columns].canonicalY === samples[0].canonicalY) columns++;
-  return { columns, rows: samples.length / columns };
-}
-
-function bilinear(topLeft, topRight, bottomLeft, bottomRight, u, v) {
-  return topLeft * (1 - u) * (1 - v)
-    + topRight * u * (1 - v)
-    + bottomLeft * (1 - u) * v
-    + bottomRight * u * v;
-}
-
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || '3D rain shader compilation failed.');
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || '3D dot-rain shader compilation failed.');
   return shader;
 }
-
-function makeStreakProgram(gl, shaderData) {
+function makeTeardropProgram(gl, shaderData) {
   const vertexSource = [
     '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
-    `in vec2 a_vertex;\nin vec2 a_center;\nin float a_phase;\nin float a_length;\nin float a_width;\nin float a_opacity;\nin float a_speedFactor;\nin float a_topOpacity;\nuniform vec2 u_pixelsToClip;\nuniform float u_transitionOpacity;\nuniform float u_fallingCycles;\nout vec2 v_local;\nout float v_opacity;\nout float v_topOpacity;\nvoid main() {\n  float verticalPhase = fract(a_phase - u_fallingCycles * a_speedFactor);\n  float altitude = ${COLUMN_BOTTOM_METRES}.0 + verticalPhase * (${COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES}.0 - a_length);\n  vec4 lower = projectTileFor3D(a_center, altitude);\n  vec4 upper = projectTileFor3D(a_center, altitude + a_length);\n  vec2 lowerNdc = lower.xy / lower.w;\n  vec2 upperNdc = upper.xy / upper.w;\n  vec2 direction = upperNdc - lowerNdc;\n  float directionLength = length(direction);\n  vec2 side = directionLength > 0.000001 ? vec2(-direction.y, direction.x) / directionLength : vec2(1.0, 0.0);\n  float along = (a_vertex.y + 1.0) * 0.5;\n  vec4 point = mix(lower, upper, along);\n  vec2 ndc = mix(lowerNdc, upperNdc, along) + side * a_vertex.x * a_width * u_pixelsToClip;\n  gl_Position = vec4(ndc * point.w, point.z, point.w);\n  v_local = a_vertex;\n  v_opacity = a_opacity * u_transitionOpacity;\n  v_topOpacity = a_topOpacity;\n}`
+    `in vec2 a_vertex;
+in vec2 a_center;
+in float a_phase;
+in float a_speed;
+in float a_rainRadius;
+in float a_sizeVariation;
+in float a_dark;
+uniform vec2 u_pixelsToClip;
+uniform float u_transitionOpacity;
+uniform float u_fallingCycles;
+out vec2 v_local;
+out float v_dark;
+out float v_opacity;
+void main() {
+  float verticalPhase = fract(a_phase - u_fallingCycles * a_speed);
+  float altitude = ${COLUMN_BOTTOM_METRES}.0 + verticalPhase * ${COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES}.0;
+  vec4 center = projectTileFor3D(a_center, altitude);
+  vec4 radial = projectTileFor3D(a_center, altitude + 100.0);
+  vec4 radiusPoint = projectTileFor3D(a_center + vec2(a_rainRadius, 0.0), altitude);
+  vec2 centerNdc = center.xy / center.w;
+  vec2 radialDirection = radial.xy / radial.w - centerNdc;
+  float radialLength = length(radialDirection);
+  vec2 up = radialLength > 0.000001 ? radialDirection / radialLength : vec2(0.0, 1.0);
+  vec2 side = vec2(-up.y, up.x);
+  float dotRadiusPixels = length(radiusPoint.xy / radiusPoint.w - centerNdc) / length(u_pixelsToClip);
+  float widthPixels = max(0.75, dotRadiusPixels * 2.0 * ${DROP_WIDTH_OF_DOT_DIAMETER} * a_sizeVariation);
+  float heightPixels = widthPixels * ${DROP_HEIGHT_OF_WIDTH};
+  vec2 ndc = centerNdc + side * a_vertex.x * widthPixels * u_pixelsToClip + up * a_vertex.y * heightPixels * u_pixelsToClip;
+  gl_Position = vec4(ndc * center.w, center.z, center.w);
+  v_local = a_vertex;
+  v_dark = a_dark;
+  v_opacity = u_transitionOpacity;
+}`
   ].join('\n');
   const fragmentSource = [
-    '#version 300 es', 'precision highp float;', 'in vec2 v_local;\nin float v_opacity;\nin float v_topOpacity;\nout vec4 fragColor;',
-    'void main() {\n  vec2 q = abs(v_local) - vec2(0.72, 0.72);\n  float distanceToCapsule = length(max(q, 0.0)) - 0.28;\n  float edge = max(fwidth(distanceToCapsule), 0.012);\n  float alpha = 1.0 - smoothstep(-edge, edge, distanceToCapsule);\n  float trailOpacity = mix(1.0, v_topOpacity, smoothstep(-1.0, 1.0, v_local.y));\n  fragColor = vec4(0.20, 0.66, 1.0, alpha * trailOpacity * v_opacity);\n}'
+    '#version 300 es', 'precision highp float;',
+    'in vec2 v_local;\nin float v_dark;\nin float v_opacity;\nout vec4 fragColor;',
+    `void main() {
+  // Lower circular bulb plus upper triangle: point faces away from Earth.
+  vec2 bulb = v_local - vec2(0.0, -0.34);
+  float bulbDistance = length(bulb) - 0.66;
+  float triangleHalfWidth = 0.66 * clamp((1.0 - v_local.y) / 1.34, 0.0, 1.0);
+  float triangleDistance = max(abs(v_local.x) - triangleHalfWidth, max(-v_local.y - 0.34, v_local.y - 1.0));
+  float edge = max(fwidth(min(bulbDistance, triangleDistance)), 0.012);
+  float alpha = 1.0 - smoothstep(-edge, edge, min(bulbDistance, triangleDistance));
+  vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), v_dark);
+  fragColor = vec4(color, alpha * v_opacity);
+}`
   ].join('\n');
   const program = gl.createProgram();
   gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
   gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
   gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || '3D rain shader linking failed.');
-  return {
-    program,
-    locations: Object.fromEntries(['a_vertex', 'a_center', 'a_phase', 'a_length', 'a_width', 'a_opacity', 'a_speedFactor', 'a_topOpacity', 'u_pixelsToClip', 'u_transitionOpacity', 'u_fallingCycles', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)]))
-  };
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || '3D dot-rain shader linking failed.');
+  return { program, locations: Object.fromEntries(['a_vertex', 'a_center', 'a_phase', 'a_speed', 'a_rainRadius', 'a_sizeVariation', 'a_dark', 'u_pixelsToClip', 'u_transitionOpacity', 'u_fallingCycles', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)])) };
 }
-
 class InstanceWriter {
   constructor() { this.values = new Float32Array(); this.length = 0; }
   reset() { this.length = 0; }
-  push(centerX, centerY, phase, length, width, opacity, speedFactor, topOpacity) {
+  push(...values) {
     const next = this.length + INSTANCE_STRIDE;
-    if (next > this.values.length) {
-      const values = new Float32Array(Math.max(next, this.values.length * 2, 1024));
-      values.set(this.values);
-      this.values = values;
-    }
-    this.values.set([centerX, centerY, phase, length, width, opacity, speedFactor, topOpacity], this.length);
-    this.length = next;
+    if (next > this.values.length) { const buffer = new Float32Array(Math.max(next, this.values.length * 2, 1024)); buffer.set(this.values); this.values = buffer; }
+    this.values.set(values, this.length); this.length = next;
   }
-  finish() { return this.values.subarray(0, this.length); }
+  finish() { return this.values.slice(0, this.length); }
 }
-
 function has3DRain(samples) { return samples.length && samples[0].level >= 13; }
 
 export class GeographicRainLayer {
   constructor() {
-    this.id = 'geographic-3d-rain';
-    this.type = 'custom';
-    this.renderingMode = '3d';
-    this.samples = [];
-    this.transition = null;
-    this.transitionProgress = 1;
+    this.id = 'geographic-3d-rain'; this.type = 'custom'; this.renderingMode = '3d';
+    this.pyramid = new GeographicSymbolPyramid(); this.samples = []; this.transition = null; this.transitionProgress = 1;
     this.writer = new InstanceWriter();
-    this.streakInstances = { current: new Float32Array(), from: new Float32Array(), to: new Float32Array() };
-    this.streakCounts = { current: 0, from: 0, to: 0 };
-    this.streakBufferCapacity = { current: 0, from: 0, to: 0 };
-    this.buffersDirty = true;
-    this.fixedFrame = null;
-    this.fallingCycles = 0;
+    this.dropInstances = { current: new Float32Array(), from: new Float32Array(), to: new Float32Array() };
+    this.dropCounts = { current: 0, from: 0, to: 0 }; this.populationStats = { current: null, from: null, to: null };
+    this.dropBufferCapacity = { current: 0, from: 0, to: 0 }; this.buffersDirty = true; this.fixedFrame = null; this.fallingCycles = 0;
   }
-
   onAdd(map, gl) {
-    this.map = map;
-    this.quadBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, QUAD, gl.STATIC_DRAW);
-    this.streakBuffers = Object.fromEntries(Object.keys(this.streakInstances).map((key) => [key, gl.createBuffer()]));
+    this.map = map; this.quadBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer); gl.bufferData(gl.ARRAY_BUFFER, QUAD, gl.STATIC_DRAW);
+    this.dropBuffers = Object.fromEntries(Object.keys(this.dropInstances).map((key) => [key, gl.createBuffer()]));
   }
-
   onRemove(map, gl) {
     if (this.programs) for (const program of this.programs.values()) gl.deleteProgram(program.program);
-    for (const buffer of [...Object.values(this.streakBuffers || {}), this.quadBuffer]) if (buffer) gl.deleteBuffer(buffer);
+    for (const buffer of [...Object.values(this.dropBuffers || {}), this.quadBuffer]) if (buffer) gl.deleteBuffer(buffer);
   }
-
   setFixedWeatherTime(time) { this.fixedFrame = prepareGeographicFieldFrame(time); }
-
   setSamples(samples) {
-    this.samples = samples;
-    this.transition = null;
-    this.setStreakInstances('current', has3DRain(samples) ? this.buildInstances(samples) : new Float32Array());
-    this.buffersDirty = true;
-    this.map?.triggerRepaint();
+    this.samples = samples; this.transition = null;
+    this.setDropInstances('current', has3DRain(samples) ? this.buildInstances(samples) : { instances: new Float32Array(), stats: null });
+    this.buffersDirty = true; this.map?.triggerRepaint();
   }
-
   setTransition(fromSamples, toSamples, progress = 0) {
-    this.samples = toSamples;
-    this.transition = { fromSamples, toSamples };
-    this.transitionProgress = progress;
-    this.setStreakInstances('from', has3DRain(fromSamples) ? this.buildInstances(fromSamples) : new Float32Array());
-    this.setStreakInstances('to', has3DRain(toSamples) ? this.buildInstances(toSamples) : new Float32Array());
-    this.buffersDirty = true;
-    this.map?.triggerRepaint();
+    this.samples = toSamples; this.transition = { fromSamples, toSamples }; this.transitionProgress = progress;
+    this.setDropInstances('from', has3DRain(fromSamples) ? this.buildInstances(fromSamples) : { instances: new Float32Array(), stats: null });
+    this.setDropInstances('to', has3DRain(toSamples) ? this.buildInstances(toSamples) : { instances: new Float32Array(), stats: null });
+    this.buffersDirty = true; this.map?.triggerRepaint();
   }
-
   setTransitionProgress(progress) { this.transitionProgress = progress; this.map?.triggerRepaint(); }
   setFallingCycles(cycles) { this.fallingCycles = cycles; this.map?.triggerRepaint(); }
-
-  setStreakInstances(key, instances) {
-    this.streakInstances[key] = instances;
-    this.streakCounts[key] = instances.length / INSTANCE_STRIDE;
-  }
-
+  setDropInstances(key, result) { this.dropInstances[key] = result.instances; this.dropCounts[key] = result.instances.length / INSTANCE_STRIDE; this.populationStats[key] = result.stats; }
   buildInstances(samples) {
-    if (!this.fixedFrame || !samples.length) return new Float32Array();
-    const value = { rain: 0, storm: 0, hail: 0 };
-    const rain = new Float32Array(samples.length);
-    for (let index = 0; index < samples.length; index++) {
-      const point = geographicToSynthetic(...samples[index].lngLat);
-      geographicPreparedIntensityAt(this.fixedFrame, point, value);
-      rain[index] = value.rain;
-    }
-    const { columns, rows } = gridDimensions(samples);
+    if (!this.fixedFrame || !samples.length) return { instances: new Float32Array(), stats: null };
+    const level = samples[0].level;
+    const state = this.pyramid.evaluate([level], this.fixedFrame)[level];
+    const { anchors, samples: pyramidSamples } = this.pyramid.levels.get(level);
+    const stats = { level, emitters: 0, drops: 0, threeDropEmitters: 0, fourDropEmitters: 0, fiveDropEmitters: 0, normalDrops: 0, darkDrops: 0 };
     this.writer.reset();
-    for (let row = 0; row < rows - 1; row++) {
-      for (let column = 0; column < columns - 1; column++) {
-        const topLeftIndex = row * columns + column;
-        const sample = samples[topLeftIndex];
-        const rain00 = rain[topLeftIndex];
-        const rain10 = rain[topLeftIndex + 1];
-        const rain01 = rain[topLeftIndex + columns];
-        const rain11 = rain[topLeftIndex + columns + 1];
-        const averageStrength = smoothstep(0.035, 0.90, (rain00 + rain10 + rain01 + rain11) * 0.25);
-        if (averageStrength <= 0) continue;
-        const count = dropletCount(sample, averageStrength);
-        for (let slot = 0; slot < count; slot++) {
-          const [u, v] = lowDiscrepancyCellPosition(sample, slot);
-          const localRain = bilinear(rain00, rain10, rain01, rain11, u, v);
-          const strength = smoothstep(0.035, 0.90, localRain);
-          if (strength <= 0) continue;
-          const selector = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x9e3779b9);
-          if (selector > Math.min(1, strength / averageStrength)) continue;
-          const phase = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x85ebca6b);
-          const variation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xc2b2ae35);
-          const opacityVariation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x27d4eb2f);
-          const speedFactor = 0.85 + hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x165667b1) * 0.3;
-          const topOpacity = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xd3a2646c) * 0.2;
-          // The field is cached only at shared grid corners. This position is a
-          // stable low-discrepancy candidate inside the reconstructed cell.
-          const scatterX = u * sample.spacing;
-          const scatterY = v * sample.spacing;
-          const length = 145 + strength * 370 + variation * 95;
-          const width = 0.85 + strength * 1.35 + variation * 0.3;
-          const opacity = (0.24 + strength * 0.58) * (0.78 + opacityVariation * 0.22);
-          this.writer.push(sample.mercator[0] + scatterX, sample.mercator[1] + scatterY, phase, length, width, opacity, speedFactor, topOpacity);
-        }
+    for (let index = 0; index < state.rainRadius.length; index++) {
+      const rainRadius = state.rainRadius[index]; if (rainRadius <= 0) continue;
+      const sample = pyramidSamples[index]; const count = dropCountForRadius(rainRadius, sample.spacing);
+      const strongFraction = clamp(state.strongRadius[index] ** 2 / (rainRadius ** 2), 0, 1);
+      const darkSlots = darkSlotMask(count, strongFraction, sample.canonicalX, sample.canonicalY);
+      const basePhase = hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x85ebca6b);
+      const speed = COLUMN_SPEED_MIN + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x165667b1) * (COLUMN_SPEED_MAX - COLUMN_SPEED_MIN);
+      const weights = Array.from({ length: count }, (_, slot) => 0.8 + hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xc2b2ae35) * 0.4);
+      const weightSum = weights.reduce((sum, weight) => sum + weight, 0); let cumulative = 0;
+      for (let slot = 0; slot < count; slot++) {
+        const dark = darkSlots[slot] ? 1 : 0;
+        this.writer.push(anchors[index * 2], anchors[index * 2 + 1], fract(basePhase + cumulative / weightSum), speed, rainRadius, 0.9 + hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x27d4eb2f) * 0.2, dark);
+        cumulative += weights[slot]; stats.drops++; if (dark) stats.darkDrops++; else stats.normalDrops++;
       }
+      stats.emitters++; if (count === 3) stats.threeDropEmitters++; else if (count === 4) stats.fourDropEmitters++; else stats.fiveDropEmitters++;
     }
-    return this.writer.finish();
+    return { instances: this.writer.finish(), stats };
   }
-
   uploadBuffers(gl) {
     if (!this.buffersDirty) return;
-    for (const key of Object.keys(this.streakInstances)) {
-      const bytes = this.streakInstances[key].byteLength;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.streakBuffers[key]);
-      if (bytes > this.streakBufferCapacity[key]) {
-        gl.bufferData(gl.ARRAY_BUFFER, bytes, gl.STATIC_DRAW);
-        this.streakBufferCapacity[key] = bytes;
-      }
-      if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.streakInstances[key]);
+    for (const key of Object.keys(this.dropInstances)) {
+      const bytes = this.dropInstances[key].byteLength; gl.bindBuffer(gl.ARRAY_BUFFER, this.dropBuffers[key]);
+      if (bytes > this.dropBufferCapacity[key]) { gl.bufferData(gl.ARRAY_BUFFER, bytes, gl.STATIC_DRAW); this.dropBufferCapacity[key] = bytes; }
+      if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.dropInstances[key]);
     }
     this.buffersDirty = false;
   }
-
-  renderStreakGroup(gl, entry, projection, key, opacity) {
-    if (!this.streakCounts[key] || opacity <= 0) return;
-    const { locations } = entry;
-    gl.useProgram(entry.program);
+  renderDropGroup(gl, entry, projection, key, opacity) {
+    if (!this.dropCounts[key] || opacity <= 0) return;
+    const { locations } = entry; gl.useProgram(entry.program);
     setGeographicProjection(gl, { matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix, tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition }, projection);
-    gl.uniform2f(locations.u_pixelsToClip, 2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight);
-    gl.uniform1f(locations.u_transitionOpacity, opacity);
-    gl.uniform1f(locations.u_fallingCycles, this.fallingCycles);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-    gl.enableVertexAttribArray(locations.a_vertex);
-    gl.vertexAttribPointer(locations.a_vertex, 2, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.streakBuffers[key]);
-    for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_phase, 1, 8], [locations.a_length, 1, 12], [locations.a_width, 1, 16], [locations.a_opacity, 1, 20], [locations.a_speedFactor, 1, 24], [locations.a_topOpacity, 1, 28]]) {
-      gl.enableVertexAttribArray(location);
-      gl.vertexAttribPointer(location, size, gl.FLOAT, false, INSTANCE_BYTES, offset);
-      gl.vertexAttribDivisor(location, 1);
-    }
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.streakCounts[key]);
-    for (const location of [locations.a_center, locations.a_phase, locations.a_length, locations.a_width, locations.a_opacity, locations.a_speedFactor, locations.a_topOpacity]) gl.vertexAttribDivisor(location, 0);
+    gl.uniform2f(locations.u_pixelsToClip, 2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight); gl.uniform1f(locations.u_transitionOpacity, opacity); gl.uniform1f(locations.u_fallingCycles, this.fallingCycles);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer); gl.enableVertexAttribArray(locations.a_vertex); gl.vertexAttribPointer(locations.a_vertex, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.dropBuffers[key]);
+    for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_phase, 1, 8], [locations.a_speed, 1, 12], [locations.a_rainRadius, 1, 16], [locations.a_sizeVariation, 1, 20], [locations.a_dark, 1, 24]]) { gl.enableVertexAttribArray(location); gl.vertexAttribPointer(location, size, gl.FLOAT, false, INSTANCE_BYTES, offset); gl.vertexAttribDivisor(location, 1); }
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.dropCounts[key]);
+    for (const location of [locations.a_center, locations.a_phase, locations.a_speed, locations.a_rainRadius, locations.a_sizeVariation, locations.a_dark]) gl.vertexAttribDivisor(location, 0);
   }
-
   render(gl, args) {
-    this.uploadBuffers(gl);
-    this.programs ||= new Map();
-    let program = this.programs.get(args.shaderData.variantName);
-    if (!program) {
-      program = makeStreakProgram(gl, args.shaderData);
-      this.programs.set(args.shaderData.variantName, program);
-    }
-    gl.enable(gl.BLEND);
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthMask(false);
-    if (this.transition) {
-      this.renderStreakGroup(gl, program, args.defaultProjectionData, 'from', 1 - this.transitionProgress);
-      this.renderStreakGroup(gl, program, args.defaultProjectionData, 'to', this.transitionProgress);
-    } else {
-      this.renderStreakGroup(gl, program, args.defaultProjectionData, 'current', 1);
-    }
+    this.uploadBuffers(gl); this.programs ||= new Map(); let program = this.programs.get(args.shaderData.variantName);
+    if (!program) { program = makeTeardropProgram(gl, args.shaderData); this.programs.set(args.shaderData.variantName, program); }
+    gl.enable(gl.BLEND); gl.enable(gl.DEPTH_TEST); gl.depthMask(false);
+    if (this.transition) { this.renderDropGroup(gl, program, args.defaultProjectionData, 'from', 1 - this.transitionProgress); this.renderDropGroup(gl, program, args.defaultProjectionData, 'to', this.transitionProgress); } else this.renderDropGroup(gl, program, args.defaultProjectionData, 'current', 1);
     gl.depthMask(true);
   }
 }
