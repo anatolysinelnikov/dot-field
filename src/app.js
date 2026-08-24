@@ -8,6 +8,7 @@ const FIXED_WEATHER_TIME = 0.5;
 // Camera inspection is intentionally independent from the L14 weather cap.
 const CAMERA_MAX_ZOOM = 13;
 const AUTO_ROTATE_DEGREES_PER_SECOND = 2.5;
+const FALL_CYCLE_SECONDS = 7;
 const MAX_SAMPLING_LATITUDE = 85;
 const shortSide = Math.min(document.querySelector('#map').clientWidth, document.querySelector('#map').clientHeight);
 const initialMinZoom = shortSide <= 680 ? 1.5 : 3;
@@ -15,6 +16,7 @@ const resetView = document.querySelector('#resetView');
 const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
 const autoRotate = document.querySelector('#autoRotate');
+const fallingRain = document.querySelector('#fallingRain');
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 async function loadMapTilerKey() {
@@ -37,7 +39,7 @@ map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top
 
 const rainLayer = new GeographicRainLayer();
 rainLayer.setFixedWeatherTime(FIXED_WEATHER_TIME);
-const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, resettingView: false, mapReady: false, autoRotating: false };
+const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, resettingView: false, mapReady: false, autoRotating: false, falling: false, fallingProgress: 0 };
 let applicationFrameQueued = false;
 let lastApplicationFrame = null;
 let lastMapErrorSignature = '';
@@ -114,6 +116,17 @@ function setAutoRotation(autoRotating) {
   autoRotate.setAttribute('aria-label', autoRotating ? 'Disable auto rotation' : 'Enable auto rotation');
   if (autoRotating) wakeApplicationFrame();
 }
+function hasVisible3DRain() {
+  if (state.lodTransition) return state.lodTransition.fromLevel >= 13 || state.lodTransition.toLevel >= 13;
+  return state.lod.level >= 13;
+}
+function setFalling(falling) {
+  state.falling = falling;
+  fallingRain.textContent = falling ? '❚❚' : '▶';
+  fallingRain.setAttribute('aria-pressed', String(falling));
+  fallingRain.setAttribute('aria-label', falling ? 'Pause falling rain' : 'Start falling rain');
+  if (falling && hasVisible3DRain()) wakeApplicationFrame();
+}
 function wakeApplicationFrame() {
   if (applicationFrameQueued) return;
   if (lastApplicationFrame === null) lastApplicationFrame = performance.now();
@@ -124,7 +137,11 @@ function wakeApplicationFrame() {
     lastApplicationFrame = now;
     if (state.autoRotating) map.setBearing(map.getBearing() + AUTO_ROTATE_DEGREES_PER_SECOND * delta);
     updateLODTransition(now);
-    if (state.lodTransition || state.autoRotating) wakeApplicationFrame();
+    if (state.falling && hasVisible3DRain()) {
+      state.fallingProgress = (state.fallingProgress + delta / FALL_CYCLE_SECONDS) % 1;
+      rainLayer.setAnimationProgress(state.fallingProgress);
+    }
+    if (state.lodTransition || state.autoRotating || (state.falling && hasVisible3DRain())) wakeApplicationFrame();
     else lastApplicationFrame = null;
   });
 }
@@ -132,6 +149,7 @@ function wakeApplicationFrame() {
 zoomIn.addEventListener('click', () => map.zoomIn());
 zoomOut.addEventListener('click', () => map.zoomOut());
 autoRotate.addEventListener('click', () => setAutoRotation(!state.autoRotating));
+fallingRain.addEventListener('click', () => setFalling(!state.falling));
 resetView.addEventListener('click', resetMapView);
 map.on('style.load', () => { if (!state.mapReady) map.setProjection({ type: 'globe' }); initializeRainLayer(); });
 map.on('move', updateLogicalSamplingZoom);

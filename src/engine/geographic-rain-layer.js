@@ -13,6 +13,8 @@ const CELL_FOOTPRINT = 0.9;
 const PLASTIC_RATIO = 1.3247179572447458;
 const INSTANCE_STRIDE = 6;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
+const FLAT_INSTANCE_STRIDE = 4;
+const FLAT_INSTANCE_BYTES = FLAT_INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
 const QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
 
 function hashUnit(canonicalX, canonicalY, slot, salt) {
@@ -64,10 +66,10 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
-function makeProgram(gl, shaderData) {
+function makeStreakProgram(gl, shaderData) {
   const vertexSource = [
     '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
-    'in vec2 a_vertex;\nin vec2 a_center;\nin float a_altitude;\nin float a_length;\nin float a_width;\nin float a_opacity;\nuniform vec2 u_pixelsToClip;\nuniform float u_transitionOpacity;\nout vec2 v_local;\nout float v_opacity;\nvoid main() {\n  vec4 lower = projectTileFor3D(a_center, a_altitude);\n  vec4 upper = projectTileFor3D(a_center, a_altitude + a_length);\n  vec2 lowerNdc = lower.xy / lower.w;\n  vec2 upperNdc = upper.xy / upper.w;\n  vec2 direction = upperNdc - lowerNdc;\n  float directionLength = length(direction);\n  vec2 side = directionLength > 0.000001 ? vec2(-direction.y, direction.x) / directionLength : vec2(1.0, 0.0);\n  float along = (a_vertex.y + 1.0) * 0.5;\n  vec4 point = mix(lower, upper, along);\n  vec2 ndc = mix(lowerNdc, upperNdc, along) + side * a_vertex.x * a_width * u_pixelsToClip;\n  gl_Position = vec4(ndc * point.w, point.z, point.w);\n  v_local = a_vertex;\n  v_opacity = a_opacity * u_transitionOpacity;\n}'
+    `in vec2 a_vertex;\nin vec2 a_center;\nin float a_phase;\nin float a_length;\nin float a_width;\nin float a_opacity;\nuniform vec2 u_pixelsToClip;\nuniform float u_transitionOpacity;\nuniform float u_animationProgress;\nout vec2 v_local;\nout float v_opacity;\nvoid main() {\n  float verticalPhase = fract(a_phase - u_animationProgress);\n  float altitude = ${COLUMN_BOTTOM_METRES}.0 + verticalPhase * (${COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES}.0 - a_length);\n  vec4 lower = projectTileFor3D(a_center, altitude);\n  vec4 upper = projectTileFor3D(a_center, altitude + a_length);\n  vec2 lowerNdc = lower.xy / lower.w;\n  vec2 upperNdc = upper.xy / upper.w;\n  vec2 direction = upperNdc - lowerNdc;\n  float directionLength = length(direction);\n  vec2 side = directionLength > 0.000001 ? vec2(-direction.y, direction.x) / directionLength : vec2(1.0, 0.0);\n  float along = (a_vertex.y + 1.0) * 0.5;\n  vec4 point = mix(lower, upper, along);\n  vec2 ndc = mix(lowerNdc, upperNdc, along) + side * a_vertex.x * a_width * u_pixelsToClip;\n  gl_Position = vec4(ndc * point.w, point.z, point.w);\n  v_local = a_vertex;\n  v_opacity = a_opacity * u_transitionOpacity;\n}`
   ].join('\n');
   const fragmentSource = [
     '#version 300 es', 'precision highp float;', 'in vec2 v_local;\nin float v_opacity;\nout vec4 fragColor;',
@@ -80,7 +82,27 @@ function makeProgram(gl, shaderData) {
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || '3D rain shader linking failed.');
   return {
     program,
-    locations: Object.fromEntries(['a_vertex', 'a_center', 'a_altitude', 'a_length', 'a_width', 'a_opacity', 'u_pixelsToClip', 'u_transitionOpacity', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)]))
+    locations: Object.fromEntries(['a_vertex', 'a_center', 'a_phase', 'a_length', 'a_width', 'a_opacity', 'u_pixelsToClip', 'u_transitionOpacity', 'u_animationProgress', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)]))
+  };
+}
+
+function makeFlatProgram(gl, shaderData) {
+  const vertexSource = [
+    '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
+    'in vec2 a_vertex;\nin vec2 a_center;\nin float a_radius;\nin float a_opacity;\nout vec2 v_local;\nout float v_opacity;\nuniform float u_transitionOpacity;\nvoid main() {\n  gl_Position = projectTile(a_center + a_vertex * a_radius);\n  v_local = a_vertex;\n  v_opacity = a_opacity * u_transitionOpacity;\n}'
+  ].join('\n');
+  const fragmentSource = [
+    '#version 300 es', 'precision highp float;', 'in vec2 v_local;\nin float v_opacity;\nout vec4 fragColor;',
+    'void main() {\n  float distanceToCenter = length(v_local);\n  float edge = fwidth(distanceToCenter);\n  float alpha = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distanceToCenter);\n  fragColor = vec4(0.05, 0.48, 1.0, alpha * v_opacity);\n}'
+  ].join('\n');
+  const program = gl.createProgram();
+  gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
+  gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'Flat rain shader linking failed.');
+  return {
+    program,
+    locations: Object.fromEntries(['a_vertex', 'a_center', 'a_radius', 'a_opacity', 'u_transitionOpacity', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)]))
   };
 }
 
@@ -100,6 +122,24 @@ class InstanceWriter {
   finish() { return this.values.subarray(0, this.length); }
 }
 
+class FlatInstanceWriter {
+  constructor() { this.values = new Float32Array(); this.length = 0; }
+  reset() { this.length = 0; }
+  push(centerX, centerY, radius, opacity) {
+    const next = this.length + FLAT_INSTANCE_STRIDE;
+    if (next > this.values.length) {
+      const values = new Float32Array(Math.max(next, this.values.length * 2, 256));
+      values.set(this.values);
+      this.values = values;
+    }
+    this.values.set([centerX, centerY, radius, opacity], this.length);
+    this.length = next;
+  }
+  finish() { return this.values.subarray(0, this.length); }
+}
+
+function isFlatLevel(samples) { return samples.length && samples[0].level <= 12; }
+
 export class GeographicRainLayer {
   constructor() {
     this.id = 'geographic-3d-rain';
@@ -109,11 +149,16 @@ export class GeographicRainLayer {
     this.transition = null;
     this.transitionProgress = 1;
     this.writer = new InstanceWriter();
-    this.instances = { current: new Float32Array(), from: new Float32Array(), to: new Float32Array() };
-    this.counts = { current: 0, from: 0, to: 0 };
-    this.bufferCapacity = { current: 0, from: 0, to: 0 };
+    this.flatWriter = new FlatInstanceWriter();
+    this.streakInstances = { current: new Float32Array(), from: new Float32Array(), to: new Float32Array() };
+    this.flatInstances = { current: new Float32Array(), from: new Float32Array(), to: new Float32Array() };
+    this.streakCounts = { current: 0, from: 0, to: 0 };
+    this.flatCounts = { current: 0, from: 0, to: 0 };
+    this.streakBufferCapacity = { current: 0, from: 0, to: 0 };
+    this.flatBufferCapacity = { current: 0, from: 0, to: 0 };
     this.buffersDirty = true;
     this.fixedFrame = null;
+    this.animationProgress = 0;
   }
 
   onAdd(map, gl) {
@@ -121,12 +166,13 @@ export class GeographicRainLayer {
     this.quadBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, QUAD, gl.STATIC_DRAW);
-    this.instanceBuffers = Object.fromEntries(Object.keys(this.instances).map((key) => [key, gl.createBuffer()]));
+    this.streakBuffers = Object.fromEntries(Object.keys(this.streakInstances).map((key) => [key, gl.createBuffer()]));
+    this.flatBuffers = Object.fromEntries(Object.keys(this.flatInstances).map((key) => [key, gl.createBuffer()]));
   }
 
   onRemove(map, gl) {
-    if (this.programs) for (const entry of this.programs.values()) gl.deleteProgram(entry.program);
-    for (const buffer of [...Object.values(this.instanceBuffers || {}), this.quadBuffer]) if (buffer) gl.deleteBuffer(buffer);
+    if (this.programs) for (const entry of this.programs.values()) { gl.deleteProgram(entry.streak.program); gl.deleteProgram(entry.flat.program); }
+    for (const buffer of [...Object.values(this.streakBuffers || {}), ...Object.values(this.flatBuffers || {}), this.quadBuffer]) if (buffer) gl.deleteBuffer(buffer);
   }
 
   setFixedWeatherTime(time) { this.fixedFrame = prepareGeographicFieldFrame(time); }
@@ -134,8 +180,8 @@ export class GeographicRainLayer {
   setSamples(samples) {
     this.samples = samples;
     this.transition = null;
-    this.instances.current = this.buildInstances(samples);
-    this.counts.current = this.instances.current.length / INSTANCE_STRIDE;
+    if (isFlatLevel(samples)) this.setFlatInstances('current', this.buildFlatInstances(samples));
+    else this.setStreakInstances('current', this.buildInstances(samples));
     this.buffersDirty = true;
     this.map?.triggerRepaint();
   }
@@ -144,15 +190,30 @@ export class GeographicRainLayer {
     this.samples = toSamples;
     this.transition = { fromSamples, toSamples };
     this.transitionProgress = progress;
-    this.instances.from = this.buildInstances(fromSamples);
-    this.instances.to = this.buildInstances(toSamples);
-    this.counts.from = this.instances.from.length / INSTANCE_STRIDE;
-    this.counts.to = this.instances.to.length / INSTANCE_STRIDE;
+    if (isFlatLevel(fromSamples)) this.setFlatInstances('from', this.buildFlatInstances(fromSamples));
+    else this.setStreakInstances('from', this.buildInstances(fromSamples));
+    if (isFlatLevel(toSamples)) this.setFlatInstances('to', this.buildFlatInstances(toSamples));
+    else this.setStreakInstances('to', this.buildInstances(toSamples));
     this.buffersDirty = true;
     this.map?.triggerRepaint();
   }
 
   setTransitionProgress(progress) { this.transitionProgress = progress; this.map?.triggerRepaint(); }
+  setAnimationProgress(progress) { this.animationProgress = progress; this.map?.triggerRepaint(); }
+
+  setStreakInstances(key, instances) {
+    this.streakInstances[key] = instances;
+    this.streakCounts[key] = instances.length / INSTANCE_STRIDE;
+    this.flatInstances[key] = new Float32Array();
+    this.flatCounts[key] = 0;
+  }
+
+  setFlatInstances(key, instances) {
+    this.flatInstances[key] = instances;
+    this.flatCounts[key] = instances.length / FLAT_INSTANCE_STRIDE;
+    this.streakInstances[key] = new Float32Array();
+    this.streakCounts[key] = 0;
+  }
 
   buildInstances(samples) {
     if (!this.fixedFrame || !samples.length) return new Float32Array();
@@ -191,63 +252,115 @@ export class GeographicRainLayer {
           const scatterX = u * sample.spacing;
           const scatterY = v * sample.spacing;
           const length = 145 + strength * 370 + variation * 95;
-          const altitude = COLUMN_BOTTOM_METRES + phase * Math.max(1, COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES - length);
           const width = 0.85 + strength * 1.35 + variation * 0.3;
           const opacity = (0.24 + strength * 0.58) * (0.78 + opacityVariation * 0.22);
-          this.writer.push(sample.mercator[0] + scatterX, sample.mercator[1] + scatterY, altitude, length, width, opacity);
+          this.writer.push(sample.mercator[0] + scatterX, sample.mercator[1] + scatterY, phase, length, width, opacity);
         }
       }
     }
     return this.writer.finish();
   }
 
+  buildFlatInstances(samples) {
+    if (!this.fixedFrame || !samples.length) return new Float32Array();
+    const value = { rain: 0, storm: 0, hail: 0 };
+    this.flatWriter.reset();
+    for (const sample of samples) {
+      const point = geographicToSynthetic(...sample.lngLat);
+      geographicPreparedIntensityAt(this.fixedFrame, point, value);
+      const strength = smoothstep(0.035, 0.90, value.rain);
+      if (strength <= 0) continue;
+      const radius = sample.spacing * (0.22 + strength * 0.54);
+      const opacity = 0.24 + strength * 0.62;
+      this.flatWriter.push(sample.mercator[0], sample.mercator[1], radius, opacity);
+    }
+    return this.flatWriter.finish();
+  }
+
   uploadBuffers(gl) {
     if (!this.buffersDirty) return;
-    for (const key of Object.keys(this.instances)) {
-      const bytes = this.instances[key].byteLength;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[key]);
-      if (bytes > this.bufferCapacity[key]) {
+    for (const key of Object.keys(this.streakInstances)) {
+      const bytes = this.streakInstances[key].byteLength;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.streakBuffers[key]);
+      if (bytes > this.streakBufferCapacity[key]) {
         gl.bufferData(gl.ARRAY_BUFFER, bytes, gl.STATIC_DRAW);
-        this.bufferCapacity[key] = bytes;
+        this.streakBufferCapacity[key] = bytes;
       }
-      if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instances[key]);
+      if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.streakInstances[key]);
+    }
+    for (const key of Object.keys(this.flatInstances)) {
+      const bytes = this.flatInstances[key].byteLength;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.flatBuffers[key]);
+      if (bytes > this.flatBufferCapacity[key]) {
+        gl.bufferData(gl.ARRAY_BUFFER, bytes, gl.STATIC_DRAW);
+        this.flatBufferCapacity[key] = bytes;
+      }
+      if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.flatInstances[key]);
     }
     this.buffersDirty = false;
   }
 
-  renderGroup(gl, entry, projection, key, opacity) {
-    if (!this.counts[key] || opacity <= 0) return;
+  renderStreakGroup(gl, entry, projection, key, opacity) {
+    if (!this.streakCounts[key] || opacity <= 0) return;
     const { locations } = entry;
     gl.useProgram(entry.program);
     setGeographicProjection(gl, { matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix, tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition }, projection);
     gl.uniform2f(locations.u_pixelsToClip, 2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight);
     gl.uniform1f(locations.u_transitionOpacity, opacity);
+    gl.uniform1f(locations.u_animationProgress, this.animationProgress);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
     gl.enableVertexAttribArray(locations.a_vertex);
     gl.vertexAttribPointer(locations.a_vertex, 2, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[key]);
-    for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_altitude, 1, 8], [locations.a_length, 1, 12], [locations.a_width, 1, 16], [locations.a_opacity, 1, 20]]) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.streakBuffers[key]);
+    for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_phase, 1, 8], [locations.a_length, 1, 12], [locations.a_width, 1, 16], [locations.a_opacity, 1, 20]]) {
       gl.enableVertexAttribArray(location);
       gl.vertexAttribPointer(location, size, gl.FLOAT, false, INSTANCE_BYTES, offset);
       gl.vertexAttribDivisor(location, 1);
     }
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.counts[key]);
-    for (const location of [locations.a_center, locations.a_altitude, locations.a_length, locations.a_width, locations.a_opacity]) gl.vertexAttribDivisor(location, 0);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.streakCounts[key]);
+    for (const location of [locations.a_center, locations.a_phase, locations.a_length, locations.a_width, locations.a_opacity]) gl.vertexAttribDivisor(location, 0);
+  }
+
+  renderFlatGroup(gl, entry, projection, key, opacity) {
+    if (!this.flatCounts[key] || opacity <= 0) return;
+    const { locations } = entry;
+    gl.useProgram(entry.program);
+    setGeographicProjection(gl, { matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix, tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition }, projection);
+    gl.uniform1f(locations.u_transitionOpacity, opacity);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
+    gl.enableVertexAttribArray(locations.a_vertex);
+    gl.vertexAttribPointer(locations.a_vertex, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.flatBuffers[key]);
+    for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_radius, 1, 8], [locations.a_opacity, 1, 12]]) {
+      gl.enableVertexAttribArray(location);
+      gl.vertexAttribPointer(location, size, gl.FLOAT, false, FLAT_INSTANCE_BYTES, offset);
+      gl.vertexAttribDivisor(location, 1);
+    }
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.flatCounts[key]);
+    for (const location of [locations.a_center, locations.a_radius, locations.a_opacity]) gl.vertexAttribDivisor(location, 0);
   }
 
   render(gl, args) {
     this.uploadBuffers(gl);
     this.programs ||= new Map();
-    let entry = this.programs.get(args.shaderData.variantName);
-    if (!entry) { entry = makeProgram(gl, args.shaderData); this.programs.set(args.shaderData.variantName, entry); }
+    let programs = this.programs.get(args.shaderData.variantName);
+    if (!programs) {
+      programs = { streak: makeStreakProgram(gl, args.shaderData), flat: makeFlatProgram(gl, args.shaderData) };
+      this.programs.set(args.shaderData.variantName, programs);
+    }
     gl.enable(gl.BLEND);
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(false);
     if (this.transition) {
-      this.renderGroup(gl, entry, args.defaultProjectionData, 'from', 1 - this.transitionProgress);
-      this.renderGroup(gl, entry, args.defaultProjectionData, 'to', this.transitionProgress);
-    } else this.renderGroup(gl, entry, args.defaultProjectionData, 'current', 1);
+      this.renderFlatGroup(gl, programs.flat, args.defaultProjectionData, 'from', 1 - this.transitionProgress);
+      this.renderStreakGroup(gl, programs.streak, args.defaultProjectionData, 'from', 1 - this.transitionProgress);
+      this.renderFlatGroup(gl, programs.flat, args.defaultProjectionData, 'to', this.transitionProgress);
+      this.renderStreakGroup(gl, programs.streak, args.defaultProjectionData, 'to', this.transitionProgress);
+    } else {
+      this.renderFlatGroup(gl, programs.flat, args.defaultProjectionData, 'current', 1);
+      this.renderStreakGroup(gl, programs.streak, args.defaultProjectionData, 'current', 1);
+    }
     gl.depthMask(true);
   }
 }

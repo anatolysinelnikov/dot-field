@@ -106,13 +106,10 @@ button:active { transform: translateY(1px); }
 .render-mode,
 .zoom-stepper button,
 .zoom-reset,
-.auto-rotate { touch-action: manipulation; }
+.auto-rotate,
+.falling-rain { touch-action: manipulation; }
 
 .auto-rotate {
-  position: absolute;
-  z-index: 2;
-  top: max(18px, calc(env(safe-area-inset-top, 0px) + 10px));
-  left: max(20px, calc(env(safe-area-inset-left, 0px) + 12px));
   width: 54px;
   height: 54px;
   padding: 0;
@@ -120,6 +117,28 @@ button:active { transform: translateY(1px); }
   border-radius: var(--control-radius);
   background: var(--control-panel);
   font-size: 22px;
+  line-height: 1;
+  box-shadow: var(--control-shadow);
+  backdrop-filter: var(--control-backdrop);
+}
+
+.scene-motion-controls {
+  position: absolute;
+  z-index: 2;
+  top: max(18px, calc(env(safe-area-inset-top, 0px) + 10px));
+  left: max(20px, calc(env(safe-area-inset-left, 0px) + 12px));
+  display: flex;
+  gap: 8px;
+}
+
+.falling-rain {
+  width: 54px;
+  height: 54px;
+  padding: 0;
+  border: var(--control-border);
+  border-radius: var(--control-radius);
+  background: var(--control-panel);
+  font-size: 19px;
   line-height: 1;
   box-shadow: var(--control-shadow);
   backdrop-filter: var(--control-backdrop);
