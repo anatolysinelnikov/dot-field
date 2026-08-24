@@ -36,9 +36,12 @@ and reprojects the existing L14 rain geometry.
 On a level transition the renderer builds deterministic old and new instance
 sets once, and crossfades them with the existing smooth 0.2-second transition.
 No weather values are reevaluated during camera movement or transition frames.
-Per-sample slot capacity decreases with refinement (L10–L12: 24, L13: 12,
-L14: 4), keeping the practical visible density broadly stable while bounding
-memory and draw work.
+Rain population is area-normalized instead of using a per-level slot table.
+Each sample receives a deterministic rounded budget of
+`1.7 × rainStrength × (sampleSpacing / L14Spacing)²`, bounded at 512 droplets.
+Four finer cells therefore replace one coarse cell without materially changing
+the total rain population. At the fixed frame this produces approximately
+3,031 / 2,992 / 2,976 / 2,951 / 2,960 droplets from L10 through L14.
 
 ## Static 3D rain — `src/engine/geographic-rain-layer.js`
 
@@ -52,9 +55,10 @@ Every potential droplet derives its selector, column phase, length/width,
 opacity variation, and two-axis visual scatter from
 `(canonicalX, canonicalY, slotIndex)` through a stable integer hash. Field
 evaluation remains at the unmodified sample center; only droplet geometry is
-offset by independent x/y values across 72% of the cell footprint. There is no
-runtime randomness, camera-dependent placement, or jitter. The `phase` is
-retained as the future basis for Step 2 motion equivalent
+placed across 90% of the cell by an R2/plastic-ratio low-discrepancy sequence
+with a stable per-cell Cranley-Patterson shift. There is no runtime randomness,
+camera-dependent placement, or jitter. The `phase` is retained as the future
+basis for Step 2 motion equivalent
 to `fract(globalTime * speed + phase)`.
 
 MapLibre GL JS 5.24.0's custom shader prelude provides
@@ -62,16 +66,18 @@ MapLibre GL JS 5.24.0's custom shader prelude provides
 function with metre altitudes. On Globe it creates a radial spherical offset,
 which means both the common upper shell and each streak follow local Earth
 normals; MapLibre handles the projection-transition fallback. Each droplet is
-one instanced six-vertex quad. The vertex shader projects its two radial ends
+one instanced four-vertex triangle strip. The vertex shader projects its two radial ends
 then faces the narrow dimension toward the camera in clip space; the fragment
-shader supplies anti-aliased rounded-capsule coverage. The result avoids 3D
-capsule meshes while retaining local-radial streak direction and depth testing.
+shader supplies anti-aliased rounded-capsule coverage plus a smooth vertical
+trail gradient: the lower Earth-facing end is fully opaque and the upper end is
+30% of base opacity. The result avoids 3D capsule meshes while retaining
+local-radial streak direction and depth testing.
 
 Buffers are reusable and are uploaded only when an LOD set changes. The static
-scene is otherwise repainted solely by MapLibre navigation. Worst-case capacity
-at L14 is 120,960 instances (30,240 samples × 4 slots), though rain support and
-slot activation reduce the actual count substantially; L13's comparable bound
-is 90,720. This branch has no storm/lightning, hail, clouds, or temporal motion.
+scene is otherwise repainted solely by MapLibre navigation. The per-sample
+budget is bounded at 512, while the area-normalized target keeps actual work
+near 3,000 visible instances at every display LOD. This branch has no
+storm/lightning, hail, clouds, or temporal motion.
 
 ## Shared field and future work
 

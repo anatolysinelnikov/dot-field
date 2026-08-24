@@ -6,17 +6,41 @@ import { smoothstep } from './math.js';
 // turns it into a radial Globe offset, so the cloud base follows the Earth.
 const COLUMN_BOTTOM_METRES = 180;
 const COLUMN_TOP_METRES = 10000;
-const SCATTER_FOOTPRINT = 0.72;
-const SLOT_CAPACITY = Object.freeze({ 10: 24, 11: 24, 12: 24, 13: 12, 14: 4 });
+const L14_SPACING = 1 / (2 ** 14);
+const RAIN_DROPLETS_PER_L14_CELL = 1.7;
+const MAX_DROPLETS_PER_SAMPLE = 512;
+const CELL_FOOTPRINT = 0.9;
+const PLASTIC_RATIO = 1.3247179572447458;
 const INSTANCE_STRIDE = 6;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
-const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
+const QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
 
 function hashUnit(canonicalX, canonicalY, slot, salt) {
   let value = (canonicalX * 73856093) ^ (canonicalY * 19349663) ^ (slot * 83492791) ^ salt;
   value = Math.imul(value ^ (value >>> 16), 2246822519);
   value = Math.imul(value ^ (value >>> 13), 3266489917);
   return ((value ^ (value >>> 16)) >>> 0) / 4294967296;
+}
+
+function fract(value) { return value - Math.floor(value); }
+
+function dropletCount(sample, strength) {
+  const areaScale = (sample.spacing / L14_SPACING) ** 2;
+  const expected = strength * RAIN_DROPLETS_PER_L14_CELL * areaScale;
+  const whole = Math.floor(expected);
+  const fractional = expected - whole;
+  const extra = hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x7f4a7c15) < fractional ? 1 : 0;
+  return Math.min(MAX_DROPLETS_PER_SAMPLE, whole + extra);
+}
+
+function lowDiscrepancyCellPosition(sample, slot) {
+  const start = Math.floor(hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x94d049bb) * 8192);
+  const index = start + slot + 1;
+  // R2 sequence with a per-cell Cranley-Patterson shift avoids a repeated
+  // miniature pattern while keeping candidates evenly distributed.
+  const x = fract(index / PLASTIC_RATIO + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x2545f491));
+  const y = fract(index / (PLASTIC_RATIO * PLASTIC_RATIO) + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x369dea0f));
+  return [(x - 0.5) * sample.spacing * CELL_FOOTPRINT, (y - 0.5) * sample.spacing * CELL_FOOTPRINT];
 }
 
 function compileShader(gl, type, source) {
@@ -34,7 +58,7 @@ function makeProgram(gl, shaderData) {
   ].join('\n');
   const fragmentSource = [
     '#version 300 es', 'precision highp float;', 'in vec2 v_local;\nin float v_opacity;\nout vec4 fragColor;',
-    'void main() {\n  vec2 q = abs(v_local) - vec2(0.72, 0.72);\n  float distanceToCapsule = length(max(q, 0.0)) - 0.28;\n  float edge = max(fwidth(distanceToCapsule), 0.012);\n  float alpha = 1.0 - smoothstep(-edge, edge, distanceToCapsule);\n  fragColor = vec4(0.20, 0.66, 1.0, alpha * v_opacity);\n}'
+    'void main() {\n  vec2 q = abs(v_local) - vec2(0.72, 0.72);\n  float distanceToCapsule = length(max(q, 0.0)) - 0.28;\n  float edge = max(fwidth(distanceToCapsule), 0.012);\n  float alpha = 1.0 - smoothstep(-edge, edge, distanceToCapsule);\n  float trailOpacity = mix(1.0, 0.30, smoothstep(-1.0, 1.0, v_local.y));\n  fragColor = vec4(0.20, 0.66, 1.0, alpha * trailOpacity * v_opacity);\n}'
   ].join('\n');
   const program = gl.createProgram();
   gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
@@ -119,7 +143,6 @@ export class GeographicRainLayer {
 
   buildInstances(samples) {
     if (!this.fixedFrame || !samples.length) return new Float32Array();
-    const capacity = SLOT_CAPACITY[samples[0].level];
     const value = { rain: 0, storm: 0, hail: 0 };
     this.writer.reset();
     for (const sample of samples) {
@@ -127,16 +150,14 @@ export class GeographicRainLayer {
       geographicPreparedIntensityAt(this.fixedFrame, point, value);
       const strength = smoothstep(0.035, 0.90, value.rain);
       if (strength <= 0) continue;
-      for (let slot = 0; slot < capacity; slot++) {
-        const selector = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x9e3779b9);
-        if (selector > strength) continue;
+      const count = dropletCount(sample, strength);
+      for (let slot = 0; slot < count; slot++) {
         const phase = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x85ebca6b);
         const variation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xc2b2ae35);
         const opacityVariation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x27d4eb2f);
-        // The field stays evaluated at the fixed sample center. These two
-        // stable slot offsets only distribute rendered rain inside its cell.
-        const scatterX = (hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x165667b1) - 0.5) * sample.spacing * SCATTER_FOOTPRINT;
-        const scatterY = (hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xd3a2646c) - 0.5) * sample.spacing * SCATTER_FOOTPRINT;
+        // Field evaluation stays at the fixed sample center; this only moves
+        // rendered droplets through a stable low-discrepancy cell footprint.
+        const [scatterX, scatterY] = lowDiscrepancyCellPosition(sample, slot);
         const length = 145 + strength * 370 + variation * 95;
         const altitude = COLUMN_BOTTOM_METRES + phase * Math.max(1, COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES - length);
         const width = 0.85 + strength * 1.35 + variation * 0.3;
@@ -178,7 +199,7 @@ export class GeographicRainLayer {
       gl.vertexAttribDivisor(location, 1);
     }
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.counts[key]);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.counts[key]);
     for (const location of [locations.a_center, locations.a_altitude, locations.a_length, locations.a_width, locations.a_opacity]) gl.vertexAttribDivisor(location, 0);
   }
 
