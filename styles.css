@@ -10,6 +10,10 @@
   --control-shadow: 0 8px 24px rgba(0, 0, 0, .28);
   --control-backdrop: blur(10px);
   --control-inset: #253149;
+  --timeline-bottom: max(18px, calc(env(safe-area-inset-bottom, 0px) + 12px));
+  --timeline-height: calc(42px + 8px + 2px);
+  --timeline-gap: 18px;
+  --floating-controls-bottom: calc(var(--timeline-bottom) + var(--timeline-height) + var(--timeline-gap));
 }
 
 * { box-sizing: border-box; }
@@ -110,7 +114,7 @@ button:active { transform: translateY(1px); }
   position: absolute;
   z-index: 2;
   right: max(20px, calc(env(safe-area-inset-right, 0px) + 20px));
-  bottom: max(82px, calc(env(safe-area-inset-bottom, 0px) + 76px));
+  bottom: var(--floating-controls-bottom);
   display: grid;
   gap: 8px;
 }
@@ -164,7 +168,7 @@ button:active { transform: translateY(1px); }
   z-index: 2;
   left: max(18px, calc(env(safe-area-inset-left, 0px) + 12px));
   right: max(18px, calc(env(safe-area-inset-right, 0px) + 12px));
-  bottom: max(18px, calc(env(safe-area-inset-bottom, 0px) + 12px));
+  bottom: var(--timeline-bottom);
   width: auto;
   display: grid;
   grid-template-columns: auto minmax(150px, 1fr);
@@ -199,7 +203,7 @@ button:active { transform: translateY(1px); }
   --render-mode-segment-width: calc((var(--render-mode-width) - 10px) / 4);
   position: absolute;
   left: 50%;
-  bottom: 82px;
+  bottom: var(--floating-controls-bottom);
   transform: translateX(-50%);
   width: var(--render-mode-width);
   display: flex;
@@ -327,5 +331,6 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
     bottom: auto;
   }
   .zoom-stepper { display: none; }
-  .controls { left: max(12px, calc(env(safe-area-inset-left, 0px) + 10px)); right: max(12px, calc(env(safe-area-inset-right, 0px) + 10px)); bottom: max(12px, calc(env(safe-area-inset-bottom, 0px) + 10px)); }
+  :root { --timeline-bottom: max(12px, calc(env(safe-area-inset-bottom, 0px) + 10px)); --timeline-gap: 12px; }
+  .controls { left: max(12px, calc(env(safe-area-inset-left, 0px) + 10px)); right: max(12px, calc(env(safe-area-inset-right, 0px) + 10px)); }
 }
