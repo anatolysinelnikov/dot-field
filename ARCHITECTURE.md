@@ -86,16 +86,22 @@ follows the local Globe radial direction. One instanced quad per drop is
 screen-facing but aligned to that projected radial direction. Its width is
 projected every frame from world-space `rainRadius` (target 60% of the Surface
 Dot diameter), using both local projected tangent derivatives along the
-billboard side axis so bearing changes do not rescale the same drop. It has a
-1.65× teardrop height and small deterministic variation. The final width is
-capped at `0.60 × sampleSpacing`, preserving the outer-area scale while
-preventing center drops from filling their grid cells. The projected radial
-direction also supplies a stable view-angle foreshortening: side views retain
-the full silhouette, while near radial/top-down views reduce the height to a
-minimum factor of 0.52 and blend the pointed triangle toward the rounded bulb.
+billboard side axis in drawing-buffer pixel space so aspect ratio, DPR, and
+bearing changes do not rescale the same drop. The final billboard pixel offset
+is converted back to NDC component-wise. It has a 1.65× teardrop height and
+small deterministic variation. The final width is capped at `0.60 ×
+sampleSpacing`, preserving the outer-area scale while preventing center drops
+from filling their grid cells. The projected radial direction also supplies a
+stable view-angle foreshortening: side views retain the full silhouette, while
+near radial/top-down views reduce the height to a minimum factor of 0.52 and
+blend the pointed triangle toward the rounded bulb.
 
 The fragment shader gives it anti-aliased procedural coverage: a rounded lower
-bulb toward Earth and a pointed upper end away from it, with no trail.
+bulb toward Earth and a pointed upper end away from it, with no trail. The
+existing precipitation body colors receive only a small procedural upper-side
+highlight and altitude-derived lightening (up to 12%) to separate 3D drops from
+Surface Dots. These are fragment arithmetic only: no extra pass, texture,
+instance, or draw call is added.
 
 Instances store only anchor, deterministic phase, emitter rate,
 `rainRadius`, `sampleSpacing`, size variation, strong fraction, and a stable

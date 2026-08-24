@@ -60,6 +60,7 @@ out vec2 v_local;
 out float v_dark;
 out float v_opacity;
 out float v_foreshortening;
+out float v_altitudeLightening;
 void main() {
   float verticalPhase = fract(a_phase - u_fallingCycles * a_speed);
   float eventIndex = floor(u_fallingCycles * a_speed + 1.0 - a_phase);
@@ -69,36 +70,38 @@ void main() {
   vec4 center = projectTileFor3D(a_center, altitude);
   vec4 radial = projectTileFor3D(a_center, altitude + ${RADIAL_REFERENCE_METRES}.0);
   vec2 centerNdc = center.xy / center.w;
-  vec2 radialDirection = radial.xy / radial.w - centerNdc;
-  float radialLength = length(radialDirection);
-  vec2 up = radialLength > 0.000001 ? radialDirection / radialLength : vec2(0.0, 1.0);
-  vec2 side = vec2(-up.y, up.x);
+  vec2 radialDirectionPixels = (radial.xy / radial.w - centerNdc) / u_pixelsToClip;
+  float radialLengthPixels = length(radialDirectionPixels);
+  vec2 upPixels = radialLengthPixels > 0.000001 ? radialDirectionPixels / radialLengthPixels : vec2(0.0, 1.0);
+  vec2 sidePixels = vec2(-upPixels.y, upPixels.x);
   float latitude = atan(sinh((0.5 - a_center.y) * 6.28318530718));
   float metresPerMercatorUnit = ${EARTH_CIRCUMFERENCE_METRES} * max(0.001, abs(cos(latitude)));
   float tangentOffset = ${RADIAL_REFERENCE_METRES}.0 / metresPerMercatorUnit;
   vec4 tangentX = projectTileFor3D(a_center + vec2(tangentOffset, 0.0), altitude);
   vec4 tangentY = projectTileFor3D(a_center + vec2(0.0, tangentOffset), altitude);
-  vec2 tangentXDirection = tangentX.xy / tangentX.w - centerNdc;
-  vec2 tangentYDirection = tangentY.xy / tangentY.w - centerNdc;
-  float tangentLength = max(length(tangentXDirection), length(tangentYDirection));
-  float foreshortening = tangentLength > 0.000001 ? clamp(radialLength / tangentLength, 0.0, 1.0) : 1.0;
+  vec2 tangentXDirectionPixels = (tangentX.xy / tangentX.w - centerNdc) / u_pixelsToClip;
+  vec2 tangentYDirectionPixels = (tangentY.xy / tangentY.w - centerNdc) / u_pixelsToClip;
+  float tangentLengthPixels = max(length(tangentXDirectionPixels), length(tangentYDirectionPixels));
+  float foreshortening = tangentLengthPixels > 0.000001 ? clamp(radialLengthPixels / tangentLengthPixels, 0.0, 1.0) : 1.0;
   float maxWidthWorld = a_sampleSpacing * ${MAX_DROP_WIDTH_OF_SPACING};
   float nominalWidthWorld = a_rainRadius * 2.0 * ${DROP_WIDTH_OF_DOT_DIAMETER};
   float widthWorld = min(min(nominalWidthWorld, maxWidthWorld) * a_sizeVariation, maxWidthWorld);
-  float sideTangentLength = length(vec2(dot(tangentXDirection, side), dot(tangentYDirection, side)));
-  float widthPixels = max(0.75, sideTangentLength * (widthWorld * 0.5 / tangentOffset) / length(u_pixelsToClip));
+  float sideTangentLengthPixels = length(vec2(dot(tangentXDirectionPixels, sidePixels), dot(tangentYDirectionPixels, sidePixels)));
+  float widthPixels = max(0.75, sideTangentLengthPixels * (widthWorld * 0.5 / tangentOffset));
   float heightPixels = widthPixels * ${DROP_HEIGHT_OF_WIDTH} * mix(${MIN_FORESHORTENED_HEIGHT}, 1.0, foreshortening);
-  vec2 ndc = centerNdc + side * a_vertex.x * widthPixels * u_pixelsToClip + up * a_vertex.y * heightPixels * u_pixelsToClip;
+  vec2 pixelOffset = sidePixels * a_vertex.x * widthPixels + upPixels * a_vertex.y * heightPixels;
+  vec2 ndc = centerNdc + pixelOffset * u_pixelsToClip;
   gl_Position = vec4(ndc * center.w, center.z, center.w);
   v_local = a_vertex;
   v_dark = eventDark;
   v_opacity = u_transitionOpacity;
   v_foreshortening = foreshortening;
+  v_altitudeLightening = 0.12 * smoothstep(0.0, 1.0, verticalPhase);
 }`
   ].join('\n');
   const fragmentSource = [
     '#version 300 es', 'precision highp float;',
-    'in vec2 v_local;\nin float v_dark;\nin float v_opacity;\nin float v_foreshortening;\nout vec4 fragColor;',
+    'in vec2 v_local;\nin float v_dark;\nin float v_opacity;\nin float v_foreshortening;\nin float v_altitudeLightening;\nout vec4 fragColor;',
     `void main() {
   // Lower circular bulb plus upper triangle: point faces away from Earth.
   vec2 bulb = v_local - vec2(0.0, -0.34);
@@ -109,6 +112,10 @@ void main() {
   float edge = max(fwidth(shapeDistance), 0.012);
   float alpha = 1.0 - smoothstep(-edge, edge, shapeDistance);
   vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), v_dark);
+  float highlightDistance = length((v_local - vec2(-0.30, 0.28)) / vec2(0.58, 0.48));
+  float highlightMask = (1.0 - smoothstep(0.18, 1.0, highlightDistance)) * smoothstep(-0.12, 0.24, v_local.y);
+  color = mix(color, vec3(1.0), 0.20 * highlightMask);
+  color = mix(color, vec3(1.0), v_altitudeLightening);
   fragColor = vec4(color, alpha * v_opacity);
 }`
   ].join('\n');
