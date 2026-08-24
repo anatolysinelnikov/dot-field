@@ -22,9 +22,11 @@ app/UI -> GeographicRainLayer -> geographic LOD / geography -> field -> math/con
 camera/reset controls, logical sampling zoom, and LOD transition scheduling. It
 does not run a weather-time playback RAF or expose a timeline/mode selector.
 Its RAF runs only for the existing 0.2-second LOD transition, compact
-auto-rotation, or visible 3D falling rain. Auto-rotation changes only camera
-bearing at 2.5 degrees per second; it never changes weather coordinates or
-rebuilds instance sets. Falling motion is independently paused by default.
+auto-rotation, or visible L13/L14 rain with a nonzero speed setting.
+Auto-rotation changes only camera bearing at 2.5 degrees per second; it never
+changes weather coordinates or rebuilds instance sets. A compact independent
+rain-speed slider defaults to 1×, while 0× pauses falling motion without
+advancing its retained animation progress.
 
 ## Geographic sampling and LOD
 
@@ -43,18 +45,22 @@ Rain population is area-normalized instead of using a per-level slot table.
 Each cell receives a deterministic rounded budget of
 `1.7 × averageCornerRainStrength × (sampleSpacing / L14Spacing)²`, bounded at 512 droplets.
 Four finer cells therefore replace one coarse cell without materially changing
-the detailed-rain population when L13/L14 is active. Distant L10–L12 use their
-own cheaper flat sample representation instead of materializing that budget.
+the detailed-rain population when L13/L14 is active. Distant L10–L12 use the
+main Dots precipitation pyramid instead of materializing that budget.
 
 ## LOD rain representations — `src/engine/geographic-rain-layer.js`
 
 The renderer evaluates one prepared geographic field frame at fixed `t = 0.5`
-only when an LOD set is built. L10–L12 use a rain-only, surface-attached flat
-circle per active rain sample (23 / 92 / 362 visible instances at the frozen
-frame). L13–L14 use the reconstructed 3D streak population (2,903 / 2,959
-visible instances). The existing 0.2-second transition crossfades the two
-representations at L12→L13; there is no representation morph or camera-based
-sampling.
+only when an LOD set is built. L10–L12 reuse `GeographicSymbolPyramid`, the
+same main-Dots machinery: L13 is its reference grid and lower levels are
+derived by deterministic area-preserving reduction of rain and strong-rain
+radius. The rain-only renderer draws the same two surface-attached Dots passes
+in the same order and colors (rain, then strong rain), without rendering hazard
+channels. At the frozen frame these are 37/13, 124/30, and 440/93
+rain/strong instances for L10/L11/L12. L13–L14 use the reconstructed 3D
+streak population (2,903 / 2,959 visible instances). The existing 0.2-second
+transition crossfades the two representations at L12→L13; there is no
+representation morph or camera-based sampling.
 
 Each close-LOD rain cell is a conceptual column from 180 m to 10,000 m;
 intensity never alters that vertical range. Instead it controls deterministic
@@ -70,7 +76,7 @@ appearance mapping. Neighboring cells therefore share exactly the same corner
 values without per-droplet synthetic field evaluations.
 
 Every potential droplet derives its selector, column phase, length/width,
-opacity variation, and two-axis visual scatter from
+opacity variation, speed factor, and two-axis visual scatter from
 `(canonicalX, canonicalY, slotIndex)` through a stable integer hash. Field
 evaluation remains at the unmodified sample center; only droplet geometry is
 placed across 90% of the cell by an R2/plastic-ratio low-discrepancy sequence
@@ -91,12 +97,14 @@ trail gradient: the lower Earth-facing end is fully opaque and the upper end is
 30% of base opacity. The result avoids 3D capsule meshes while retaining
 local-radial streak direction and depth testing.
 
-The close-LOD instance stores a deterministic base vertical phase instead of a
-CPU-updated altitude. A single renderer-local animation progress uniform uses
-`fract(basePhase - progress)` to move droplets down to Earth and wrap them back
-to the common shell. `app.js` advances that uniform over a shared seven-second
-cycle only while falling is enabled and L13/L14 is visible; it never rebuilds
-instances or advances synthetic weather time.
+The close-LOD instance stores a deterministic base vertical phase and a stable
+0.85×–1.15× speed factor instead of a CPU-updated altitude. A single
+renderer-local animation progress uniform uses
+`fract(basePhase - progress * speedFactor)` to move droplets down to Earth and
+wrap them back to the common shell. The 0×–2× rain-speed slider advances that
+uniform at a four-second full-column cycle at 1× (two seconds at 2×), only when
+L13/L14 is visible; it never rebuilds instances or advances synthetic weather
+time.
 
 Buffers are reusable and are uploaded only when an LOD set changes. The static
 scene is otherwise repainted solely by MapLibre navigation. The per-cell budget

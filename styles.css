@@ -107,7 +107,7 @@ button:active { transform: translateY(1px); }
 .zoom-stepper button,
 .zoom-reset,
 .auto-rotate,
-.falling-rain { touch-action: manipulation; }
+.rain-speed-control { touch-action: manipulation; }
 
 .auto-rotate {
   width: 54px;
@@ -131,18 +131,20 @@ button:active { transform: translateY(1px); }
   gap: 8px;
 }
 
-.falling-rain {
-  width: 54px;
+.rain-speed-control {
+  width: 110px;
   height: 54px;
-  padding: 0;
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
   border: var(--control-border);
   border-radius: var(--control-radius);
   background: var(--control-panel);
-  font-size: 19px;
-  line-height: 1;
   box-shadow: var(--control-shadow);
   backdrop-filter: var(--control-backdrop);
 }
+
+.rain-speed-control input { width: 100%; margin: 0; }
 
 .zoom-controls {
   position: absolute;
