@@ -7,11 +7,15 @@ import { clamp } from './math.js';
 const COLUMN_BOTTOM_METRES = 150;
 const COLUMN_TOP_METRES = 15000;
 const DROP_WIDTH_OF_DOT_DIAMETER = 0.52;
+const MAX_DROP_WIDTH_OF_SPACING = 0.42;
 const DROP_HEIGHT_OF_WIDTH = 1.65;
+const MIN_FORESHORTENED_HEIGHT = 0.38;
 const COLUMN_SPEED_MIN = 0.90;
 const COLUMN_SPEED_MAX = 1.10;
-const MIN_DROP_COUNT = 3;
-const INSTANCE_STRIDE = 7;
+const EVENT_SEQUENCE_LENGTH = 8;
+const RADIAL_REFERENCE_METRES = 100;
+const EARTH_CIRCUMFERENCE_METRES = 40075016.68557849;
+const INSTANCE_STRIDE = 9;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
 const QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
 
@@ -21,19 +25,6 @@ function hashUnit(x, y, slot, salt) {
   value = Math.imul(value ^ (value >>> 16), 2246822519);
   value = Math.imul(value ^ (value >>> 13), 3266489917);
   return ((value ^ (value >>> 16)) >>> 0) / 4294967296;
-}
-function dropCountForRadius(radius, spacing) {
-  const coverage = spacing > 0 ? radius / spacing : 0;
-  return coverage < 0.34 ? 3 : coverage < 0.62 ? 4 : 5;
-}
-function darkSlotMask(count, fraction, x, y) {
-  const desired = fraction * count;
-  const whole = Math.floor(desired);
-  const darkCount = Math.min(count, whole + (hashUnit(x, y, 0, 0x4cf5ad43) < desired - whole ? 1 : 0));
-  const mask = new Array(count).fill(false);
-  const offset = hashUnit(x, y, 0, 0x94d049bb);
-  for (let index = 0; index < darkCount; index++) mask[Math.floor((index + offset) * count / darkCount) % count] = true;
-  return mask;
 }
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -50,46 +41,63 @@ in vec2 a_center;
 in float a_phase;
 in float a_speed;
 in float a_rainRadius;
+in float a_sampleSpacing;
 in float a_sizeVariation;
-in float a_dark;
+in float a_strongFraction;
+in float a_eventOffset;
 uniform vec2 u_pixelsToClip;
 uniform float u_transitionOpacity;
 uniform float u_fallingCycles;
 out vec2 v_local;
 out float v_dark;
 out float v_opacity;
+out float v_foreshortening;
 void main() {
   float verticalPhase = fract(a_phase - u_fallingCycles * a_speed);
+  float eventIndex = floor(u_fallingCycles * a_speed + 1.0 - a_phase);
+  float eventSlot = mod(eventIndex * 5.0 + a_eventOffset, ${EVENT_SEQUENCE_LENGTH}.0);
+  float eventDark = step(eventSlot + 0.5, a_strongFraction * ${EVENT_SEQUENCE_LENGTH}.0);
   float altitude = ${COLUMN_BOTTOM_METRES}.0 + verticalPhase * ${COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES}.0;
   vec4 center = projectTileFor3D(a_center, altitude);
-  vec4 radial = projectTileFor3D(a_center, altitude + 100.0);
-  vec4 radiusPoint = projectTileFor3D(a_center + vec2(a_rainRadius, 0.0), altitude);
+  vec4 radial = projectTileFor3D(a_center, altitude + ${RADIAL_REFERENCE_METRES}.0);
   vec2 centerNdc = center.xy / center.w;
   vec2 radialDirection = radial.xy / radial.w - centerNdc;
   float radialLength = length(radialDirection);
   vec2 up = radialLength > 0.000001 ? radialDirection / radialLength : vec2(0.0, 1.0);
   vec2 side = vec2(-up.y, up.x);
-  float dotRadiusPixels = length(radiusPoint.xy / radiusPoint.w - centerNdc) / length(u_pixelsToClip);
-  float widthPixels = max(0.75, dotRadiusPixels * 2.0 * ${DROP_WIDTH_OF_DOT_DIAMETER} * a_sizeVariation);
-  float heightPixels = widthPixels * ${DROP_HEIGHT_OF_WIDTH};
+  float latitude = atan(sinh((0.5 - a_center.y) * 6.28318530718));
+  float metresPerMercatorUnit = ${EARTH_CIRCUMFERENCE_METRES}.0 * max(0.001, abs(cos(latitude)));
+  float tangentOffset = ${RADIAL_REFERENCE_METRES}.0 / metresPerMercatorUnit;
+  vec4 tangentX = projectTileFor3D(a_center + vec2(tangentOffset, 0.0), altitude);
+  vec4 tangentY = projectTileFor3D(a_center + vec2(0.0, tangentOffset), altitude);
+  float tangentLength = max(length(tangentX.xy / tangentX.w - centerNdc), length(tangentY.xy / tangentY.w - centerNdc));
+  float foreshortening = tangentLength > 0.000001 ? clamp(radialLength / tangentLength, 0.0, 1.0) : 1.0;
+  float maxWidthWorld = a_sampleSpacing * ${MAX_DROP_WIDTH_OF_SPACING};
+  float nominalWidthWorld = a_rainRadius * 2.0 * ${DROP_WIDTH_OF_DOT_DIAMETER};
+  float widthWorld = min(min(nominalWidthWorld, maxWidthWorld) * a_sizeVariation, maxWidthWorld);
+  vec4 widthPoint = projectTileFor3D(a_center + vec2(widthWorld * 0.5, 0.0), altitude);
+  float widthPixels = max(0.75, length(widthPoint.xy / widthPoint.w - centerNdc) / length(u_pixelsToClip));
+  float heightPixels = widthPixels * ${DROP_HEIGHT_OF_WIDTH} * mix(${MIN_FORESHORTENED_HEIGHT}, 1.0, foreshortening);
   vec2 ndc = centerNdc + side * a_vertex.x * widthPixels * u_pixelsToClip + up * a_vertex.y * heightPixels * u_pixelsToClip;
   gl_Position = vec4(ndc * center.w, center.z, center.w);
   v_local = a_vertex;
-  v_dark = a_dark;
+  v_dark = eventDark;
   v_opacity = u_transitionOpacity;
+  v_foreshortening = foreshortening;
 }`
   ].join('\n');
   const fragmentSource = [
     '#version 300 es', 'precision highp float;',
-    'in vec2 v_local;\nin float v_dark;\nin float v_opacity;\nout vec4 fragColor;',
+    'in vec2 v_local;\nin float v_dark;\nin float v_opacity;\nin float v_foreshortening;\nout vec4 fragColor;',
     `void main() {
   // Lower circular bulb plus upper triangle: point faces away from Earth.
   vec2 bulb = v_local - vec2(0.0, -0.34);
   float bulbDistance = length(bulb) - 0.66;
   float triangleHalfWidth = 0.66 * clamp((1.0 - v_local.y) / 1.34, 0.0, 1.0);
   float triangleDistance = max(abs(v_local.x) - triangleHalfWidth, max(-v_local.y - 0.34, v_local.y - 1.0));
-  float edge = max(fwidth(min(bulbDistance, triangleDistance)), 0.012);
-  float alpha = 1.0 - smoothstep(-edge, edge, min(bulbDistance, triangleDistance));
+  float shapeDistance = mix(bulbDistance, min(bulbDistance, triangleDistance), v_foreshortening);
+  float edge = max(fwidth(shapeDistance), 0.012);
+  float alpha = 1.0 - smoothstep(-edge, edge, shapeDistance);
   vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), v_dark);
   fragColor = vec4(color, alpha * v_opacity);
 }`
@@ -99,7 +107,7 @@ void main() {
   gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || '3D dot-rain shader linking failed.');
-  return { program, locations: Object.fromEntries(['a_vertex', 'a_center', 'a_phase', 'a_speed', 'a_rainRadius', 'a_sizeVariation', 'a_dark', 'u_pixelsToClip', 'u_transitionOpacity', 'u_fallingCycles', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)])) };
+  return { program, locations: Object.fromEntries(['a_vertex', 'a_center', 'a_phase', 'a_speed', 'a_rainRadius', 'a_sampleSpacing', 'a_sizeVariation', 'a_strongFraction', 'a_eventOffset', 'u_pixelsToClip', 'u_transitionOpacity', 'u_fallingCycles', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)])) };
 }
 class InstanceWriter {
   constructor() { this.values = new Float32Array(); this.length = 0; }
@@ -150,23 +158,18 @@ export class GeographicRainLayer {
     const level = samples[0].level;
     const state = this.pyramid.evaluate([level], this.fixedFrame)[level];
     const { anchors, samples: pyramidSamples } = this.pyramid.levels.get(level);
-    const stats = { level, emitters: 0, drops: 0, threeDropEmitters: 0, fourDropEmitters: 0, fiveDropEmitters: 0, normalDrops: 0, darkDrops: 0 };
+    const stats = { level, emitters: 0, drops: 0 };
     this.writer.reset();
     for (let index = 0; index < state.rainRadius.length; index++) {
       const rainRadius = state.rainRadius[index]; if (rainRadius <= 0) continue;
-      const sample = pyramidSamples[index]; const count = dropCountForRadius(rainRadius, sample.spacing);
-      const strongFraction = clamp(state.strongRadius[index] ** 2 / (rainRadius ** 2), 0, 1);
-      const darkSlots = darkSlotMask(count, strongFraction, sample.canonicalX, sample.canonicalY);
+      const sample = pyramidSamples[index];
+      const strongFraction = rainRadius > 0 ? clamp(state.strongRadius[index] ** 2 / (rainRadius ** 2), 0, 1) : 0;
       const basePhase = hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x85ebca6b);
       const speed = COLUMN_SPEED_MIN + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x165667b1) * (COLUMN_SPEED_MAX - COLUMN_SPEED_MIN);
-      const weights = Array.from({ length: count }, (_, slot) => 0.8 + hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xc2b2ae35) * 0.4);
-      const weightSum = weights.reduce((sum, weight) => sum + weight, 0); let cumulative = 0;
-      for (let slot = 0; slot < count; slot++) {
-        const dark = darkSlots[slot] ? 1 : 0;
-        this.writer.push(anchors[index * 2], anchors[index * 2 + 1], fract(basePhase + cumulative / weightSum), speed, rainRadius, 0.9 + hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x27d4eb2f) * 0.2, dark);
-        cumulative += weights[slot]; stats.drops++; if (dark) stats.darkDrops++; else stats.normalDrops++;
-      }
-      stats.emitters++; if (count === 3) stats.threeDropEmitters++; else if (count === 4) stats.fourDropEmitters++; else stats.fiveDropEmitters++;
+      const sizeVariation = 0.9 + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x27d4eb2f) * 0.2;
+      const eventOffset = Math.floor(hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x4cf5ad43) * EVENT_SEQUENCE_LENGTH);
+      this.writer.push(anchors[index * 2], anchors[index * 2 + 1], fract(basePhase), speed, rainRadius, sample.spacing, sizeVariation, strongFraction, eventOffset);
+      stats.emitters++; stats.drops++;
     }
     return { instances: this.writer.finish(), stats };
   }
@@ -186,9 +189,9 @@ export class GeographicRainLayer {
     gl.uniform2f(locations.u_pixelsToClip, 2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight); gl.uniform1f(locations.u_transitionOpacity, opacity); gl.uniform1f(locations.u_fallingCycles, this.fallingCycles);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer); gl.enableVertexAttribArray(locations.a_vertex); gl.vertexAttribPointer(locations.a_vertex, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.dropBuffers[key]);
-    for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_phase, 1, 8], [locations.a_speed, 1, 12], [locations.a_rainRadius, 1, 16], [locations.a_sizeVariation, 1, 20], [locations.a_dark, 1, 24]]) { gl.enableVertexAttribArray(location); gl.vertexAttribPointer(location, size, gl.FLOAT, false, INSTANCE_BYTES, offset); gl.vertexAttribDivisor(location, 1); }
+    for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_phase, 1, 8], [locations.a_speed, 1, 12], [locations.a_rainRadius, 1, 16], [locations.a_sampleSpacing, 1, 20], [locations.a_sizeVariation, 1, 24], [locations.a_strongFraction, 1, 28], [locations.a_eventOffset, 1, 32]]) { gl.enableVertexAttribArray(location); gl.vertexAttribPointer(location, size, gl.FLOAT, false, INSTANCE_BYTES, offset); gl.vertexAttribDivisor(location, 1); }
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.dropCounts[key]);
-    for (const location of [locations.a_center, locations.a_phase, locations.a_speed, locations.a_rainRadius, locations.a_sizeVariation, locations.a_dark]) gl.vertexAttribDivisor(location, 0);
+    for (const location of [locations.a_center, locations.a_phase, locations.a_speed, locations.a_rainRadius, locations.a_sampleSpacing, locations.a_sizeVariation, locations.a_strongFraction, locations.a_eventOffset]) gl.vertexAttribDivisor(location, 0);
   }
   render(gl, args) {
     this.uploadBuffers(gl); this.programs ||= new Map(); let program = this.programs.get(args.shaderData.variantName);

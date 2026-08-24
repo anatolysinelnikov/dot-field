@@ -64,32 +64,43 @@ renders storm and hail for normal usage.
 `GeographicSymbolPyramid`, evaluates the fixed `t = 0.5` frame, and consumes
 that pyramid's exact `anchors`, `rainRadius`, and `strongRadius` states. It
 never reads `GeographicDotsLayer` buffers. At L13/L14 every active Surface Dot
-owns exactly one emitter at the same anchor; there is no horizontal scatter,
-bilinear candidate reconstruction, random motion, or camera-dependent identity.
+owns exactly one emitter and one visible drop at the same anchor; there is no
+horizontal scatter, bilinear candidate reconstruction, random motion, or
+camera-dependent identity.
 
-An emitter produces 3, 4, or 5 large teardrops from `rainRadius / sampleSpacing`
-(weak, medium, strongest visible rain). Each slot gets a deterministic positive
-0.8–1.2 gap weight; normalized cumulative weights make irregular cyclic phases
-that retain their order. All slots in an emitter share one 0.90×–1.10× speed,
-hashed from stable sample identity, while different emitters are asynchronous.
-`strongFraction = strongRadius² / rainRadius²` deterministically quantizes to
-distributed dark-blue slots; remaining drops use the existing normal-rain blue.
+An emitter represents a continuous repeating sequence, but only its current
+drop is visible. Each emitter has a deterministic base phase and one
+0.90×–1.10× speed hashed from stable sample identity, so emitters remain
+asynchronous while the shader advances their falling cycles. Strong rain is
+encoded temporally rather than with simultaneous slots: `strongFraction =
+clamp(strongRadius² / rainRadius², 0, 1)` selects the dark-blue share of an
+eight-event deterministic, evenly distributed sequence. The event index and
+color are derived in the shader when a falling cycle wraps; CPU instances are
+not rebuilt.
 
 The vertical column is deliberately exaggerated from 150 m to 15,000 m for the
 normal main-compatible camera. `projectTileFor3D(vec2 posInTile, float elevation)`
 follows the local Globe radial direction. One instanced quad per drop is
 screen-facing but aligned to that projected radial direction. Its width is
 projected every frame from world-space `rainRadius` (target 52% of the Surface
-Dot diameter), with a 1.65× teardrop height and small deterministic slot
-variation. The fragment shader gives it anti-aliased procedural coverage: a
-rounded lower bulb toward Earth and a pointed upper end away from it, with no trail.
+Dot diameter), with a 1.65× teardrop height and small deterministic variation.
+The final width is capped at `0.42 × sampleSpacing`, preserving the outer-area
+scale while preventing center drops from filling their grid cells. The
+projected radial direction also supplies a stable view-angle foreshortening:
+side views retain the full silhouette, while near radial/top-down views reduce
+the height and blend the pointed triangle toward the rounded bulb.
+
+The fragment shader gives it anti-aliased procedural coverage: a rounded lower
+bulb toward Earth and a pointed upper end away from it, with no trail.
 
 Instances store only anchor, deterministic phase, shared column speed,
-`rainRadius`, size variation, and normal/strong color choice. The shader uses
-`fract(phase - fallingCycles * speed)` for altitude, so accumulated app-owned
-`fallingCycles` moves rain without rebuilding instances. The 0×–2× slider
-defaults to 2×; 0× freezes exactly in place. Ripples, splashes, storm, hail,
-lightning, clouds, wind, and weather-time animation are not implemented.
+`rainRadius`, `sampleSpacing`, size variation, strong fraction, and a stable
+event-sequence offset. The shader uses `fract(phase - fallingCycles * speed)`
+for altitude and derives the current strong/normal event from the continuous
+cycle count, so accumulated app-owned `fallingCycles` moves and recolors rain
+without rebuilding instances. The 0×–2× slider defaults to 2×; 0× freezes
+exactly in place. Ripples, splashes, storm, hail, lightning, clouds, wind, and
+weather-time animation are not implemented.
 
 Both renderers use reusable buffers and rebuild only when an LOD set changes.
 The static surface Dots never drive an animation RAF. The layers follow current-main MapTiler context
@@ -110,5 +121,5 @@ provider format -> normalization -> temporal/spatial interpolation
 -> geographic sampling/reconstruction -> rendering
 ```
 
-Step 2 can introduce motion via the already deterministic slot phase without
+Step 2 can extend motion via the already deterministic emitter phase without
 changing grid identities or rebuilding rain geometry every camera frame.
