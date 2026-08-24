@@ -66,7 +66,7 @@ void main() {
   vec2 up = radialLength > 0.000001 ? radialDirection / radialLength : vec2(0.0, 1.0);
   vec2 side = vec2(-up.y, up.x);
   float latitude = atan(sinh((0.5 - a_center.y) * 6.28318530718));
-  float metresPerMercatorUnit = ${EARTH_CIRCUMFERENCE_METRES}.0 * max(0.001, abs(cos(latitude)));
+  float metresPerMercatorUnit = ${EARTH_CIRCUMFERENCE_METRES} * max(0.001, abs(cos(latitude)));
   float tangentOffset = ${RADIAL_REFERENCE_METRES}.0 / metresPerMercatorUnit;
   vec4 tangentX = projectTileFor3D(a_center + vec2(tangentOffset, 0.0), altitude);
   vec4 tangentY = projectTileFor3D(a_center + vec2(0.0, tangentOffset), altitude);
