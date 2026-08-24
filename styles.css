@@ -10,10 +10,7 @@
   --control-shadow: 0 8px 24px rgba(0, 0, 0, .28);
   --control-backdrop: blur(10px);
   --control-inset: #253149;
-  --timeline-bottom: max(18px, calc(env(safe-area-inset-bottom, 0px) + 12px));
-  --timeline-height: calc(42px + 8px + 2px);
-  --timeline-gap: 18px;
-  --floating-controls-bottom: calc(var(--timeline-bottom) + var(--timeline-height) + var(--timeline-gap));
+  --floating-controls-bottom: max(20px, calc(env(safe-area-inset-bottom, 0px) + 12px));
 }
 
 * { box-sizing: border-box; }
