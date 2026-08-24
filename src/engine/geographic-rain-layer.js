@@ -12,7 +12,7 @@ const RAIN_DROPLETS_PER_L14_CELL = 1.7;
 const MAX_DROPLETS_PER_SAMPLE = 512;
 const CELL_FOOTPRINT = 0.9;
 const PLASTIC_RATIO = 1.3247179572447458;
-const INSTANCE_STRIDE = 7;
+const INSTANCE_STRIDE = 8;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
 const FLAT_INSTANCE_STRIDE = 4;
 const FLAT_INSTANCE_BYTES = FLAT_INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
@@ -72,11 +72,11 @@ function compileShader(gl, type, source) {
 function makeStreakProgram(gl, shaderData) {
   const vertexSource = [
     '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
-    `in vec2 a_vertex;\nin vec2 a_center;\nin float a_phase;\nin float a_length;\nin float a_width;\nin float a_opacity;\nin float a_speedFactor;\nuniform vec2 u_pixelsToClip;\nuniform float u_transitionOpacity;\nuniform float u_animationProgress;\nout vec2 v_local;\nout float v_opacity;\nvoid main() {\n  float verticalPhase = fract(a_phase - u_animationProgress * a_speedFactor);\n  float altitude = ${COLUMN_BOTTOM_METRES}.0 + verticalPhase * (${COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES}.0 - a_length);\n  vec4 lower = projectTileFor3D(a_center, altitude);\n  vec4 upper = projectTileFor3D(a_center, altitude + a_length);\n  vec2 lowerNdc = lower.xy / lower.w;\n  vec2 upperNdc = upper.xy / upper.w;\n  vec2 direction = upperNdc - lowerNdc;\n  float directionLength = length(direction);\n  vec2 side = directionLength > 0.000001 ? vec2(-direction.y, direction.x) / directionLength : vec2(1.0, 0.0);\n  float along = (a_vertex.y + 1.0) * 0.5;\n  vec4 point = mix(lower, upper, along);\n  vec2 ndc = mix(lowerNdc, upperNdc, along) + side * a_vertex.x * a_width * u_pixelsToClip;\n  gl_Position = vec4(ndc * point.w, point.z, point.w);\n  v_local = a_vertex;\n  v_opacity = a_opacity * u_transitionOpacity;\n}`
+    `in vec2 a_vertex;\nin vec2 a_center;\nin float a_phase;\nin float a_length;\nin float a_width;\nin float a_opacity;\nin float a_speedFactor;\nin float a_topOpacity;\nuniform vec2 u_pixelsToClip;\nuniform float u_transitionOpacity;\nuniform float u_fallingCycles;\nout vec2 v_local;\nout float v_opacity;\nout float v_topOpacity;\nvoid main() {\n  float verticalPhase = fract(a_phase - u_fallingCycles * a_speedFactor);\n  float altitude = ${COLUMN_BOTTOM_METRES}.0 + verticalPhase * (${COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES}.0 - a_length);\n  vec4 lower = projectTileFor3D(a_center, altitude);\n  vec4 upper = projectTileFor3D(a_center, altitude + a_length);\n  vec2 lowerNdc = lower.xy / lower.w;\n  vec2 upperNdc = upper.xy / upper.w;\n  vec2 direction = upperNdc - lowerNdc;\n  float directionLength = length(direction);\n  vec2 side = directionLength > 0.000001 ? vec2(-direction.y, direction.x) / directionLength : vec2(1.0, 0.0);\n  float along = (a_vertex.y + 1.0) * 0.5;\n  vec4 point = mix(lower, upper, along);\n  vec2 ndc = mix(lowerNdc, upperNdc, along) + side * a_vertex.x * a_width * u_pixelsToClip;\n  gl_Position = vec4(ndc * point.w, point.z, point.w);\n  v_local = a_vertex;\n  v_opacity = a_opacity * u_transitionOpacity;\n  v_topOpacity = a_topOpacity;\n}`
   ].join('\n');
   const fragmentSource = [
-    '#version 300 es', 'precision highp float;', 'in vec2 v_local;\nin float v_opacity;\nout vec4 fragColor;',
-    'void main() {\n  vec2 q = abs(v_local) - vec2(0.72, 0.72);\n  float distanceToCapsule = length(max(q, 0.0)) - 0.28;\n  float edge = max(fwidth(distanceToCapsule), 0.012);\n  float alpha = 1.0 - smoothstep(-edge, edge, distanceToCapsule);\n  float trailOpacity = mix(1.0, 0.30, smoothstep(-1.0, 1.0, v_local.y));\n  fragColor = vec4(0.20, 0.66, 1.0, alpha * trailOpacity * v_opacity);\n}'
+    '#version 300 es', 'precision highp float;', 'in vec2 v_local;\nin float v_opacity;\nin float v_topOpacity;\nout vec4 fragColor;',
+    'void main() {\n  vec2 q = abs(v_local) - vec2(0.72, 0.72);\n  float distanceToCapsule = length(max(q, 0.0)) - 0.28;\n  float edge = max(fwidth(distanceToCapsule), 0.012);\n  float alpha = 1.0 - smoothstep(-edge, edge, distanceToCapsule);\n  float trailOpacity = mix(1.0, v_topOpacity, smoothstep(-1.0, 1.0, v_local.y));\n  fragColor = vec4(0.20, 0.66, 1.0, alpha * trailOpacity * v_opacity);\n}'
   ].join('\n');
   const program = gl.createProgram();
   gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
@@ -85,7 +85,7 @@ function makeStreakProgram(gl, shaderData) {
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || '3D rain shader linking failed.');
   return {
     program,
-    locations: Object.fromEntries(['a_vertex', 'a_center', 'a_phase', 'a_length', 'a_width', 'a_opacity', 'a_speedFactor', 'u_pixelsToClip', 'u_transitionOpacity', 'u_animationProgress', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)]))
+    locations: Object.fromEntries(['a_vertex', 'a_center', 'a_phase', 'a_length', 'a_width', 'a_opacity', 'a_speedFactor', 'a_topOpacity', 'u_pixelsToClip', 'u_transitionOpacity', 'u_fallingCycles', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)]))
   };
 }
 
@@ -112,14 +112,14 @@ function makeFlatProgram(gl, shaderData) {
 class InstanceWriter {
   constructor() { this.values = new Float32Array(); this.length = 0; }
   reset() { this.length = 0; }
-  push(centerX, centerY, phase, length, width, opacity, speedFactor) {
+  push(centerX, centerY, phase, length, width, opacity, speedFactor, topOpacity) {
     const next = this.length + INSTANCE_STRIDE;
     if (next > this.values.length) {
       const values = new Float32Array(Math.max(next, this.values.length * 2, 1024));
       values.set(this.values);
       this.values = values;
     }
-    this.values.set([centerX, centerY, phase, length, width, opacity, speedFactor], this.length);
+    this.values.set([centerX, centerY, phase, length, width, opacity, speedFactor, topOpacity], this.length);
     this.length = next;
   }
   finish() { return this.values.subarray(0, this.length); }
@@ -162,7 +162,7 @@ export class GeographicRainLayer {
     this.flatBufferCapacity = Object.fromEntries(FLAT_TYPES.map((type) => [type, { current: 0, from: 0, to: 0 }]));
     this.buffersDirty = true;
     this.fixedFrame = null;
-    this.animationProgress = 0;
+    this.fallingCycles = 0;
   }
 
   onAdd(map, gl) {
@@ -204,7 +204,7 @@ export class GeographicRainLayer {
   }
 
   setTransitionProgress(progress) { this.transitionProgress = progress; this.map?.triggerRepaint(); }
-  setAnimationProgress(progress) { this.animationProgress = progress; this.map?.triggerRepaint(); }
+  setFallingCycles(cycles) { this.fallingCycles = cycles; this.map?.triggerRepaint(); }
 
   setStreakInstances(key, instances) {
     this.streakInstances[key] = instances;
@@ -254,6 +254,7 @@ export class GeographicRainLayer {
           const variation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xc2b2ae35);
           const opacityVariation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x27d4eb2f);
           const speedFactor = 0.85 + hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x165667b1) * 0.3;
+          const topOpacity = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xd3a2646c) * 0.2;
           // The field is cached only at shared grid corners. This position is a
           // stable low-discrepancy candidate inside the reconstructed cell.
           const scatterX = u * sample.spacing;
@@ -261,7 +262,7 @@ export class GeographicRainLayer {
           const length = 145 + strength * 370 + variation * 95;
           const width = 0.85 + strength * 1.35 + variation * 0.3;
           const opacity = (0.24 + strength * 0.58) * (0.78 + opacityVariation * 0.22);
-          this.writer.push(sample.mercator[0] + scatterX, sample.mercator[1] + scatterY, phase, length, width, opacity, speedFactor);
+          this.writer.push(sample.mercator[0] + scatterX, sample.mercator[1] + scatterY, phase, length, width, opacity, speedFactor, topOpacity);
         }
       }
     }
@@ -315,19 +316,19 @@ export class GeographicRainLayer {
     setGeographicProjection(gl, { matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix, tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition }, projection);
     gl.uniform2f(locations.u_pixelsToClip, 2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight);
     gl.uniform1f(locations.u_transitionOpacity, opacity);
-    gl.uniform1f(locations.u_animationProgress, this.animationProgress);
+    gl.uniform1f(locations.u_fallingCycles, this.fallingCycles);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
     gl.enableVertexAttribArray(locations.a_vertex);
     gl.vertexAttribPointer(locations.a_vertex, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.streakBuffers[key]);
-    for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_phase, 1, 8], [locations.a_length, 1, 12], [locations.a_width, 1, 16], [locations.a_opacity, 1, 20], [locations.a_speedFactor, 1, 24]]) {
+    for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_phase, 1, 8], [locations.a_length, 1, 12], [locations.a_width, 1, 16], [locations.a_opacity, 1, 20], [locations.a_speedFactor, 1, 24], [locations.a_topOpacity, 1, 28]]) {
       gl.enableVertexAttribArray(location);
       gl.vertexAttribPointer(location, size, gl.FLOAT, false, INSTANCE_BYTES, offset);
       gl.vertexAttribDivisor(location, 1);
     }
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.streakCounts[key]);
-    for (const location of [locations.a_center, locations.a_phase, locations.a_length, locations.a_width, locations.a_opacity, locations.a_speedFactor]) gl.vertexAttribDivisor(location, 0);
+    for (const location of [locations.a_center, locations.a_phase, locations.a_length, locations.a_width, locations.a_opacity, locations.a_speedFactor, locations.a_topOpacity]) gl.vertexAttribDivisor(location, 0);
   }
 
   renderFlatGroup(gl, entry, projection, key, opacity) {

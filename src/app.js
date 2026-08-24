@@ -39,7 +39,7 @@ map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top
 
 const rainLayer = new GeographicRainLayer();
 rainLayer.setFixedWeatherTime(FIXED_WEATHER_TIME);
-const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, resettingView: false, mapReady: false, autoRotating: false, rainSpeed: Number(rainSpeed.value), fallingProgress: 0 };
+const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, resettingView: false, mapReady: false, autoRotating: false, rainSpeed: Number(rainSpeed.value), fallingCycles: 0 };
 let applicationFrameQueued = false;
 let lastApplicationFrame = null;
 let lastMapErrorSignature = '';
@@ -135,8 +135,8 @@ function wakeApplicationFrame() {
     if (state.autoRotating) map.setBearing(map.getBearing() + AUTO_ROTATE_DEGREES_PER_SECOND * delta);
     updateLODTransition(now);
     if (state.rainSpeed > 0 && hasVisible3DRain()) {
-      state.fallingProgress = (state.fallingProgress + delta * state.rainSpeed / BASE_FALL_CYCLE_SECONDS) % 1;
-      rainLayer.setAnimationProgress(state.fallingProgress);
+      state.fallingCycles += delta * state.rainSpeed / BASE_FALL_CYCLE_SECONDS;
+      rainLayer.setFallingCycles(state.fallingCycles);
     }
     if (state.lodTransition || state.autoRotating || (state.rainSpeed > 0 && hasVisible3DRain())) wakeApplicationFrame();
     else lastApplicationFrame = null;

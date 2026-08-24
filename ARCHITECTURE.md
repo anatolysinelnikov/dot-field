@@ -25,7 +25,7 @@ Its RAF runs only for the existing 0.2-second LOD transition, compact
 auto-rotation, or visible L13/L14 rain with a nonzero speed setting.
 Auto-rotation changes only camera bearing at 2.5 degrees per second; it never
 changes weather coordinates or rebuilds instance sets. A compact independent
-rain-speed slider defaults to 1×, while 0× pauses falling motion without
+rain-speed slider defaults to 2×, while 0× pauses falling motion without
 advancing its retained animation progress.
 
 ## Geographic sampling and LOD
@@ -76,7 +76,7 @@ appearance mapping. Neighboring cells therefore share exactly the same corner
 values without per-droplet synthetic field evaluations.
 
 Every potential droplet derives its selector, column phase, length/width,
-opacity variation, speed factor, and two-axis visual scatter from
+opacity variation, speed factor, upper trail opacity, and two-axis visual scatter from
 `(canonicalX, canonicalY, slotIndex)` through a stable integer hash. Field
 evaluation remains at the unmodified sample center; only droplet geometry is
 placed across 90% of the cell by an R2/plastic-ratio low-discrepancy sequence
@@ -94,17 +94,21 @@ one instanced four-vertex triangle strip. The vertex shader projects its two rad
 then faces the narrow dimension toward the camera in clip space; the fragment
 shader supplies anti-aliased rounded-capsule coverage plus a smooth vertical
 trail gradient: the lower Earth-facing end is fully opaque and the upper end is
-30% of base opacity. The result avoids 3D capsule meshes while retaining
+individually derived from deterministic droplet identity. The result avoids 3D
+capsule meshes while retaining
 local-radial streak direction and depth testing.
 
-The close-LOD instance stores a deterministic base vertical phase and a stable
-0.85×–1.15× speed factor instead of a CPU-updated altitude. A single
-renderer-local animation progress uniform uses
-`fract(basePhase - progress * speedFactor)` to move droplets down to Earth and
-wrap them back to the common shell. The 0×–2× rain-speed slider advances that
-uniform at a four-second full-column cycle at 1× (two seconds at 2×), only when
-L13/L14 is visible; it never rebuilds instances or advances synthetic weather
-time.
+The close-LOD instance stores a deterministic base vertical phase, a stable
+0.85×–1.15× speed factor, and 0.00–0.20 upper trail opacity instead of a
+CPU-updated altitude. A continuously accumulated renderer-local falling-cycle
+uniform uses `fract(basePhase - fallingCycles * speedFactor)` to move each
+droplet down to Earth and wrap it individually back to the common shell, with
+no global 0–1 reset. The 0×–2× rain-speed slider defaults to 2× and advances
+that uniform at a four-second full-column cycle at 1× (two seconds at 2×), only
+when L13/L14 is visible; it never rebuilds instances or advances synthetic
+weather time. The fragment shader keeps each Earth-facing lower end at full
+base opacity and smoothly fades its upper end to that streak's deterministic
+upper-opacity value.
 
 Buffers are reusable and are uploaded only when an LOD set changes. The static
 scene is otherwise repainted solely by MapLibre navigation. The per-cell budget
