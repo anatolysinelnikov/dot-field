@@ -5,7 +5,8 @@ import { smoothstep } from './math.js';
 // Metres. MapLibre 5.24's projectTileFor3D accepts this altitude directly and
 // turns it into a radial Globe offset, so the cloud base follows the Earth.
 const COLUMN_BOTTOM_METRES = 180;
-const COLUMN_TOP_METRES = 8200;
+const COLUMN_TOP_METRES = 10000;
+const SCATTER_FOOTPRINT = 0.72;
 const SLOT_CAPACITY = Object.freeze({ 10: 24, 11: 24, 12: 24, 13: 12, 14: 4 });
 const INSTANCE_STRIDE = 6;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
@@ -132,11 +133,15 @@ export class GeographicRainLayer {
         const phase = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x85ebca6b);
         const variation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xc2b2ae35);
         const opacityVariation = hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x27d4eb2f);
+        // The field stays evaluated at the fixed sample center. These two
+        // stable slot offsets only distribute rendered rain inside its cell.
+        const scatterX = (hashUnit(sample.canonicalX, sample.canonicalY, slot, 0x165667b1) - 0.5) * sample.spacing * SCATTER_FOOTPRINT;
+        const scatterY = (hashUnit(sample.canonicalX, sample.canonicalY, slot, 0xd3a2646c) - 0.5) * sample.spacing * SCATTER_FOOTPRINT;
         const length = 145 + strength * 370 + variation * 95;
         const altitude = COLUMN_BOTTOM_METRES + phase * Math.max(1, COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES - length);
         const width = 0.85 + strength * 1.35 + variation * 0.3;
         const opacity = (0.24 + strength * 0.58) * (0.78 + opacityVariation * 0.22);
-        this.writer.push(sample.mercator[0], sample.mercator[1], altitude, length, width, opacity);
+        this.writer.push(sample.mercator[0] + scatterX, sample.mercator[1] + scatterY, altitude, length, width, opacity);
       }
     }
     return this.writer.finish();

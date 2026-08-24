@@ -28,7 +28,10 @@ progress.
 `geographic-lod.js` remains the shared globally anchored dyadic Web-Mercator
 topology. Display levels are L10–L14, identities are L15 canonical integer
 coordinates, and camera movement never reseats the grid. Logical zoom keeps
-the existing latitude correction for Globe camera movement.
+the existing latitude correction for Globe camera movement. Camera zoom is
+independent of sampling in this experiment: MapLibre permits zoom through 13,
+while logical weather zoom clamps at L14. Further camera zoom only magnifies
+and reprojects the existing L14 rain geometry.
 
 On a level transition the renderer builds deterministic old and new instance
 sets once, and crossfades them with the existing smooth 0.2-second transition.
@@ -41,14 +44,17 @@ memory and draw work.
 
 The renderer evaluates one prepared geographic field frame at `t = 0.5` only
 when an LOD set is built. Each rain-bearing geographic sample is a conceptual
-column from 180 m to 8,200 m; intensity never alters that vertical range.
+column from 180 m to 10,000 m; intensity never alters that vertical range.
 Instead it controls deterministic slot activation (the strongest signal), then
 restrained opacity, length, and width. Empty/insignificant slots are omitted.
 
-Every potential droplet derives its selector, column phase, length/width and
-opacity variation from `(canonicalX, canonicalY, slotIndex)` through a stable
-integer hash. There is no runtime randomness, camera-dependent placement, or
-jitter. The `phase` is retained as the future basis for Step 2 motion equivalent
+Every potential droplet derives its selector, column phase, length/width,
+opacity variation, and two-axis visual scatter from
+`(canonicalX, canonicalY, slotIndex)` through a stable integer hash. Field
+evaluation remains at the unmodified sample center; only droplet geometry is
+offset by independent x/y values across 72% of the cell footprint. There is no
+runtime randomness, camera-dependent placement, or jitter. The `phase` is
+retained as the future basis for Step 2 motion equivalent
 to `fract(globalTime * speed + phase)`.
 
 MapLibre GL JS 5.24.0's custom shader prelude provides
