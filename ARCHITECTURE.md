@@ -123,9 +123,12 @@ upper-opacity value.
 Both renderers use reusable buffers and rebuild only when an LOD set changes.
 The static surface Dots never drive an animation RAF. The per-cell 3D budget is
 bounded at 512, while the area-normalized close-LOD target keeps actual work
-near 3,000 visible streaks. The layers are added before the first symbol layer
-in deterministic order: basemap, surface Dots, 3D rain, labels. This branch has
-no storm/lightning, hail, clouds, or weather-time animation.
+near 3,000 visible streaks. The layers follow current-main MapTiler context
+ordering: basemap/background, surface Dots, 3D rain, semi-transparent water
+tint, coastline/water boundary, administrative boundaries, water labels, then
+geographic/place labels. Native `Water shadow` is hidden, and other symbol
+layers are moved below the weather stack as on main. This branch has no
+storm/lightning, hail, clouds, or weather-time animation.
 
 ## Shared field and future work
 
