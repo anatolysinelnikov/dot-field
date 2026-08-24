@@ -9,13 +9,17 @@
 ## Project model
 
 This branch is a marketing-oriented, frozen-weather rain scene on a MapLibre
-Globe. It uses flat precipitation at distant LODs and deterministic 3D rain
-streaks at close LODs.
+Globe. It uses the main-compatible surface Dots precipitation renderer at every
+display LOD, with deterministic 3D rain streaks added at close LODs.
 The synthetic geographic field remains independent of MapLibre and rendering,
 and the existing time-aware field API remains available for later steps.
 
 ```text
-app/UI -> GeographicRainLayer -> geographic LOD / geography -> field -> math/config
+app/UI
+├── GeographicDotsLayer -> surface precipitation
+└── GeographicRainLayer -> 3D rain
+        ↓
+shared geographic LOD / geography -> field -> math/config
 ```
 
 `src/app.js` owns MapLibre construction, the fixed `t = 0.5` weather frame,
@@ -41,26 +45,32 @@ and reprojects the existing L14 rain geometry.
 On a level transition the renderer builds deterministic old and new instance
 sets once, and crossfades them with the existing smooth 0.2-second transition.
 No weather values are reevaluated during camera movement or transition frames.
-Rain population is area-normalized instead of using a per-level slot table.
+Surface Dots receive each L10–L14 level and the app-owned adjacent-level
+transition directly, retaining their normal deterministic parent/child or
+direct-pair LOD behavior. Rain population is area-normalized instead of using
+a per-level slot table.
 Each cell receives a deterministic rounded budget of
 `1.7 × averageCornerRainStrength × (sampleSpacing / L14Spacing)²`, bounded at 512 droplets.
 Four finer cells therefore replace one coarse cell without materially changing
-the detailed-rain population when L13/L14 is active. Distant L10–L12 use the
-main Dots precipitation pyramid instead of materializing that budget.
+the detailed-rain population when L13/L14 is active.
 
-## LOD rain representations — `src/engine/geographic-rain-layer.js`
+## Surface Dots and 3D rain representations
 
-The renderer evaluates one prepared geographic field frame at fixed `t = 0.5`
-only when an LOD set is built. L10–L12 reuse `GeographicSymbolPyramid`, the
-same main-Dots machinery: L13 is its reference grid and lower levels are
-derived by deterministic area-preserving reduction of rain and strong-rain
-radius. The rain-only renderer draws the same two surface-attached Dots passes
-in the same order and colors (rain, then strong rain), without rendering hazard
-channels. At the frozen frame these are 37/13, 124/30, and 440/93
-rain/strong instances for L10/L11/L12. L13–L14 use the reconstructed 3D
-streak population (2,903 / 2,959 visible instances). The existing 0.2-second
-transition crossfades the two representations at L12→L13; there is no
-representation morph or camera-based sampling.
+`GeographicDotsLayer` is the real surface Dots renderer at L10–L14. It owns
+the shared `GeographicSymbolPyramid`: L13 is its reference grid, lower levels
+use deterministic area-preserving rain and strong-rain radius reduction, and
+the surface renderer retains main's colors, draw order, blending, depth, and
+polygon offset. This experiment constructs it with `renderHazards: false`, so
+only its rain and strong-rain passes are drawn; its default behavior still
+renders storm and hail for normal usage.
+
+`GeographicRainLayer` is independent and 3D-only. It evaluates the same frozen
+field directly, never Dots geometry. It produces no instances at L10–L12 and
+draws the reconstructed streak population at L13–L14 (2,903 / 2,959 instances
+at the frozen frame). Surface Dots remain visible underneath it at every LOD.
+The app routes the same 0.2-second transition to both layers: Dots transition
+normally throughout, while rain crossfades between empty and populated 3D sets
+at L12↔L13 and between deterministic streak sets at L13↔L14.
 
 Each close-LOD rain cell is a conceptual column from 180 m to 10,000 m;
 intensity never alters that vertical range. Instead it controls deterministic
@@ -110,11 +120,12 @@ weather time. The fragment shader keeps each Earth-facing lower end at full
 base opacity and smoothly fades its upper end to that streak's deterministic
 upper-opacity value.
 
-Buffers are reusable and are uploaded only when an LOD set changes. The static
-scene is otherwise repainted solely by MapLibre navigation. The per-cell budget
-is bounded at 512, while the area-normalized close-LOD target keeps actual work
-near 3,000 visible streaks. This branch has no storm/lightning, hail, clouds,
-or weather-time animation.
+Both renderers use reusable buffers and rebuild only when an LOD set changes.
+The static surface Dots never drive an animation RAF. The per-cell 3D budget is
+bounded at 512, while the area-normalized close-LOD target keeps actual work
+near 3,000 visible streaks. The layers are added before the first symbol layer
+in deterministic order: basemap, surface Dots, 3D rain, labels. This branch has
+no storm/lightning, hail, clouds, or weather-time animation.
 
 ## Shared field and future work
 

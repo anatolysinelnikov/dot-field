@@ -194,7 +194,7 @@ function isHierarchicalTransition(fromLevel, toLevel) {
 }
 
 export class GeographicDotsLayer {
-  constructor() {
+  constructor({ renderHazards = true } = {}) {
     this.id = 'geographic-weather-dots';
     this.type = 'custom';
     this.renderingMode = '3d';
@@ -211,6 +211,7 @@ export class GeographicDotsLayer {
     this.temporalProgress = 0;
     this.buffersDirty = true;
     this.active = true;
+    this.renderHazards = renderHazards;
   }
 
   onAdd(map, gl) {
@@ -432,7 +433,7 @@ export class GeographicDotsLayer {
     gl.enable(gl.POLYGON_OFFSET_FILL);
     gl.polygonOffset(-1, -1);
     this.renderInstances(gl, programs.circle, args.defaultProjectionData, ['rain', 'strong']);
-    this.renderInstances(gl, programs.hazard, args.defaultProjectionData, ['storm', 'hail']);
+    if (this.renderHazards) this.renderInstances(gl, programs.hazard, args.defaultProjectionData, ['storm', 'hail']);
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.depthMask(true);
   }

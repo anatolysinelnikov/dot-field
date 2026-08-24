@@ -1,6 +1,5 @@
 import { prepareGeographicFieldFrame, geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
 import { setGeographicProjection } from './geographic-layer-utils.js';
-import { GeographicSymbolPyramid } from './geographic-symbol-pyramid.js';
 import { smoothstep } from './math.js';
 
 // Metres. MapLibre 5.24's projectTileFor3D accepts this altitude directly and
@@ -14,10 +13,6 @@ const CELL_FOOTPRINT = 0.9;
 const PLASTIC_RATIO = 1.3247179572447458;
 const INSTANCE_STRIDE = 8;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
-const FLAT_INSTANCE_STRIDE = 4;
-const FLAT_INSTANCE_BYTES = FLAT_INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
-const FLAT_TYPES = ['rain', 'strong'];
-const FLAT_COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1] };
 const QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
 
 function hashUnit(canonicalX, canonicalY, slot, salt) {
@@ -89,26 +84,6 @@ function makeStreakProgram(gl, shaderData) {
   };
 }
 
-function makeFlatProgram(gl, shaderData) {
-  const vertexSource = [
-    '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
-    'in vec2 a_vertex;\nin vec2 a_center;\nin float a_radius;\nin float a_opacity;\nout vec2 v_local;\nout float v_opacity;\nuniform float u_transitionOpacity;\nvoid main() {\n  gl_Position = projectTile(a_center + a_vertex * a_radius);\n  v_local = a_vertex;\n  v_opacity = a_opacity * u_transitionOpacity;\n}'
-  ].join('\n');
-  const fragmentSource = [
-    '#version 300 es', 'precision highp float;', 'in vec2 v_local;\nin float v_opacity;\nuniform vec4 u_color;\nout vec4 fragColor;',
-    'void main() {\n  float distanceToCenter = length(v_local);\n  float edge = fwidth(distanceToCenter);\n  float alpha = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distanceToCenter);\n  fragColor = vec4(u_color.rgb, u_color.a * alpha * v_opacity);\n}'
-  ].join('\n');
-  const program = gl.createProgram();
-  gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
-  gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'Flat rain shader linking failed.');
-  return {
-    program,
-    locations: Object.fromEntries(['a_vertex', 'a_center', 'a_radius', 'a_opacity', 'u_color', 'u_transitionOpacity', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'].map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)]))
-  };
-}
-
 class InstanceWriter {
   constructor() { this.values = new Float32Array(); this.length = 0; }
   reset() { this.length = 0; }
@@ -125,23 +100,7 @@ class InstanceWriter {
   finish() { return this.values.subarray(0, this.length); }
 }
 
-class FlatInstanceWriter {
-  constructor() { this.values = new Float32Array(); this.length = 0; }
-  reset() { this.length = 0; }
-  push(centerX, centerY, radius, opacity) {
-    const next = this.length + FLAT_INSTANCE_STRIDE;
-    if (next > this.values.length) {
-      const values = new Float32Array(Math.max(next, this.values.length * 2, 256));
-      values.set(this.values);
-      this.values = values;
-    }
-    this.values.set([centerX, centerY, radius, opacity], this.length);
-    this.length = next;
-  }
-  finish() { return this.values.subarray(0, this.length); }
-}
-
-function isFlatLevel(samples) { return samples.length && samples[0].level <= 12; }
+function has3DRain(samples) { return samples.length && samples[0].level >= 13; }
 
 export class GeographicRainLayer {
   constructor() {
@@ -152,14 +111,9 @@ export class GeographicRainLayer {
     this.transition = null;
     this.transitionProgress = 1;
     this.writer = new InstanceWriter();
-    this.flatWriters = Object.fromEntries(FLAT_TYPES.map((type) => [type, new FlatInstanceWriter()]));
-    this.flatPyramid = new GeographicSymbolPyramid();
     this.streakInstances = { current: new Float32Array(), from: new Float32Array(), to: new Float32Array() };
-    this.flatInstances = Object.fromEntries(FLAT_TYPES.map((type) => [type, { current: new Float32Array(), from: new Float32Array(), to: new Float32Array() }]));
     this.streakCounts = { current: 0, from: 0, to: 0 };
-    this.flatCounts = Object.fromEntries(FLAT_TYPES.map((type) => [type, { current: 0, from: 0, to: 0 }]));
     this.streakBufferCapacity = { current: 0, from: 0, to: 0 };
-    this.flatBufferCapacity = Object.fromEntries(FLAT_TYPES.map((type) => [type, { current: 0, from: 0, to: 0 }]));
     this.buffersDirty = true;
     this.fixedFrame = null;
     this.fallingCycles = 0;
@@ -171,13 +125,11 @@ export class GeographicRainLayer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, QUAD, gl.STATIC_DRAW);
     this.streakBuffers = Object.fromEntries(Object.keys(this.streakInstances).map((key) => [key, gl.createBuffer()]));
-    this.flatBuffers = Object.fromEntries(FLAT_TYPES.map((type) => [type, Object.fromEntries(['current', 'from', 'to'].map((key) => [key, gl.createBuffer()]))]));
   }
 
   onRemove(map, gl) {
-    if (this.programs) for (const entry of this.programs.values()) { gl.deleteProgram(entry.streak.program); gl.deleteProgram(entry.flat.program); }
-    const flatBuffers = FLAT_TYPES.flatMap((type) => Object.values(this.flatBuffers?.[type] || {}));
-    for (const buffer of [...Object.values(this.streakBuffers || {}), ...flatBuffers, this.quadBuffer]) if (buffer) gl.deleteBuffer(buffer);
+    if (this.programs) for (const program of this.programs.values()) gl.deleteProgram(program.program);
+    for (const buffer of [...Object.values(this.streakBuffers || {}), this.quadBuffer]) if (buffer) gl.deleteBuffer(buffer);
   }
 
   setFixedWeatherTime(time) { this.fixedFrame = prepareGeographicFieldFrame(time); }
@@ -185,8 +137,7 @@ export class GeographicRainLayer {
   setSamples(samples) {
     this.samples = samples;
     this.transition = null;
-    if (isFlatLevel(samples)) this.setFlatInstances('current', this.buildFlatInstances(samples));
-    else this.setStreakInstances('current', this.buildInstances(samples));
+    this.setStreakInstances('current', has3DRain(samples) ? this.buildInstances(samples) : new Float32Array());
     this.buffersDirty = true;
     this.map?.triggerRepaint();
   }
@@ -195,10 +146,8 @@ export class GeographicRainLayer {
     this.samples = toSamples;
     this.transition = { fromSamples, toSamples };
     this.transitionProgress = progress;
-    if (isFlatLevel(fromSamples)) this.setFlatInstances('from', this.buildFlatInstances(fromSamples));
-    else this.setStreakInstances('from', this.buildInstances(fromSamples));
-    if (isFlatLevel(toSamples)) this.setFlatInstances('to', this.buildFlatInstances(toSamples));
-    else this.setStreakInstances('to', this.buildInstances(toSamples));
+    this.setStreakInstances('from', has3DRain(fromSamples) ? this.buildInstances(fromSamples) : new Float32Array());
+    this.setStreakInstances('to', has3DRain(toSamples) ? this.buildInstances(toSamples) : new Float32Array());
     this.buffersDirty = true;
     this.map?.triggerRepaint();
   }
@@ -209,16 +158,6 @@ export class GeographicRainLayer {
   setStreakInstances(key, instances) {
     this.streakInstances[key] = instances;
     this.streakCounts[key] = instances.length / INSTANCE_STRIDE;
-    for (const type of FLAT_TYPES) { this.flatInstances[type][key] = new Float32Array(); this.flatCounts[type][key] = 0; }
-  }
-
-  setFlatInstances(key, instances) {
-    for (const type of FLAT_TYPES) {
-      this.flatInstances[type][key] = instances[type];
-      this.flatCounts[type][key] = instances[type].length / FLAT_INSTANCE_STRIDE;
-    }
-    this.streakInstances[key] = new Float32Array();
-    this.streakCounts[key] = 0;
   }
 
   buildInstances(samples) {
@@ -269,23 +208,6 @@ export class GeographicRainLayer {
     return this.writer.finish();
   }
 
-  buildFlatInstances(samples) {
-    const empty = Object.fromEntries(FLAT_TYPES.map((type) => [type, new Float32Array()]));
-    if (!this.fixedFrame || !samples.length) return empty;
-    const level = samples[0].level;
-    const state = this.flatPyramid.evaluate([level], this.fixedFrame)[level];
-    const anchors = this.flatPyramid.levels.get(level).anchors;
-    for (const type of FLAT_TYPES) this.flatWriters[type].reset();
-    for (let index = 0; index < samples.length; index++) {
-      const anchorIndex = index * 2;
-      for (const [type, radiusKey] of [['rain', 'rainRadius'], ['strong', 'strongRadius']]) {
-        const radius = state[radiusKey][index];
-        if (radius > 0) this.flatWriters[type].push(anchors[anchorIndex], anchors[anchorIndex + 1], radius, 1);
-      }
-    }
-    return Object.fromEntries(FLAT_TYPES.map((type) => [type, this.flatWriters[type].finish()]));
-  }
-
   uploadBuffers(gl) {
     if (!this.buffersDirty) return;
     for (const key of Object.keys(this.streakInstances)) {
@@ -296,15 +218,6 @@ export class GeographicRainLayer {
         this.streakBufferCapacity[key] = bytes;
       }
       if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.streakInstances[key]);
-    }
-    for (const type of FLAT_TYPES) for (const key of ['current', 'from', 'to']) {
-      const bytes = this.flatInstances[type][key].byteLength;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.flatBuffers[type][key]);
-      if (bytes > this.flatBufferCapacity[type][key]) {
-        gl.bufferData(gl.ARRAY_BUFFER, bytes, gl.STATIC_DRAW);
-        this.flatBufferCapacity[type][key] = bytes;
-      }
-      if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.flatInstances[type][key]);
     }
     this.buffersDirty = false;
   }
@@ -331,48 +244,22 @@ export class GeographicRainLayer {
     for (const location of [locations.a_center, locations.a_phase, locations.a_length, locations.a_width, locations.a_opacity, locations.a_speedFactor, locations.a_topOpacity]) gl.vertexAttribDivisor(location, 0);
   }
 
-  renderFlatGroup(gl, entry, projection, key, opacity) {
-    if (opacity <= 0) return;
-    const { locations } = entry;
-    gl.useProgram(entry.program);
-    setGeographicProjection(gl, { matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix, tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition }, projection);
-    gl.uniform1f(locations.u_transitionOpacity, opacity);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-    gl.enableVertexAttribArray(locations.a_vertex);
-    gl.vertexAttribPointer(locations.a_vertex, 2, gl.FLOAT, false, 0, 0);
-    for (const type of FLAT_TYPES) {
-      if (!this.flatCounts[type][key]) continue;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.flatBuffers[type][key]);
-      for (const [location, size, offset] of [[locations.a_center, 2, 0], [locations.a_radius, 1, 8], [locations.a_opacity, 1, 12]]) {
-        gl.enableVertexAttribArray(location);
-        gl.vertexAttribPointer(location, size, gl.FLOAT, false, FLAT_INSTANCE_BYTES, offset);
-        gl.vertexAttribDivisor(location, 1);
-      }
-      gl.uniform4fv(locations.u_color, FLAT_COLORS[type]);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.flatCounts[type][key]);
-      for (const location of [locations.a_center, locations.a_radius, locations.a_opacity]) gl.vertexAttribDivisor(location, 0);
-    }
-  }
-
   render(gl, args) {
     this.uploadBuffers(gl);
     this.programs ||= new Map();
-    let programs = this.programs.get(args.shaderData.variantName);
-    if (!programs) {
-      programs = { streak: makeStreakProgram(gl, args.shaderData), flat: makeFlatProgram(gl, args.shaderData) };
-      this.programs.set(args.shaderData.variantName, programs);
+    let program = this.programs.get(args.shaderData.variantName);
+    if (!program) {
+      program = makeStreakProgram(gl, args.shaderData);
+      this.programs.set(args.shaderData.variantName, program);
     }
     gl.enable(gl.BLEND);
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(false);
     if (this.transition) {
-      this.renderFlatGroup(gl, programs.flat, args.defaultProjectionData, 'from', 1 - this.transitionProgress);
-      this.renderStreakGroup(gl, programs.streak, args.defaultProjectionData, 'from', 1 - this.transitionProgress);
-      this.renderFlatGroup(gl, programs.flat, args.defaultProjectionData, 'to', this.transitionProgress);
-      this.renderStreakGroup(gl, programs.streak, args.defaultProjectionData, 'to', this.transitionProgress);
+      this.renderStreakGroup(gl, program, args.defaultProjectionData, 'from', 1 - this.transitionProgress);
+      this.renderStreakGroup(gl, program, args.defaultProjectionData, 'to', this.transitionProgress);
     } else {
-      this.renderFlatGroup(gl, programs.flat, args.defaultProjectionData, 'current', 1);
-      this.renderStreakGroup(gl, programs.streak, args.defaultProjectionData, 'current', 1);
+      this.renderStreakGroup(gl, program, args.defaultProjectionData, 'current', 1);
     }
     gl.depthMask(true);
   }

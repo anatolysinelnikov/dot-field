@@ -2,6 +2,7 @@ import { LOD_MORPH_SECONDS } from './engine/config.js';
 import { clamp, smoothstep } from './engine/math.js';
 import { WEATHER_REGION } from './engine/geography.js';
 import { MAX_LOGICAL_SAMPLING_ZOOM, logicalZoomLatitudeAdjustment, selectMercatorGridSamples, zoomToMercatorGridLevel } from './engine/geographic-lod.js';
+import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 import { GeographicRainLayer } from './engine/geographic-rain-layer.js';
 
 const FIXED_WEATHER_TIME = 0.5;
@@ -37,6 +38,7 @@ const map = new window.maplibregl.Map({
 });
 map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top-right');
 
+const dotsLayer = new GeographicDotsLayer({ renderHazards: false });
 const rainLayer = new GeographicRainLayer();
 rainLayer.setFixedWeatherTime(FIXED_WEATHER_TIME);
 const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, resettingView: false, mapReady: false, autoRotating: false, rainSpeed: Number(rainSpeed.value), fallingCycles: 0 };
@@ -46,11 +48,17 @@ let lastMapErrorSignature = '';
 
 function cameraState() { return { rawZoom: map.getZoom(), latitude: clamp(map.getCenter().lat, -MAX_SAMPLING_LATITUDE, MAX_SAMPLING_LATITUDE) }; }
 function rebaseCamera() { state.camera = cameraState(); }
-function commitSamples(level, samples) { state.lod = { level }; state.samples = samples; rainLayer.setSamples(samples); }
+function commitSamples(level, samples) {
+  state.lod = { level };
+  state.samples = samples;
+  dotsLayer.setSamples(samples, FIXED_WEATHER_TIME);
+  rainLayer.setSamples(samples);
+}
 function startAdjacentTransition(level, now) {
   const toLevel = state.lod.level + Math.sign(level - state.lod.level);
   const toSamples = selectMercatorGridSamples(toLevel).samples;
   state.lodTransition = { fromLevel: state.lod.level, toLevel, fromSamples: state.samples, toSamples, start: now, rawProgress: 0 };
+  dotsLayer.setTransition(state.samples, toSamples, FIXED_WEATHER_TIME);
   rainLayer.setTransition(state.samples, toSamples);
   wakeApplicationFrame();
 }
@@ -65,6 +73,7 @@ function rebuildSamples(level, now = performance.now()) {
   if (level === transition.fromLevel || Math.sign(level - transition.toLevel) !== direction) {
     const rawProgress = 1 - transition.rawProgress;
     state.lodTransition = { fromLevel: transition.toLevel, toLevel: transition.fromLevel, fromSamples: transition.toSamples, toSamples: transition.fromSamples, start: now - rawProgress * LOD_MORPH_SECONDS * 1000, rawProgress };
+    dotsLayer.setTransition(transition.toSamples, transition.fromSamples, FIXED_WEATHER_TIME, smoothstep(0, 1, rawProgress));
     rainLayer.setTransition(transition.toSamples, transition.fromSamples, smoothstep(0, 1, rawProgress));
     wakeApplicationFrame();
   }
@@ -74,6 +83,7 @@ function updateLODTransition(now) {
   if (!transition) return;
   const rawProgress = clamp((now - transition.start) / (LOD_MORPH_SECONDS * 1000), 0, 1);
   transition.rawProgress = rawProgress;
+  dotsLayer.setTransitionProgress(smoothstep(0, 1, rawProgress));
   rainLayer.setTransitionProgress(smoothstep(0, 1, rawProgress));
   if (rawProgress < 1) return;
   state.lodTransition = null;
@@ -90,8 +100,9 @@ function updateLogicalSamplingZoom() {
   state.camera = next;
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
 }
-function initializeRainLayer() {
+function initializeRainLayers() {
   const firstSymbol = (map.getStyle().layers || []).find((layer) => layer.type === 'symbol');
+  if (!map.getLayer(dotsLayer.id)) map.addLayer(dotsLayer, firstSymbol?.id);
   if (!map.getLayer(rainLayer.id)) map.addLayer(rainLayer, firstSymbol?.id);
   if (state.mapReady) return;
   state.mapReady = true;
@@ -148,7 +159,7 @@ zoomOut.addEventListener('click', () => map.zoomOut());
 autoRotate.addEventListener('click', () => setAutoRotation(!state.autoRotating));
 rainSpeed.addEventListener('input', () => setRainSpeed(Number(rainSpeed.value)));
 resetView.addEventListener('click', resetMapView);
-map.on('style.load', () => { if (!state.mapReady) map.setProjection({ type: 'globe' }); initializeRainLayer(); });
+map.on('style.load', () => { if (!state.mapReady) map.setProjection({ type: 'globe' }); initializeRainLayers(); });
 map.on('move', updateLogicalSamplingZoom);
 map.on('move', updateResetViewControl);
 map.on('rotate', updateResetViewControl);
