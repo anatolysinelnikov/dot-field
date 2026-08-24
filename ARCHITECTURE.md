@@ -37,10 +37,10 @@ advancing its retained animation progress.
 `geographic-lod.js` remains the shared globally anchored dyadic Web-Mercator
 topology. Display levels are L10–L14, identities are L15 canonical integer
 coordinates, and camera movement never reseats the grid. Logical zoom keeps
-the existing latitude correction for Globe camera movement. Camera zoom is
-independent of sampling in this experiment: MapLibre permits zoom through 13,
-while logical weather zoom clamps at L14. Further camera zoom only magnifies
-and reprojects the existing L14 rain geometry.
+the existing latitude correction for Globe camera movement. This experiment
+uses the same latitude-aware raw camera maximum as main, with the camera limit
+tied to `MAX_LOGICAL_SAMPLING_ZOOM` and therefore the maximum displayed L14
+weather LOD.
 
 On a level transition the renderer builds deterministic old and new instance
 sets once, and crossfades them with the existing smooth 0.2-second transition.

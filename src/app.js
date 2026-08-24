@@ -1,13 +1,17 @@
 import { LOD_MORPH_SECONDS } from './engine/config.js';
 import { clamp, smoothstep } from './engine/math.js';
 import { WEATHER_REGION } from './engine/geography.js';
-import { MAX_LOGICAL_SAMPLING_ZOOM, logicalZoomLatitudeAdjustment, selectMercatorGridSamples, zoomToMercatorGridLevel } from './engine/geographic-lod.js';
+import {
+  MAX_LOGICAL_SAMPLING_ZOOM,
+  logicalZoomLatitudeAdjustment,
+  rawZoomForLogicalSamplingZoom,
+  selectMercatorGridSamples,
+  zoomToMercatorGridLevel
+} from './engine/geographic-lod.js';
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 import { GeographicRainLayer } from './engine/geographic-rain-layer.js';
 
 const FIXED_WEATHER_TIME = 0.5;
-// Camera inspection is intentionally independent from the L14 weather cap.
-const CAMERA_MAX_ZOOM = 13;
 const AUTO_ROTATE_DEGREES_PER_SECOND = 2.5;
 const BASE_FALL_CYCLE_SECONDS = 4;
 const MAX_SAMPLING_LATITUDE = 85;
@@ -55,11 +59,17 @@ const MAPTILER_WATER_LABEL_IDS = [
 const MAPTILER_WATER_WASH_ID = 'geographic-water-wash';
 const MAPTILER_WATER_BOUNDARY_ID = 'geographic-water-boundaries';
 const MAPTILER_WATER_TINT_ID = 'geographic-water-tint';
+const REFERENCE_LATITUDE = WEATHER_REGION.center[1];
+const INITIAL_RAW_MAX_ZOOM = rawZoomForLogicalSamplingZoom(
+  MAX_LOGICAL_SAMPLING_ZOOM,
+  REFERENCE_LATITUDE,
+  REFERENCE_LATITUDE
+);
 const map = new window.maplibregl.Map({
   container: 'map',
   style: MAP_STYLE,
   center: WEATHER_REGION.center, zoom: WEATHER_REGION.initialZoom, minZoom: initialMinZoom,
-  maxZoom: CAMERA_MAX_ZOOM, maxPitch: 75, attributionControl: false,
+  maxZoom: INITIAL_RAW_MAX_ZOOM, maxPitch: 75, attributionControl: false,
   canvasContextAttributes: { antialias: true }
 });
 map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top-right');
@@ -67,13 +77,23 @@ map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top
 const dotsLayer = new GeographicDotsLayer({ renderHazards: false });
 const rainLayer = new GeographicRainLayer();
 rainLayer.setFixedWeatherTime(FIXED_WEATHER_TIME);
-const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, resettingView: false, mapReady: false, autoRotating: false, rainSpeed: Number(rainSpeed.value), fallingCycles: 0 };
+const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, rawMaxZoom: INITIAL_RAW_MAX_ZOOM, resettingView: false, mapReady: false, autoRotating: false, rainSpeed: Number(rainSpeed.value), fallingCycles: 0 };
 let applicationFrameQueued = false;
 let lastApplicationFrame = null;
 let lastMapErrorSignature = '';
 
 function cameraState() { return { rawZoom: map.getZoom(), latitude: clamp(map.getCenter().lat, -MAX_SAMPLING_LATITUDE, MAX_SAMPLING_LATITUDE) }; }
 function rebaseCamera() { state.camera = cameraState(); }
+function updateRawMapMaxZoom(latitude) {
+  const nextRawMaxZoom = rawZoomForLogicalSamplingZoom(
+    MAX_LOGICAL_SAMPLING_ZOOM,
+    latitude,
+    REFERENCE_LATITUDE
+  );
+  if (!Number.isFinite(nextRawMaxZoom) || Math.abs(nextRawMaxZoom - state.rawMaxZoom) < 1e-6) return;
+  state.rawMaxZoom = nextRawMaxZoom;
+  map.setMaxZoom(nextRawMaxZoom);
+}
 function commitSamples(level, samples) {
   state.lod = { level };
   state.samples = samples;
@@ -118,6 +138,7 @@ function updateLODTransition(now) {
 }
 function updateLogicalSamplingZoom() {
   const next = cameraState();
+  updateRawMapMaxZoom(next.latitude);
   if (state.resettingView) { state.camera = next; updateResetViewControl(); return; }
   if (!state.camera) { state.camera = next; return; }
   let delta = next.rawZoom - state.camera.rawZoom;
