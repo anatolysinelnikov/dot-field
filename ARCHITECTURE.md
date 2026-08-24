@@ -69,9 +69,11 @@ horizontal scatter, bilinear candidate reconstruction, random motion, or
 camera-dependent identity.
 
 An emitter represents a continuous repeating sequence, but only its current
-drop is visible. Each emitter has a deterministic base phase and one
-0.90×–1.10× speed hashed from stable sample identity, so emitters remain
-asynchronous while the shader advances their falling cycles. Strong rain is
+drop is visible. Each emitter has a deterministic base phase and a rate driven
+by `rainRadius / sampleSpacing`: a compact coverage mapping raises the
+magnitude rate from 1.0× for weak rain to 1.45× for the strongest rain, then a
+stable 0.95×–1.05× identity variation keeps emitters asynchronous. The shader
+advances these rates with the global 0×–4× slider (default 2×). Strong rain is
 encoded temporally rather than with simultaneous slots: `strongFraction =
 clamp(strongRadius² / rainRadius², 0, 1)` selects the dark-blue share of an
 eight-event deterministic, evenly distributed sequence. The event index and
@@ -82,23 +84,25 @@ The vertical column is deliberately exaggerated from 150 m to 15,000 m for the
 normal main-compatible camera. `projectTileFor3D(vec2 posInTile, float elevation)`
 follows the local Globe radial direction. One instanced quad per drop is
 screen-facing but aligned to that projected radial direction. Its width is
-projected every frame from world-space `rainRadius` (target 52% of the Surface
-Dot diameter), with a 1.65× teardrop height and small deterministic variation.
-The final width is capped at `0.42 × sampleSpacing`, preserving the outer-area
-scale while preventing center drops from filling their grid cells. The
-projected radial direction also supplies a stable view-angle foreshortening:
-side views retain the full silhouette, while near radial/top-down views reduce
-the height and blend the pointed triangle toward the rounded bulb.
+projected every frame from world-space `rainRadius` (target 60% of the Surface
+Dot diameter), using both local projected tangent derivatives along the
+billboard side axis so bearing changes do not rescale the same drop. It has a
+1.65× teardrop height and small deterministic variation. The final width is
+capped at `0.60 × sampleSpacing`, preserving the outer-area scale while
+preventing center drops from filling their grid cells. The projected radial
+direction also supplies a stable view-angle foreshortening: side views retain
+the full silhouette, while near radial/top-down views reduce the height to a
+minimum factor of 0.52 and blend the pointed triangle toward the rounded bulb.
 
 The fragment shader gives it anti-aliased procedural coverage: a rounded lower
 bulb toward Earth and a pointed upper end away from it, with no trail.
 
-Instances store only anchor, deterministic phase, shared column speed,
+Instances store only anchor, deterministic phase, emitter rate,
 `rainRadius`, `sampleSpacing`, size variation, strong fraction, and a stable
 event-sequence offset. The shader uses `fract(phase - fallingCycles * speed)`
 for altitude and derives the current strong/normal event from the continuous
 cycle count, so accumulated app-owned `fallingCycles` moves and recolors rain
-without rebuilding instances. The 0×–2× slider defaults to 2×; 0× freezes
+without rebuilding instances. The 0×–4× slider defaults to 2×; 0× freezes
 exactly in place. Ripples, splashes, storm, hail, lightning, clouds, wind, and
 weather-time animation are not implemented.
 

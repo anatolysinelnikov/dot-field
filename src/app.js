@@ -264,7 +264,7 @@ function hasVisible3DRain() {
   return state.lod.level >= 13;
 }
 function setRainSpeed(speed) {
-  state.rainSpeed = clamp(speed, 0, 2);
+  state.rainSpeed = clamp(speed, 0, 4);
   if (state.rainSpeed > 0 && hasVisible3DRain()) wakeApplicationFrame();
 }
 function wakeApplicationFrame() {

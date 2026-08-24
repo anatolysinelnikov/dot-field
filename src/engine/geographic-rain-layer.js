@@ -1,17 +1,21 @@
 import { prepareGeographicFieldFrame } from './geography.js';
 import { setGeographicProjection } from './geographic-layer-utils.js';
 import { GeographicSymbolPyramid } from './geographic-symbol-pyramid.js';
-import { clamp } from './math.js';
+import { clamp, smoothstep } from './math.js';
 
 // Deliberately exaggerated visual composition for the main-compatible camera.
 const COLUMN_BOTTOM_METRES = 150;
 const COLUMN_TOP_METRES = 15000;
-const DROP_WIDTH_OF_DOT_DIAMETER = 0.52;
-const MAX_DROP_WIDTH_OF_SPACING = 0.42;
+const DROP_WIDTH_OF_DOT_DIAMETER = 0.60;
+const MAX_DROP_WIDTH_OF_SPACING = 0.60;
 const DROP_HEIGHT_OF_WIDTH = 1.65;
-const MIN_FORESHORTENED_HEIGHT = 0.38;
-const COLUMN_SPEED_MIN = 0.90;
-const COLUMN_SPEED_MAX = 1.10;
+const MIN_FORESHORTENED_HEIGHT = 0.52;
+const EMITTER_RATE_BASE = 1.0;
+const EMITTER_RATE_MAX = 1.45;
+const EMITTER_RATE_COVERAGE_START = 0.04;
+const EMITTER_RATE_COVERAGE_END = 0.86;
+const EMITTER_RATE_IDENTITY_MIN = 0.95;
+const EMITTER_RATE_IDENTITY_MAX = 1.05;
 const EVENT_SEQUENCE_LENGTH = 8;
 const RADIAL_REFERENCE_METRES = 100;
 const EARTH_CIRCUMFERENCE_METRES = 40075016.68557849;
@@ -25,6 +29,10 @@ function hashUnit(x, y, slot, salt) {
   value = Math.imul(value ^ (value >>> 16), 2246822519);
   value = Math.imul(value ^ (value >>> 13), 3266489917);
   return ((value ^ (value >>> 16)) >>> 0) / 4294967296;
+}
+function emitterRateForCoverage(coverage) {
+  const magnitude = smoothstep(EMITTER_RATE_COVERAGE_START, EMITTER_RATE_COVERAGE_END, clamp(coverage, 0, 1));
+  return EMITTER_RATE_BASE + magnitude * (EMITTER_RATE_MAX - EMITTER_RATE_BASE);
 }
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -70,13 +78,15 @@ void main() {
   float tangentOffset = ${RADIAL_REFERENCE_METRES}.0 / metresPerMercatorUnit;
   vec4 tangentX = projectTileFor3D(a_center + vec2(tangentOffset, 0.0), altitude);
   vec4 tangentY = projectTileFor3D(a_center + vec2(0.0, tangentOffset), altitude);
-  float tangentLength = max(length(tangentX.xy / tangentX.w - centerNdc), length(tangentY.xy / tangentY.w - centerNdc));
+  vec2 tangentXDirection = tangentX.xy / tangentX.w - centerNdc;
+  vec2 tangentYDirection = tangentY.xy / tangentY.w - centerNdc;
+  float tangentLength = max(length(tangentXDirection), length(tangentYDirection));
   float foreshortening = tangentLength > 0.000001 ? clamp(radialLength / tangentLength, 0.0, 1.0) : 1.0;
   float maxWidthWorld = a_sampleSpacing * ${MAX_DROP_WIDTH_OF_SPACING};
   float nominalWidthWorld = a_rainRadius * 2.0 * ${DROP_WIDTH_OF_DOT_DIAMETER};
   float widthWorld = min(min(nominalWidthWorld, maxWidthWorld) * a_sizeVariation, maxWidthWorld);
-  vec4 widthPoint = projectTileFor3D(a_center + vec2(widthWorld * 0.5, 0.0), altitude);
-  float widthPixels = max(0.75, length(widthPoint.xy / widthPoint.w - centerNdc) / length(u_pixelsToClip));
+  float sideTangentLength = length(vec2(dot(tangentXDirection, side), dot(tangentYDirection, side)));
+  float widthPixels = max(0.75, sideTangentLength * (widthWorld * 0.5 / tangentOffset) / length(u_pixelsToClip));
   float heightPixels = widthPixels * ${DROP_HEIGHT_OF_WIDTH} * mix(${MIN_FORESHORTENED_HEIGHT}, 1.0, foreshortening);
   vec2 ndc = centerNdc + side * a_vertex.x * widthPixels * u_pixelsToClip + up * a_vertex.y * heightPixels * u_pixelsToClip;
   gl_Position = vec4(ndc * center.w, center.z, center.w);
@@ -165,7 +175,10 @@ export class GeographicRainLayer {
       const sample = pyramidSamples[index];
       const strongFraction = rainRadius > 0 ? clamp(state.strongRadius[index] ** 2 / (rainRadius ** 2), 0, 1) : 0;
       const basePhase = hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x85ebca6b);
-      const speed = COLUMN_SPEED_MIN + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x165667b1) * (COLUMN_SPEED_MAX - COLUMN_SPEED_MIN);
+      const coverage = sample.spacing > 0 ? rainRadius / sample.spacing : 0;
+      const magnitudeRate = emitterRateForCoverage(coverage);
+      const identityRate = EMITTER_RATE_IDENTITY_MIN + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x165667b1) * (EMITTER_RATE_IDENTITY_MAX - EMITTER_RATE_IDENTITY_MIN);
+      const speed = magnitudeRate * identityRate;
       const sizeVariation = 0.9 + hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x27d4eb2f) * 0.2;
       const eventOffset = Math.floor(hashUnit(sample.canonicalX, sample.canonicalY, 0, 0x4cf5ad43) * EVENT_SEQUENCE_LENGTH);
       this.writer.push(anchors[index * 2], anchors[index * 2 + 1], fract(basePhase), speed, rainRadius, sample.spacing, sizeVariation, strongFraction, eventOffset);
