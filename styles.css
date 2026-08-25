@@ -218,17 +218,19 @@ button:active { transform: translateY(1px); }
 
 .render-mode-controls {
   --render-mode-width: min(408px, calc(100vw - 28px));
-  --render-mode-segment-width: calc((var(--render-mode-width) - 10px) / 5);
   position: absolute;
   left: 50%;
   bottom: var(--floating-controls-bottom);
   transform: translateX(-50%);
   width: var(--render-mode-width);
-  display: block;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
 }
 
 .render-mode {
   position: relative;
+  flex: 0 0 100%;
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   width: 100%;
@@ -284,12 +286,8 @@ button:active { transform: translateY(1px); }
 .render-mode button:active { transform: none; }
 
 .area-smooth {
-  position: absolute;
-  right: 4px;
-  bottom: calc(100% + 8px);
-  width: var(--render-mode-segment-width);
-  height: 100%;
   display: flex;
+  flex: 0 0 auto;
   padding: 4px;
   border: var(--control-border);
   border-radius: var(--control-radius);
@@ -304,15 +302,17 @@ button:active { transform: translateY(1px); }
 .area-smooth[hidden] { display: none; }
 
 .area-smooth-content {
-  width: 100%;
+  flex: 0 0 auto;
+  width: max-content;
   display: inline-flex;
   align-items: center;
   gap: 7px;
   padding: 0 10px;
   border-radius: var(--control-inset-radius);
+  white-space: nowrap;
 }
 
-.raw-phenomena { left: 4px; right: auto; }
+.raw-phenomena { position: absolute; left: 0; right: auto; bottom: calc(100% + 8px); }
 
 .area-smooth:hover .area-smooth-content,
 .area-smooth:has(input:checked) .area-smooth-content { background: var(--control-inset); }
@@ -334,7 +334,10 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
 
 @media (max-width: 900px) {
   .area-smooth {
-    right: 4px;
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    height: 100%;
   }
 }
 
