@@ -35,7 +35,7 @@ jobs:
           test -n "$MAPTILER_KEY"
           mkdir -p _site
           cp index.html styles.css _site/
-          cp -R src assets _site/
+          cp -R src assets data _site/
           printf '{"maptilerKey":"%s"}\n' "$MAPTILER_KEY" > _site/config.local.json
 
       - name: Upload Pages artifact

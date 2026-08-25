@@ -1,6 +1,6 @@
 import { LOD_MORPH_SECONDS, LOOP_SECONDS } from './engine/config.js';
 import { clamp, smoothstep } from './engine/math.js';
-import { WEATHER_REGION } from './engine/geography.js';
+import { loadActiveWeatherField, WEATHER_REGION } from './engine/geography.js';
 import {
   MAX_LOGICAL_SAMPLING_ZOOM,
   logicalZoomLatitudeAdjustment,
@@ -38,6 +38,8 @@ const initialMinZoom =
     : LARGE_MIN_ZOOM;
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
+
+await loadActiveWeatherField();
 
 async function loadMapTilerKey() {
   try {

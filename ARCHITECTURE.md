@@ -3,13 +3,13 @@
 ## Document status
 
 - Repository: `anatolysinelnikov/dot-field`
-- Architecture: `main` geographic weather representations
+- Architecture: `real-data-2026-08-25-1630MSK` geographic weather representations
 - This document is maintained context, not implementation authority. The current code wins when they differ.
 
 ## Project model
 
 This is a browser-native geographic weather prototype. It uses MapLibre GL JS in
-Globe projection, the deterministic synthetic field in `field.js`, a globally
+Globe projection, a validated static real-data CSV snapshot, a globally
 anchored Mercator sampling topology, and projection-aware MapLibre custom WebGL
 layers. The active modes are **Dots**, **Squares**, **Blur**, and **Areas**.
 
@@ -22,7 +22,7 @@ The weather channels are always independent data channels:
 The active renderer split is intentional:
 
 ```text
-synthetic geographic field
+real geographic field snapshot
         |
         +-- discrete Mercator LOD --> Dots / Squares
         |
@@ -36,8 +36,11 @@ provider format -> normalization -> temporal/spatial interpolation
 -> geographic sampling/reconstruction -> rendering
 ```
 
-`field.js` is only the current deterministic synthetic data-source side of that
-boundary and remains independent of MapLibre, WebGL, and UI.
+`real-weather.js` owns CSV parsing, validation, normalization, typed-array
+storage, and bilinear sampling. The snapshot is loaded once before map
+initialization; renderers receive only normalized channels. The legacy synthetic
+`field.js` remains independent of MapLibre, WebGL, and UI but is not on the
+active data path.
 
 ## Runtime ownership
 
@@ -91,14 +94,26 @@ transition is active. Paused map navigation and static updates use MapLibre's
 own repaint scheduling; beginning or reversing an LOD transition wakes the
 application RAF so its progress still completes while paused.
 
-## Geographic field adapter — `src/engine/geography.js`
+## Real-data geographic adapter — `src/engine/real-weather.js`, `src/engine/geography.js`
 
-`WEATHER_REGION` centralizes the Saint Petersburg anchor, synthetic longitude /
-latitude scale, deterministic trajectory, and support. `WEATHER_SUPPORT` is the
-only support envelope consumed by the geographic topology. A fixed Mercator
-point maps to a fixed synthetic coordinate; camera movement never participates
-in that mapping. `prepareGeographicFieldFrame` prepares time-only field values,
-and `geographicPreparedIntensityAt` evaluates those frames at stable points.
+The active provider is `data/mrl_z3_t+40min_376x239.csv`, containing 89,864 rows
+on a regular 376 × 239 longitude/latitude grid. `real-weather.js` validates the
+header, dimensions, complete grid, regular axes (within rounded-coordinate
+tolerance), nonnegative mm/h values, and supported thunderstorm/hail codes. It
+stores mm/h plus normalized rain, storm, and hail channels in typed arrays and
+bilinearly samples all three channels in geographic coordinates. Normalization is
+`clamp(mmh / 3, 0, 1)` for rain; thunderstorm codes 0/10/11/12 map to
+0/0.2660123/0.4818750/0.6977377; hail codes 0/16/17/18 map to
+0/0.2776807/0.4897500/0.7018193.
+
+`geography.js` is the renderer-facing adapter. It loads and activates the
+snapshot once, keeps the existing time-frame API (all times sample the same
+static field), and converts the existing shared point interface to geographic
+longitude/latitude. `WEATHER_SUPPORT` is a stable rectangle around the source
+nodes with any nonzero channel, padded by one source-grid cell on each side:
+`39.93113..50.12886` longitude and `41.57035..45.12740` latitude. The complete
+CSV envelope remains available inside the provider and is not altered by this
+topology optimization.
 
 ## Shared geographic Mercator topology — `src/engine/geographic-lod.js`
 
@@ -142,7 +157,8 @@ created and no camera-dependent identity is introduced.
 
 ## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`
 
-Blur and Areas share one fixed L14 lattice with 30,240 vertices. Its rows,
+Blur and Areas share one fixed L14 lattice with 104,850 vertices (466 × 225).
+Its rows,
 columns, Mercator positions, and triangle indices are created once from the
 globally anchored geographic topology and cached for the life of the layer.
 L14 gives a roughly 3 km local grid near the experiment anchor. Panning,
@@ -173,8 +189,8 @@ values, avoiding blur of any discrete representation.
 
 Areas starts from the same deterministic L14 samples, but its default
 reconstruction is a separate, shape-preserving dense Mercator lattice. The
-explicit `AREA_RECONSTRUCTION_SUBDIVISIONS = 2` constant produces a 359 × 335
-reconstruction grid from the 180 × 168 source grid. Its CPU pass is a
+explicit `AREA_RECONSTRUCTION_SUBDIVISIONS = 2` constant produces a 931 × 449
+reconstruction grid from the 466 × 225 source grid. Its CPU pass is a
 separable monotone cubic Hermite (PCHIP-style harmonic-slope) interpolator: it
 copies every original L14 node exactly, limits slopes to prevent cubic ringing,
 and constrains between-node values to their rectangular source-cell range.
