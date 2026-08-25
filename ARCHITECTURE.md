@@ -78,7 +78,11 @@ encoded temporally rather than with simultaneous slots: `strongFraction =
 clamp(strongRadius² / rainRadius², 0, 1)` selects the dark-blue share of an
 eight-event deterministic, evenly distributed sequence. The event index and
 color are derived in the shader when a falling cycle wraps; CPU instances are
-not rebuilt.
+not rebuilt. Every emitter instance remains present, but each event also uses a
+separate deterministic duty sequence derived from the same coverage: weak rain
+is about 0.60 visible, medium rain about 0.75–0.80, strong rain about 0.90, and
+maximum rain is fully occupied. Skipped events collapse their quad in the
+vertex shader and leave spatial identity unchanged.
 
 The vertical column is deliberately exaggerated from 150 m to 15,000 m for the
 normal main-compatible camera. `projectTileFor3D(vec2 posInTile, float elevation)`
@@ -99,9 +103,12 @@ blend the pointed triangle toward the rounded bulb.
 The fragment shader gives it anti-aliased procedural coverage: a rounded lower
 bulb toward Earth and a pointed upper end away from it, with no trail. The
 existing precipitation body colors receive only a small procedural upper-side
-highlight and altitude-derived lightening (up to 12%) to separate 3D drops from
-Surface Dots. These are fragment arithmetic only: no extra pass, texture,
-instance, or draw call is added.
+highlight to separate 3D drops from Surface Dots. Visible events fade in only
+over the top 8% of their trajectory, then remain fully opaque through phase 0,
+the ground-contact/end-of-fall boundary. The previous altitude color
+lightening is removed. These are shader arithmetic only: no extra pass,
+texture, instance, or draw call is added; no ripple, puddle, or surface pulse is
+implemented.
 
 Instances store only anchor, deterministic phase, emitter rate,
 `rainRadius`, `sampleSpacing`, size variation, strong fraction, and a stable

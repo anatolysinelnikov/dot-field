@@ -16,6 +16,9 @@ const EMITTER_RATE_COVERAGE_START = 0.04;
 const EMITTER_RATE_COVERAGE_END = 0.86;
 const EMITTER_RATE_IDENTITY_MIN = 0.95;
 const EMITTER_RATE_IDENTITY_MAX = 1.05;
+const DUTY_MIN = 0.60;
+const DUTY_MAX = 1.00;
+const TOP_FADE_FRACTION = 0.08;
 const EVENT_SEQUENCE_LENGTH = 8;
 const RADIAL_REFERENCE_METRES = 100;
 const EARTH_CIRCUMFERENCE_METRES = 40075016.68557849;
@@ -60,12 +63,17 @@ out vec2 v_local;
 out float v_dark;
 out float v_opacity;
 out float v_foreshortening;
-out float v_altitudeLightening;
 void main() {
   float verticalPhase = fract(a_phase - u_fallingCycles * a_speed);
   float eventIndex = floor(u_fallingCycles * a_speed + 1.0 - a_phase);
   float eventSlot = mod(eventIndex * 5.0 + a_eventOffset, ${EVENT_SEQUENCE_LENGTH}.0);
   float eventDark = step(eventSlot + 0.5, a_strongFraction * ${EVENT_SEQUENCE_LENGTH}.0);
+  float coverage = a_sampleSpacing > 0.0 ? a_rainRadius / a_sampleSpacing : 0.0;
+  float dutyMagnitude = smoothstep(${EMITTER_RATE_COVERAGE_START}, ${EMITTER_RATE_COVERAGE_END}, clamp(coverage, 0.0, 1.0));
+  float eventDuty = mix(${DUTY_MIN}, ${DUTY_MAX}, dutyMagnitude);
+  float visibilitySlot = mod(eventIndex * 3.0 + a_eventOffset * 5.0 + 1.0, ${EVENT_SEQUENCE_LENGTH}.0);
+  float eventVisible = step(visibilitySlot + 0.5, eventDuty * ${EVENT_SEQUENCE_LENGTH}.0);
+  float topFade = 1.0 - smoothstep(1.0 - ${TOP_FADE_FRACTION}, 1.0, verticalPhase);
   float altitude = ${COLUMN_BOTTOM_METRES}.0 + verticalPhase * ${COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES}.0;
   vec4 center = projectTileFor3D(a_center, altitude);
   vec4 radial = projectTileFor3D(a_center, altitude + ${RADIAL_REFERENCE_METRES}.0);
@@ -87,21 +95,20 @@ void main() {
   float nominalWidthWorld = a_rainRadius * 2.0 * ${DROP_WIDTH_OF_DOT_DIAMETER};
   float widthWorld = min(min(nominalWidthWorld, maxWidthWorld) * a_sizeVariation, maxWidthWorld);
   float sideTangentLengthPixels = length(vec2(dot(tangentXDirectionPixels, sidePixels), dot(tangentYDirectionPixels, sidePixels)));
-  float widthPixels = max(0.75, sideTangentLengthPixels * (widthWorld * 0.5 / tangentOffset));
+  float widthPixels = max(0.75, sideTangentLengthPixels * (widthWorld * 0.5 / tangentOffset)) * eventVisible;
   float heightPixels = widthPixels * ${DROP_HEIGHT_OF_WIDTH} * mix(${MIN_FORESHORTENED_HEIGHT}, 1.0, foreshortening);
   vec2 pixelOffset = sidePixels * a_vertex.x * widthPixels + upPixels * a_vertex.y * heightPixels;
   vec2 ndc = centerNdc + pixelOffset * u_pixelsToClip;
   gl_Position = vec4(ndc * center.w, center.z, center.w);
   v_local = a_vertex;
   v_dark = eventDark;
-  v_opacity = u_transitionOpacity;
+  v_opacity = u_transitionOpacity * eventVisible * topFade;
   v_foreshortening = foreshortening;
-  v_altitudeLightening = 0.12 * smoothstep(0.0, 1.0, verticalPhase);
 }`
   ].join('\n');
   const fragmentSource = [
     '#version 300 es', 'precision highp float;',
-    'in vec2 v_local;\nin float v_dark;\nin float v_opacity;\nin float v_foreshortening;\nin float v_altitudeLightening;\nout vec4 fragColor;',
+    'in vec2 v_local;\nin float v_dark;\nin float v_opacity;\nin float v_foreshortening;\nout vec4 fragColor;',
     `void main() {
   // Lower circular bulb plus upper triangle: point faces away from Earth.
   vec2 bulb = v_local - vec2(0.0, -0.34);
@@ -115,7 +122,6 @@ void main() {
   float highlightDistance = length((v_local - vec2(-0.30, 0.28)) / vec2(0.58, 0.48));
   float highlightMask = (1.0 - smoothstep(0.18, 1.0, highlightDistance)) * smoothstep(-0.12, 0.24, v_local.y);
   color = mix(color, vec3(1.0), 0.20 * highlightMask);
-  color = mix(color, vec3(1.0), v_altitudeLightening);
   fragColor = vec4(color, alpha * v_opacity);
 }`
   ].join('\n');
