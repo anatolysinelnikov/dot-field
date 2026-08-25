@@ -1,10 +1,24 @@
 import { lngLatToMercator } from './geographic-lod.js';
 import { setGeographicProjection } from './geographic-layer-utils.js';
 
-const COLORS = Object.freeze({
-  precipitation: [0, 0.565, 1, 1],
-  thunderstorm: [1, 0, 1, 1],
-  hail: [1, 0.831, 0, 1]
+const PRECIPITATION_BANDS = Object.freeze([
+  { upper: 0.05, color: [92 / 255, 200 / 255, 1, 1] },
+  { upper: 0.1, color: [36 / 255, 168 / 255, 1, 1] },
+  { upper: 0.3, color: [0, 136 / 255, 1, 1] },
+  { upper: 1, color: [0, 98 / 255, 1, 1] },
+  { upper: 3, color: [0, 60 / 255, 1, 1] },
+  { upper: 10, color: [0, 24 / 255, 216 / 255, 1] },
+  { upper: Infinity, color: [0, 0, 128 / 255, 1] }
+]);
+const THUNDERSTORM_COLORS = Object.freeze({
+  10: [138 / 255, 77 / 255, 1, 1],
+  11: [192 / 255, 0, 1, 1],
+  12: [1, 0, 1, 1]
+});
+const HAIL_COLORS = Object.freeze({
+  16: [200 / 255, 154 / 255, 0, 1],
+  17: [240 / 255, 192 / 255, 0, 1],
+  18: [1, 212 / 255, 0, 1]
 });
 
 function compileShader(gl, type, source) {
@@ -63,9 +77,9 @@ function addCell(vertices, west, east, south, north, insetWest = 0, insetEast = 
 }
 
 function buildGeometry(field) {
-  const precipitation = [];
-  const thunderstorm = [];
-  const hail = [];
+  const precipitation = PRECIPITATION_BANDS.map(() => []);
+  const thunderstorm = Object.fromEntries(Object.keys(THUNDERSTORM_COLORS).map((code) => [code, []]));
+  const hail = Object.fromEntries(Object.keys(HAIL_COLORS).map((code) => [code, []]));
   const width = field.longitudes.length;
   for (let latitudeIndex = 0; latitudeIndex < field.latitudes.length; latitudeIndex++) {
     const south = field.latitudeCellBounds[latitudeIndex];
@@ -76,21 +90,25 @@ function buildGeometry(field) {
       const east = field.longitudeCellBounds[longitudeIndex + 1];
       const hasStorm = field.thunderstormCode[index] !== 0;
       const hasHail = field.hailCode[index] !== 0;
-      if (field.mmh[index] > 0) addCell(precipitation, west, east, south, north);
-      if (hasStorm) {
-        const insetEast = hasHail ? 0.48 : 0.88;
-        addCell(thunderstorm, west, east, south, north, 0.12, insetEast, 0.12, 0.88);
+      const mmh = field.mmh[index];
+      if (mmh > 0) {
+        const bandIndex = PRECIPITATION_BANDS.findIndex(({ upper }) => mmh < upper);
+        addCell(precipitation[bandIndex], west, east, south, north);
       }
-      if (hasHail) {
+      if (hasStorm && thunderstorm[field.thunderstormCode[index]]) {
+        const insetEast = hasHail ? 0.48 : 0.88;
+        addCell(thunderstorm[field.thunderstormCode[index]], west, east, south, north, 0.12, insetEast, 0.12, 0.88);
+      }
+      if (hasHail && hail[field.hailCode[index]]) {
         const insetWest = hasStorm ? 0.52 : 0.12;
-        addCell(hail, west, east, south, north, insetWest, 0.88, 0.12, 0.88);
+        addCell(hail[field.hailCode[index]], west, east, south, north, insetWest, 0.88, 0.12, 0.88);
       }
     }
   }
   return {
-    precipitation: Float32Array.from(precipitation),
-    thunderstorm: Float32Array.from(thunderstorm),
-    hail: Float32Array.from(hail)
+    precipitation: precipitation.map((vertices) => Float32Array.from(vertices)),
+    thunderstorm: Object.fromEntries(Object.entries(thunderstorm).map(([code, vertices]) => [code, Float32Array.from(vertices)])),
+    hail: Object.fromEntries(Object.entries(hail).map(([code, vertices]) => [code, Float32Array.from(vertices)]))
   };
 }
 
@@ -108,18 +126,24 @@ export class RawWeatherLayer {
 
   onAdd(map, gl) {
     this.map = map;
-    this.buffers = {};
-    for (const [type, vertices] of Object.entries(this.geometry)) {
-      const buffer = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-      gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-      this.buffers[type] = buffer;
-    }
+    this.buffers = { precipitation: [], thunderstorm: {}, hail: {} };
+    for (const [index, vertices] of this.geometry.precipitation.entries()) this.buffers.precipitation[index] = this.createBuffer(gl, vertices);
+    for (const [code, vertices] of Object.entries(this.geometry.thunderstorm)) this.buffers.thunderstorm[code] = this.createBuffer(gl, vertices);
+    for (const [code, vertices] of Object.entries(this.geometry.hail)) this.buffers.hail[code] = this.createBuffer(gl, vertices);
+  }
+
+  createBuffer(gl, vertices) {
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+    return buffer;
   }
 
   onRemove(map, gl) {
     for (const entry of this.programs.values()) gl.deleteProgram(entry.program);
-    for (const buffer of Object.values(this.buffers || {})) gl.deleteBuffer(buffer);
+    for (const buffer of this.buffers?.precipitation || []) gl.deleteBuffer(buffer);
+    for (const buffer of Object.values(this.buffers?.thunderstorm || {})) gl.deleteBuffer(buffer);
+    for (const buffer of Object.values(this.buffers?.hail || {})) gl.deleteBuffer(buffer);
   }
 
   setActive(active) {
@@ -141,10 +165,9 @@ export class RawWeatherLayer {
     return program;
   }
 
-  draw(gl, program, type, color, projection) {
-    const vertices = this.geometry[type];
+  draw(gl, program, vertices, buffer, color, projection) {
     if (!vertices.length) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[type]);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.enableVertexAttribArray(program.position);
     gl.vertexAttribPointer(program.position, 2, gl.FLOAT, false, 0, 0);
     setGeographicProjection(gl, {
@@ -167,10 +190,16 @@ export class RawWeatherLayer {
     gl.disable(gl.BLEND);
     gl.disable(gl.DEPTH_TEST);
     const projection = args.defaultProjectionData;
-    this.draw(gl, program, 'precipitation', COLORS.precipitation, projection);
+    for (let index = 0; index < this.geometry.precipitation.length; index++) {
+      this.draw(gl, program, this.geometry.precipitation[index], this.buffers.precipitation[index], PRECIPITATION_BANDS[index].color, projection);
+    }
     if (this.phenomena) {
-      this.draw(gl, program, 'thunderstorm', COLORS.thunderstorm, projection);
-      this.draw(gl, program, 'hail', COLORS.hail, projection);
+      for (const [code, vertices] of Object.entries(this.geometry.thunderstorm)) {
+        this.draw(gl, program, vertices, this.buffers.thunderstorm[code], THUNDERSTORM_COLORS[code], projection);
+      }
+      for (const [code, vertices] of Object.entries(this.geometry.hail)) {
+        this.draw(gl, program, vertices, this.buffers.hail[code], HAIL_COLORS[code], projection);
+      }
     }
   }
 }
