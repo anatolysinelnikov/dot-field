@@ -387,6 +387,7 @@ function setRenderMode(mode) {
 
 let selectedRawCell = null;
 let selectedRawCellKey = null;
+let rawMapDragging = false;
 
 function rawCellKey(cell) {
   return `${cell.longitudeIndex}:${cell.latitudeIndex}`;
@@ -425,7 +426,7 @@ function updateRawTooltipPosition() {
 }
 
 function updateRawHover(event) {
-  if (state.renderMode !== 'raw' || selectedRawCell) return;
+  if (state.renderMode !== 'raw' || selectedRawCell || rawMapDragging) return;
   const cell = rawWeatherField.rawCellAt(event.lngLat.lng, event.lngLat.lat);
   if (!cell) {
     rawTooltip.hidden = true;
@@ -520,6 +521,13 @@ map.on('style.load', () => {
 });
 map.on('mousemove', updateRawHover);
 map.on('click', selectRawCell);
+map.on('dragstart', () => {
+  rawMapDragging = true;
+  dismissRawTooltip();
+});
+map.on('dragend', () => {
+  rawMapDragging = false;
+});
 map.on('mouseout', () => {
   if (!selectedRawCell) rawTooltip.hidden = true;
 });

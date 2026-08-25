@@ -94,13 +94,13 @@ html, body { overflow: hidden; background: #080b12; }
   position: absolute;
   z-index: 4;
   min-width: 156px;
-  padding: 8px 10px;
+  padding: 4px 8px;
   border: var(--control-border);
   border-radius: 8px;
   background: rgba(14, 19, 30, .94);
   box-shadow: var(--control-shadow);
   color: #e5ebf5;
-  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font: 12px/1.28 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   pointer-events: none;
   white-space: pre;
 }
@@ -287,6 +287,7 @@ button:active { transform: translateY(1px); }
   right: 4px;
   bottom: calc(100% + 8px);
   width: var(--render-mode-segment-width);
+  height: 100%;
   display: flex;
   padding: 4px;
   border: var(--control-border);
