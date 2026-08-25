@@ -146,6 +146,46 @@ button:active { transform: translateY(1px); }
 
 .rain-speed-control input { width: 100%; margin: 0; }
 
+.rain-tuning-panel {
+  position: absolute;
+  z-index: 2;
+  top: max(80px, calc(env(safe-area-inset-top, 0px) + 72px));
+  left: max(20px, calc(env(safe-area-inset-left, 0px) + 12px));
+  width: min(232px, calc(100vw - 32px));
+  padding: 9px 10px 10px;
+  border: var(--control-border);
+  border-radius: var(--control-radius);
+  background: var(--control-panel);
+  box-shadow: var(--control-shadow);
+  backdrop-filter: var(--control-backdrop);
+}
+
+.rain-tuning-title {
+  margin-bottom: 6px;
+  color: #c0cad8;
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.rain-tuning-row {
+  display: grid;
+  grid-template-columns: 64px minmax(72px, 1fr) 34px;
+  gap: 7px;
+  align-items: center;
+  min-height: 22px;
+  color: #c0cad8;
+  font-size: 11px;
+}
+
+.rain-tuning-row input { width: 100%; height: 26px; margin: 0; }
+
+.rain-tuning-row output {
+  color: #e5ebf5;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 .zoom-controls {
   position: absolute;
   z-index: 2;

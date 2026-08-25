@@ -22,6 +22,25 @@
       </label>
     </div>
 
+    <section class="rain-tuning-panel" aria-label="Rain tuning">
+      <div class="rain-tuning-title">Rain</div>
+      <label class="rain-tuning-row" for="rainMinSize">
+        <span>Min size</span>
+        <input id="rainMinSize" type="range" min="0.08" max="0.30" step="0.01" value="0.18">
+        <output id="rainMinSizeValue" for="rainMinSize">0.18</output>
+      </label>
+      <label class="rain-tuning-row" for="rainMaxSize">
+        <span>Max size</span>
+        <input id="rainMaxSize" type="range" min="0.20" max="0.50" step="0.01" value="0.32">
+        <output id="rainMaxSizeValue" for="rainMaxSize">0.32</output>
+      </label>
+      <label class="rain-tuning-row" for="rainActivityContrast">
+        <span>Contrast</span>
+        <input id="rainActivityContrast" type="range" min="0.5" max="4.0" step="0.05" value="1.0">
+        <output id="rainActivityContrastValue" for="rainActivityContrast">1.00</output>
+      </label>
+    </section>
+
     <div class="zoom-controls" role="group" aria-label="Map controls">
       <button id="resetView" class="zoom-reset" type="button" aria-label="Reset view" hidden>↺</button>
       <div class="zoom-stepper">

@@ -22,6 +22,12 @@ const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
 const autoRotate = document.querySelector('#autoRotate');
 const rainSpeed = document.querySelector('#rainSpeed');
+const rainMinSize = document.querySelector('#rainMinSize');
+const rainMaxSize = document.querySelector('#rainMaxSize');
+const rainActivityContrast = document.querySelector('#rainActivityContrast');
+const rainMinSizeValue = document.querySelector('#rainMinSizeValue');
+const rainMaxSizeValue = document.querySelector('#rainMaxSizeValue');
+const rainActivityContrastValue = document.querySelector('#rainActivityContrastValue');
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 async function loadMapTilerKey() {
@@ -77,7 +83,7 @@ map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top
 const dotsLayer = new GeographicDotsLayer({ renderHazards: false });
 const rainLayer = new GeographicRainLayer();
 rainLayer.setFixedWeatherTime(FIXED_WEATHER_TIME);
-const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, rawMaxZoom: INITIAL_RAW_MAX_ZOOM, resettingView: false, mapReady: false, autoRotating: false, rainSpeed: Number(rainSpeed.value), fallingCycles: 0 };
+const state = { samples: [], lod: { level: null }, desiredLevel: null, lodTransition: null, logicalSamplingZoom: WEATHER_REGION.initialZoom, camera: null, rawMaxZoom: INITIAL_RAW_MAX_ZOOM, resettingView: false, mapReady: false, autoRotating: false, rainSpeed: Number(rainSpeed.value), rainMinSize: Number(rainMinSize.value), rainMaxSize: Number(rainMaxSize.value), rainActivityContrast: Number(rainActivityContrast.value), fallingCycles: 0 };
 let applicationFrameQueued = false;
 let lastApplicationFrame = null;
 let lastMapErrorSignature = '';
@@ -267,6 +273,28 @@ function setRainSpeed(speed) {
   state.rainSpeed = clamp(speed, 0, 4);
   if (state.rainSpeed > 0 && hasVisible3DRain()) wakeApplicationFrame();
 }
+function updateRainSizeReadouts() {
+  rainMinSize.value = state.rainMinSize.toFixed(2);
+  rainMaxSize.value = state.rainMaxSize.toFixed(2);
+  rainMinSizeValue.textContent = state.rainMinSize.toFixed(2);
+  rainMaxSizeValue.textContent = state.rainMaxSize.toFixed(2);
+}
+function setRainMinSize(value) {
+  state.rainMinSize = Math.min(clamp(value, 0.08, 0.30), state.rainMaxSize);
+  rainLayer.setDropSizeRange(state.rainMinSize, state.rainMaxSize);
+  updateRainSizeReadouts();
+}
+function setRainMaxSize(value) {
+  state.rainMaxSize = Math.max(clamp(value, 0.20, 0.50), state.rainMinSize);
+  rainLayer.setDropSizeRange(state.rainMinSize, state.rainMaxSize);
+  updateRainSizeReadouts();
+}
+function setRainActivityContrast(value) {
+  state.rainActivityContrast = clamp(value, 0.5, 4.0);
+  rainLayer.setActivityContrast(state.rainActivityContrast);
+  rainActivityContrast.value = state.rainActivityContrast.toFixed(2);
+  rainActivityContrastValue.textContent = state.rainActivityContrast.toFixed(2);
+}
 function wakeApplicationFrame() {
   if (applicationFrameQueued) return;
   if (lastApplicationFrame === null) lastApplicationFrame = performance.now();
@@ -290,6 +318,9 @@ zoomIn.addEventListener('click', () => map.zoomIn());
 zoomOut.addEventListener('click', () => map.zoomOut());
 autoRotate.addEventListener('click', () => setAutoRotation(!state.autoRotating));
 rainSpeed.addEventListener('input', () => setRainSpeed(Number(rainSpeed.value)));
+rainMinSize.addEventListener('input', () => setRainMinSize(Number(rainMinSize.value)));
+rainMaxSize.addEventListener('input', () => setRainMaxSize(Number(rainMaxSize.value)));
+rainActivityContrast.addEventListener('input', () => setRainActivityContrast(Number(rainActivityContrast.value)));
 resetView.addEventListener('click', resetMapView);
 map.on('style.load', () => { if (!state.mapReady) map.setProjection({ type: 'globe' }); initializeRainLayers(); });
 map.on('move', updateLogicalSamplingZoom);
