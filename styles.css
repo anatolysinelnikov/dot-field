@@ -93,7 +93,7 @@ html, body { overflow: hidden; background: #080b12; }
 .raw-tooltip {
   position: absolute;
   z-index: 4;
-  min-width: 156px;
+  width: max-content;
   padding: 4px 8px;
   border: var(--control-border);
   border-radius: 8px;
