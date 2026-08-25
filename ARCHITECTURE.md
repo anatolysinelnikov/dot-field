@@ -160,9 +160,12 @@ and rotating do not alter displayed weather density.
 
 Dots retain the existing symbol-pyramid implementation. `GeographicSymbolPyramid`
 caches L10–L14 topology, direct field points, static anchors, dyadic ownership,
-and direct level-pair mappings. It evaluates L13 as the reference, recursively
-reduces L10–L12, and directly evaluates L14. Rain and strong-rain areas are
-conserved independently; hail wins hazard priority during reduction.
+and deterministic parent mappings. L14 is the single direct/reference level;
+L13, L12, L11, and L10 are each deterministically reduced from their immediate
+finer level. Rain and strong-rain areas are conserved independently; hail wins
+hazard priority during reduction. Parent anchors remain weather-independent and
+LOD transitions use the same dyadic parent/child topology for every adjacent
+displayed level, including L14 ↔ L13.
 
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
@@ -177,13 +180,25 @@ the cell side equals the active grid spacing. Geometry is projected by the same
 MapLibre custom-layer shader path, so it follows Globe curvature, pitch,
 bearing, perspective, pan, and depth.
 
-The square pyramid evaluates direct L13+ samples and recursively reduces coarse
-levels: rain averages over immediate deterministic children, while storm and
-hail use the existing average/max-biased intent. The fragment transfer preserves
-the light-blue to strong-blue precipitation hierarchy, magenta storm, yellow
-hail, and hail-over-storm compositing. LOD changes crossfade the deterministic
-parent and child cell sets during the existing 0.2 s transition; no new grid is
-created and no camera-dependent identity is introduced.
+The square pyramid directly samples only L14, then recursively reduces L13,
+L12, L11, and L10 from their immediate deterministic children. Each state keeps
+coverage separate from conditional intensity for rain, storm, and hail. At L14,
+coverage is one for a nonzero sampled channel and zero otherwise. At every
+coarser level, for each channel independently:
+
+```text
+parentCoverage = sum(childCoverage) / childCount
+parentIntensity = sum(childIntensity * childCoverage) / sum(childCoverage)
+```
+
+The intensity is zero when the coverage sum is zero, and fractional child
+coverage participates recursively in the next reduction. Squares carry these
+six values (three intensities and three coverages) through both temporal frame
+attributes. The shader keeps intensity responsible for strength and color while
+using coverage to modulate channel contribution/opacity; hail remains composited
+after storm. LOD changes crossfade the deterministic parent and child cell sets
+during the existing 0.2 s transition; no new grid is created and no
+camera-dependent identity is introduced.
 
 ## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`
 

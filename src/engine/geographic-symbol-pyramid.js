@@ -3,7 +3,7 @@ import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorG
 import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
 import { geographicHazardRadii } from './hazard-renderer.js';
 
-export const REFERENCE_GRID_LEVEL = 13;
+export const REFERENCE_GRID_LEVEL = 14;
 export const STORM_INNER_RATIO = 0.38;
 export const HAIL_AREA_COEFFICIENT = 3 * Math.sqrt(3) / 2;
 export const STORM_AREA_COEFFICIENT = 2 * STORM_INNER_RATIO * Math.sqrt(2);

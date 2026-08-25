@@ -3,8 +3,8 @@ import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographi
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
 
-const REFERENCE_GRID_LEVEL = 13;
-const INSTANCE_STRIDE = 8;
+const REFERENCE_GRID_LEVEL = 14;
+const INSTANCE_STRIDE = 14;
 const CELL_VERTICES = new Float32Array([-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5]);
 
 function compileShader(gl, type, source) {
@@ -18,20 +18,20 @@ function compileShader(gl, type, source) {
 function makeProgram(gl, shaderData) {
   const vertexSource = [
     '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
-    'in vec2 a_vertex;\nin vec2 a_center;\nin vec3 a_values0;\nin vec3 a_values1;\nuniform float u_temporalProgress;\nuniform float u_spacing;\nout vec3 v_values;\nvoid main() {\n  v_values = mix(a_values0, a_values1, u_temporalProgress);\n  gl_Position = projectTile(a_center + a_vertex * u_spacing);\n}'
+    'in vec2 a_vertex;\nin vec2 a_center;\nin vec3 a_values0;\nin vec3 a_values1;\nin vec3 a_coverage0;\nin vec3 a_coverage1;\nuniform float u_temporalProgress;\nuniform float u_spacing;\nout vec3 v_values;\nout vec3 v_coverage;\nvoid main() {\n  v_values = mix(a_values0, a_values1, u_temporalProgress);\n  v_coverage = mix(a_coverage0, a_coverage1, u_temporalProgress);\n  gl_Position = projectTile(a_center + a_vertex * u_spacing);\n}'
   ].join('\n');
   const fragmentSource = [
-    '#version 300 es', 'precision highp float;', 'in vec3 v_values;\nuniform float u_opacity;\nout vec4 fragColor;',
+    '#version 300 es', 'precision highp float;', 'in vec3 v_values;\nin vec3 v_coverage;\nuniform float u_opacity;\nout vec4 fragColor;',
     `float strength(float value, float threshold) { return smoothstep(threshold * 0.45, 0.93, value); }
 void main() {
   float rain = strength(v_values.x, 0.045);
   float strong = smoothstep(${RAIN_MODERATE_MAX.toFixed(3)}, 0.9, v_values.x);
   vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), strong);
-  float alpha = rain;
+  float alpha = rain * v_coverage.x;
   float storm = strength(v_values.y, 0.075);
-  if (storm > 0.0) { color = mix(color, vec3(1.0, 0.0, 1.0), mix(0.45, 1.0, pow(storm, 0.47))); alpha = max(alpha, storm); }
+  if (storm > 0.0 && v_coverage.y > 0.0) { color = mix(color, vec3(1.0, 0.0, 1.0), mix(0.45, 1.0, pow(storm, 0.47)) * v_coverage.y); alpha = max(alpha, storm * v_coverage.y); }
   float hail = strength(v_values.z, 0.11);
-  if (hail > 0.0) { color = mix(color, vec3(1.0, 0.831, 0.0), mix(0.5, 1.0, pow(hail, 0.47))); alpha = max(alpha, hail); }
+  if (hail > 0.0 && v_coverage.z > 0.0) { color = mix(color, vec3(1.0, 0.831, 0.0), mix(0.5, 1.0, pow(hail, 0.47)) * v_coverage.z); alpha = max(alpha, hail * v_coverage.z); }
   fragColor = vec4(color, alpha * u_opacity);
 }`
   ].join('\n');
@@ -40,13 +40,20 @@ void main() {
   gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'Square weather shader linking failed.');
-  const names = ['a_vertex', 'a_center', 'a_values0', 'a_values1', 'u_temporalProgress', 'u_spacing', 'u_opacity', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'];
+  const names = ['a_vertex', 'a_center', 'a_values0', 'a_values1', 'a_coverage0', 'a_coverage1', 'u_temporalProgress', 'u_spacing', 'u_opacity', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'];
   return { program, locations: Object.fromEntries(names.map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)])) };
 }
 
 function makeState(length, reusable) {
-  if (reusable?.rain.length === length) return reusable;
-  return { rain: new Float32Array(length), storm: new Float32Array(length), hail: new Float32Array(length) };
+  if (reusable?.rain.length === length && reusable.rainCoverage?.length === length) return reusable;
+  return {
+    rain: new Float32Array(length),
+    storm: new Float32Array(length),
+    hail: new Float32Array(length),
+    rainCoverage: new Float32Array(length),
+    stormCoverage: new Float32Array(length),
+    hailCoverage: new Float32Array(length)
+  };
 }
 
 function parentIdFor(sample, bounds, parentStep) {
@@ -94,6 +101,9 @@ class GeographicSquarePyramid {
       for (let index = 0; index < reference.samples.length; index++) {
         geographicPreparedIntensityAtXY(frame, reference.fieldPoints[index * 2], reference.fieldPoints[index * 2 + 1], value);
         direct.rain[index] = value.rain; direct.storm[index] = value.storm; direct.hail[index] = value.hail;
+        direct.rainCoverage[index] = value.rain > 0 ? 1 : 0;
+        direct.stormCoverage[index] = value.storm > 0 ? 1 : 0;
+        direct.hailCoverage[index] = value.hail > 0 ? 1 : 0;
       }
       states[REFERENCE_GRID_LEVEL] = direct;
       const minimum = Math.min(...levels.filter((level) => level <= REFERENCE_GRID_LEVEL));
@@ -103,14 +113,22 @@ class GeographicSquarePyramid {
         const state = makeState(parent.samples.length, reusable?.[level]);
         for (let parentIndex = 0; parentIndex < parent.samples.length; parentIndex++) {
           const indices = parent.children[parentIndex];
-          let rain = 0, storm = 0, hail = 0, stormMax = 0, hailMax = 0;
+          let rainCoverage = 0, stormCoverage = 0, hailCoverage = 0;
+          let rain = 0, storm = 0, hail = 0;
           for (const child of indices) {
-            rain += children.rain[child]; storm += children.storm[child]; hail += children.hail[child];
-            stormMax = Math.max(stormMax, children.storm[child]); hailMax = Math.max(hailMax, children.hail[child]);
+            rainCoverage += children.rainCoverage[child];
+            stormCoverage += children.stormCoverage[child];
+            hailCoverage += children.hailCoverage[child];
+            rain += children.rain[child] * children.rainCoverage[child];
+            storm += children.storm[child] * children.stormCoverage[child];
+            hail += children.hail[child] * children.hailCoverage[child];
           }
-          state.rain[parentIndex] = rain / indices.length;
-          state.storm[parentIndex] = (storm / indices.length) * 0.42 + stormMax * 0.58;
-          state.hail[parentIndex] = (hail / indices.length) * 0.28 + hailMax * 0.72;
+          state.rainCoverage[parentIndex] = rainCoverage / indices.length;
+          state.stormCoverage[parentIndex] = stormCoverage / indices.length;
+          state.hailCoverage[parentIndex] = hailCoverage / indices.length;
+          state.rain[parentIndex] = rainCoverage > 0 ? rain / rainCoverage : 0;
+          state.storm[parentIndex] = stormCoverage > 0 ? storm / stormCoverage : 0;
+          state.hail[parentIndex] = hailCoverage > 0 ? hail / hailCoverage : 0;
         }
         states[level] = state;
         children = state;
@@ -191,6 +209,8 @@ export class GeographicSquaresLayer {
       result[offset] = samples[index].mercator[0]; result[offset + 1] = samples[index].mercator[1];
       result[offset + 2] = state0.rain[index]; result[offset + 3] = state0.storm[index]; result[offset + 4] = state0.hail[index];
       result[offset + 5] = state1.rain[index]; result[offset + 6] = state1.storm[index]; result[offset + 7] = state1.hail[index];
+      result[offset + 8] = state0.rainCoverage[index]; result[offset + 9] = state0.stormCoverage[index]; result[offset + 10] = state0.hailCoverage[index];
+      result[offset + 11] = state1.rainCoverage[index]; result[offset + 12] = state1.stormCoverage[index]; result[offset + 13] = state1.hailCoverage[index];
     }
     this.instanceData[group] = result;
     this.instanceCounts[group] = samples.length;
@@ -248,8 +268,12 @@ export class GeographicSquaresLayer {
     gl.vertexAttribPointer(locations.a_values0, 3, gl.FLOAT, false, INSTANCE_STRIDE * 4, 8); gl.vertexAttribDivisor(locations.a_values0, 1);
     gl.enableVertexAttribArray(locations.a_values1);
     gl.vertexAttribPointer(locations.a_values1, 3, gl.FLOAT, false, INSTANCE_STRIDE * 4, 20); gl.vertexAttribDivisor(locations.a_values1, 1);
+    gl.enableVertexAttribArray(locations.a_coverage0);
+    gl.vertexAttribPointer(locations.a_coverage0, 3, gl.FLOAT, false, INSTANCE_STRIDE * 4, 32); gl.vertexAttribDivisor(locations.a_coverage0, 1);
+    gl.enableVertexAttribArray(locations.a_coverage1);
+    gl.vertexAttribPointer(locations.a_coverage1, 3, gl.FLOAT, false, INSTANCE_STRIDE * 4, 44); gl.vertexAttribDivisor(locations.a_coverage1, 1);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.instanceCounts[group]);
-    for (const location of [locations.a_center, locations.a_values0, locations.a_values1]) gl.vertexAttribDivisor(location, 0);
+    for (const location of [locations.a_center, locations.a_values0, locations.a_values1, locations.a_coverage0, locations.a_coverage1]) gl.vertexAttribDivisor(location, 0);
   }
 
   render(gl, args) {
