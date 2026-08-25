@@ -19,8 +19,6 @@ const EMITTER_RATE_IDENTITY_MAX = 1.05;
 const DUTY_MIN = 0.60;
 const DUTY_MAX = 0.90;
 const TOP_FADE_FRACTION = 0.08;
-const INNER_RIM_WIDTH = 0.07;
-const INNER_RIM_DARKENING = 0.22;
 const EVENT_SEQUENCE_LENGTH = 8;
 const RADIAL_REFERENCE_METRES = 100;
 const EARTH_CIRCUMFERENCE_METRES = 40075016.68557849;
@@ -131,12 +129,10 @@ void main() {
   float shapeDistance = mix(bulbDistance, min(bulbDistance, triangleDistance), v_foreshortening);
   float edge = max(fwidth(shapeDistance), 0.012);
   float alpha = 1.0 - smoothstep(-edge, edge, shapeDistance);
-  vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), v_dark);
+  vec3 color = mix(vec3(0.0, 0.439216, 0.8), vec3(0.0, 0.301961, 1.0), v_dark);
   float highlightDistance = length((v_local - vec2(-0.30, 0.28)) / vec2(0.58, 0.48));
   float highlightMask = (1.0 - smoothstep(0.18, 1.0, highlightDistance)) * smoothstep(-0.12, 0.24, v_local.y);
   color = mix(color, vec3(1.0), 0.20 * highlightMask);
-  float rimMask = smoothstep(-${glslFloat(INNER_RIM_WIDTH)}, 0.0, shapeDistance) * (1.0 - smoothstep(0.0, edge, shapeDistance));
-  color = mix(color, color * (1.0 - ${glslFloat(INNER_RIM_DARKENING)}), rimMask);
   fragColor = vec4(color, alpha * v_opacity);
 }`
   ].join('\n');
