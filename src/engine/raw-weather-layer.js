@@ -2,13 +2,18 @@ import { lngLatToMercator } from './geographic-lod.js';
 import { setGeographicProjection } from './geographic-layer-utils.js';
 
 const PRECIPITATION_BANDS = Object.freeze([
-  { upper: 0.05, color: [92 / 255, 200 / 255, 1, 1] },
-  { upper: 0.1, color: [36 / 255, 168 / 255, 1, 1] },
-  { upper: 0.3, color: [0, 136 / 255, 1, 1] },
-  { upper: 1, color: [0, 98 / 255, 1, 1] },
-  { upper: 3, color: [0, 60 / 255, 1, 1] },
-  { upper: 10, color: [0, 24 / 255, 216 / 255, 1] },
-  { upper: Infinity, color: [0, 0, 128 / 255, 1] }
+  { upper: 0.003, color: [232 / 255, 248 / 255, 1, 1] },
+  { upper: 0.01, color: [200 / 255, 238 / 255, 1, 1] },
+  { upper: 0.03, color: [147 / 255, 220 / 255, 1, 1] },
+  { upper: 0.1, color: [88 / 255, 197 / 255, 1, 1] },
+  { upper: 0.3, color: [34 / 255, 170 / 255, 1, 1] },
+  { upper: 1, color: [0, 139 / 255, 1, 1] },
+  { upper: 3, color: [0, 104 / 255, 1, 1] },
+  { upper: 6, color: [0, 74 / 255, 1, 1] },
+  { upper: 10, color: [0, 50 / 255, 222 / 255, 1] },
+  { upper: 15, color: [0, 31 / 255, 175 / 255, 1] },
+  { upper: 25, color: [0, 17 / 255, 116 / 255, 1] },
+  { upper: Infinity, color: [0, 6 / 255, 61 / 255, 1] }
 ]);
 const THUNDERSTORM_COLORS = Object.freeze({
   10: [138 / 255, 77 / 255, 1, 1],
