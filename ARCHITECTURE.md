@@ -40,15 +40,12 @@ provider format -> normalization -> temporal/spatial interpolation
 ```
 
 `real-weather.js` owns CSV parsing, validation, normalization, typed-array
-storage, and support-constrained bilinear sampling. The snapshot is loaded once
-before map initialization; renderers receive only normalized channels. For each
-query, the provider first locates the containing RAW source cell using the same
-midpoint boundaries as RAW. Rain, storm, and hail then apply their independent
-source-support masks (`mmh > 0`, nonzero thunderstorm code, and nonzero hail
-code): an unsupported containing cell returns zero, while a supported cell
-bilinearly interpolates only supported source nodes and renormalizes their
-weights. This keeps channel footprints close to RAW source-cell geometry while
-preserving smooth intensity transitions. The legacy synthetic
+storage, and the representation-independent bilinear reconstruction from
+geographic source nodes. The snapshot is loaded once before map initialization;
+renderers receive only normalized channels. Rain, storm, and hail are sampled
+independently from the four surrounding source-node values, with ordinary
+bilinear weights and final `[0, 1]` clamping. The RAW midpoint-cell diagnostic
+does not constrain this reconstruction. The legacy synthetic
 `field.js` remains independent of MapLibre, WebGL, and UI but is not on the
 active data path.
 
@@ -112,8 +109,8 @@ on a regular 376 × 239 longitude/latitude grid. `real-weather.js` validates the
 header, dimensions, complete grid, regular axes (within rounded-coordinate
 tolerance), nonnegative mm/h values, and supported thunderstorm/hail codes. It
 stores raw mm/h and phenomenon codes plus normalized rain, storm, and hail
-channels in typed arrays and bilinearly samples the normalized channels in
-geographic coordinates. Normalization is
+channels in typed arrays and bilinearly reconstructs the normalized channels
+between geographic source nodes. Normalization is
 `clamp(mmh / 3, 0, 1)` for rain; thunderstorm codes 0/10/11/12 map to
 0/0.2660123/0.4818750/0.6977377; hail codes 0/16/17/18 map to
 0/0.2776807/0.4897500/0.7018193.
@@ -129,14 +126,18 @@ topology optimization.
 
 ## RAW source-grid diagnostic — `src/engine/raw-weather-layer.js`
 
-RAW is a separate static diagnostic representation of the original 376 × 239
-provider grid. It constructs one world-space cell per source node from midpoint
-boundaries (half-spacing at the outer edges), draws raw `mmh > 0` cells as solid
-opaque blue, and draws raw thunderstorm/hail codes as solid magenta/yellow inset
-markers. It never calls the normalized bilinear sampler, Mercator LOD, the L14
-scalar lattice, reconstruction, smoothing, aggregation, or renderer mappings.
-The layer stores only nonzero drawing geometry for performance; zero cells remain
-inspectable through the provider's direct regular-grid cell lookup.
+The source-of-truth weather data is defined at geographic source nodes. RAW is a
+separate static diagnostic representation of the original 376 × 239 provider
+grid: it interprets each source-node value as a piecewise-constant midpoint cell
+(half-spacing at the outer edges), draws raw `mmh > 0` cells as solid opaque
+blue, and draws raw thunderstorm/hail codes as solid magenta/yellow inset
+markers. These RAW cell boundaries are diagnostic, not assumed meteorological
+boundaries. Values between source nodes use the shared bilinear reconstruction;
+RAW does not constrain Dots, Squares, Blur, or Areas. RAW never calls the
+normalized bilinear sampler, Mercator LOD, L14 scalar lattice, reconstruction,
+smoothing, aggregation, or renderer mappings. The layer stores only nonzero
+drawing geometry for performance; zero cells remain inspectable through the
+provider's direct regular-grid cell lookup.
 
 RAW interaction is application-owned: pointer coordinates select the source cell
 directly from the loaded longitude/latitude axes, including zero-valued cells.
@@ -182,23 +183,11 @@ bearing, perspective, pan, and depth.
 
 The square pyramid directly samples only L14, then recursively reduces L13,
 L12, L11, and L10 from their immediate deterministic children. Each state keeps
-coverage separate from conditional intensity for rain, storm, and hail. At L14,
-coverage is one for a nonzero sampled channel and zero otherwise. At every
-coarser level, for each channel independently:
-
-```text
-parentCoverage = sum(childCoverage) / childCount
-parentIntensity = sum(childIntensity * childCoverage) / sum(childCoverage)
-```
-
-The intensity is zero when the coverage sum is zero, and fractional child
-coverage participates recursively in the next reduction. Squares carry these
-six values (three intensities and three coverages) through both temporal frame
-attributes. The shader keeps intensity responsible for strength and color while
-using coverage to modulate channel contribution/opacity; hail remains composited
-after storm. LOD changes crossfade the deterministic parent and child cell sets
-during the existing 0.2 s transition; no new grid is created and no
-camera-dependent identity is introduced.
+only scalar rain, storm, and hail values. Rain averages immediate child values;
+storm and hail retain their average/max-biased reductions. LOD changes crossfade
+the deterministic parent and child cell sets during the existing 0.2 s
+transition; no new grid is created and no camera-dependent identity is
+introduced.
 
 ## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`
 
@@ -210,9 +199,9 @@ L14 gives a roughly 3 km local grid near the experiment anchor. Panning,
 rotation, pitch, resizing, and ordinary camera zoom only reproject this mesh;
 they do not rebuild it or reevaluate weather values.
 
-Each temporal keyframe evaluates raw rain/storm/hail at those fixed vertices
-using the prepared geographic field. Smooth state and coverage remapping are
-computed only for Areas with Smooth enabled. Blur packs/uploads only its L14
+Each temporal keyframe evaluates reconstructed rain/storm/hail at those fixed
+vertices using the prepared geographic field. Smooth state and coverage
+remapping are computed only for Areas with Smooth enabled. Blur packs/uploads only its L14
 vertex values; Areas reconstructs/uploads only dense texture values. The scalar
 mesh is a surface-attached MapLibre custom 3D layer.
 
