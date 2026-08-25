@@ -2,14 +2,14 @@ import { lngLatToMercator } from './geographic-lod.js';
 import { setGeographicProjection } from './geographic-layer-utils.js';
 
 const PRECIPITATION_COLOR_ANCHORS = Object.freeze([
-  { mmh: 0.001, lightness: 0.98, chroma: 0.015, hue: 220 },
-  { mmh: 0.01, lightness: 0.93, chroma: 0.045, hue: 225 },
-  { mmh: 0.1, lightness: 0.84, chroma: 0.09, hue: 232 },
-  { mmh: 1, lightness: 0.70, chroma: 0.15, hue: 242 },
-  { mmh: 4, lightness: 0.58, chroma: 0.19, hue: 248 },
-  { mmh: 10, lightness: 0.46, chroma: 0.17, hue: 252 },
-  { mmh: 25, lightness: 0.34, chroma: 0.13, hue: 257 },
-  { mmh: 50, lightness: 0.22, chroma: 0.08, hue: 262 }
+  { mmh: 0.001, lightness: 0.98, hue: 220 },
+  { mmh: 0.01, lightness: 0.93, hue: 225 },
+  { mmh: 0.1, lightness: 0.84, hue: 232 },
+  { mmh: 1, lightness: 0.70, hue: 242 },
+  { mmh: 4, lightness: 0.58, hue: 248 },
+  { mmh: 10, lightness: 0.46, hue: 252 },
+  { mmh: 25, lightness: 0.34, hue: 257 },
+  { mmh: 50, lightness: 0.22, hue: 262 }
 ]);
 const MIN_PRECIPITATION_COLOR_ANCHOR = PRECIPITATION_COLOR_ANCHORS[0].mmh;
 const MAX_PRECIPITATION_COLOR_ANCHOR = PRECIPITATION_COLOR_ANCHORS[PRECIPITATION_COLOR_ANCHORS.length - 1].mmh;
@@ -18,7 +18,7 @@ function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
-function oklchToSrgb(lightness, chroma, hue) {
+function oklchToLinearSrgb(lightness, chroma, hue) {
   const radians = hue * Math.PI / 180;
   const a = chroma * Math.cos(radians);
   const b = chroma * Math.sin(radians);
@@ -28,11 +28,33 @@ function oklchToSrgb(lightness, chroma, hue) {
   const red = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
   const green = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
   const blue = -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s;
+  return [red, green, blue];
+}
+
+function oklchToSrgb(lightness, chroma, hue) {
+  const [red, green, blue] = oklchToLinearSrgb(lightness, chroma, hue);
   const toSrgb = (value) => {
     const clamped = clamp(value, 0, 1);
     return clamped <= 0.0031308 ? 12.92 * clamped : 1.055 * clamped ** (1 / 2.4) - 0.055;
   };
   return [toSrgb(red), toSrgb(green), toSrgb(blue), 1];
+}
+
+function isInSrgbGamut(lightness, chroma, hue) {
+  const [red, green, blue] = oklchToLinearSrgb(lightness, chroma, hue);
+  return red >= 0 && red <= 1 && green >= 0 && green <= 1 && blue >= 0 && blue <= 1;
+}
+
+function maximumInGamutChroma(lightness, hue) {
+  let lower = 0;
+  let upper = 0.5;
+  while (isInSrgbGamut(lightness, upper, hue) && upper < 2) upper *= 2;
+  for (let iteration = 0; iteration < 24; iteration++) {
+    const midpoint = (lower + upper) / 2;
+    if (isInSrgbGamut(lightness, midpoint, hue)) lower = midpoint;
+    else upper = midpoint;
+  }
+  return lower;
 }
 
 function precipitationColor(mmh) {
@@ -42,10 +64,12 @@ function precipitationColor(mmh) {
   const lower = PRECIPITATION_COLOR_ANCHORS[upperIndex - 1];
   const upper = PRECIPITATION_COLOR_ANCHORS[upperIndex] || lower;
   const t = upper === lower ? 0 : (Math.log10(value) - Math.log10(lower.mmh)) / (Math.log10(upper.mmh) - Math.log10(lower.mmh));
+  const lightness = lower.lightness + (upper.lightness - lower.lightness) * t;
+  const hue = lower.hue + (upper.hue - lower.hue) * t;
   return oklchToSrgb(
-    lower.lightness + (upper.lightness - lower.lightness) * t,
-    lower.chroma + (upper.chroma - lower.chroma) * t,
-    lower.hue + (upper.hue - lower.hue) * t
+    lightness,
+    maximumInGamutChroma(lightness, hue),
+    hue
   );
 }
 const THUNDERSTORM_COLORS = Object.freeze({

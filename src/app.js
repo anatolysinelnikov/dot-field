@@ -272,6 +272,13 @@ function initializeWeatherLayer() {
     if (map.getLayer(id)) map.moveLayer(id);
   }
 
+  if (map.getLayer(rawLayer.id) && map.getLayer(MAPTILER_WATER_BOUNDARY_ID)) {
+    map.moveLayer(rawLayer.id, MAPTILER_WATER_BOUNDARY_ID);
+  }
+  if (map.getLayer(MAPTILER_WATER_TINT_ID) && map.getLayer(rawLayer.id)) {
+    map.moveLayer(MAPTILER_WATER_TINT_ID, rawLayer.id);
+  }
+
   if (state.mapReady) return;
   state.mapReady = true;
   applyRenderMode();
