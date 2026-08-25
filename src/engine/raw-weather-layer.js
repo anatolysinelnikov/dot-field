@@ -1,20 +1,53 @@
 import { lngLatToMercator } from './geographic-lod.js';
 import { setGeographicProjection } from './geographic-layer-utils.js';
 
-const PRECIPITATION_BANDS = Object.freeze([
-  { upper: 0.003, color: [232 / 255, 248 / 255, 1, 1] },
-  { upper: 0.01, color: [200 / 255, 238 / 255, 1, 1] },
-  { upper: 0.03, color: [147 / 255, 220 / 255, 1, 1] },
-  { upper: 0.1, color: [88 / 255, 197 / 255, 1, 1] },
-  { upper: 0.3, color: [34 / 255, 170 / 255, 1, 1] },
-  { upper: 1, color: [0, 139 / 255, 1, 1] },
-  { upper: 3, color: [0, 104 / 255, 1, 1] },
-  { upper: 6, color: [0, 74 / 255, 1, 1] },
-  { upper: 10, color: [0, 50 / 255, 222 / 255, 1] },
-  { upper: 15, color: [0, 31 / 255, 175 / 255, 1] },
-  { upper: 25, color: [0, 17 / 255, 116 / 255, 1] },
-  { upper: Infinity, color: [0, 6 / 255, 61 / 255, 1] }
+const PRECIPITATION_COLOR_ANCHORS = Object.freeze([
+  { mmh: 0.001, lightness: 0.98, chroma: 0.015, hue: 220 },
+  { mmh: 0.01, lightness: 0.93, chroma: 0.045, hue: 225 },
+  { mmh: 0.1, lightness: 0.84, chroma: 0.09, hue: 232 },
+  { mmh: 1, lightness: 0.70, chroma: 0.15, hue: 242 },
+  { mmh: 4, lightness: 0.58, chroma: 0.19, hue: 248 },
+  { mmh: 10, lightness: 0.46, chroma: 0.17, hue: 252 },
+  { mmh: 25, lightness: 0.34, chroma: 0.13, hue: 257 },
+  { mmh: 50, lightness: 0.22, chroma: 0.08, hue: 262 }
 ]);
+const MIN_PRECIPITATION_COLOR_ANCHOR = PRECIPITATION_COLOR_ANCHORS[0].mmh;
+const MAX_PRECIPITATION_COLOR_ANCHOR = PRECIPITATION_COLOR_ANCHORS[PRECIPITATION_COLOR_ANCHORS.length - 1].mmh;
+
+function clamp(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function oklchToSrgb(lightness, chroma, hue) {
+  const radians = hue * Math.PI / 180;
+  const a = chroma * Math.cos(radians);
+  const b = chroma * Math.sin(radians);
+  const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (lightness - 0.1055613458 * a - 0.0638541725 * b) ** 3;
+  const s = (lightness - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const red = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+  const green = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+  const blue = -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s;
+  const toSrgb = (value) => {
+    const clamped = clamp(value, 0, 1);
+    return clamped <= 0.0031308 ? 12.92 * clamped : 1.055 * clamped ** (1 / 2.4) - 0.055;
+  };
+  return [toSrgb(red), toSrgb(green), toSrgb(blue), 1];
+}
+
+function precipitationColor(mmh) {
+  const value = clamp(mmh, MIN_PRECIPITATION_COLOR_ANCHOR, MAX_PRECIPITATION_COLOR_ANCHOR);
+  let upperIndex = 1;
+  while (upperIndex < PRECIPITATION_COLOR_ANCHORS.length && value > PRECIPITATION_COLOR_ANCHORS[upperIndex].mmh) upperIndex += 1;
+  const lower = PRECIPITATION_COLOR_ANCHORS[upperIndex - 1];
+  const upper = PRECIPITATION_COLOR_ANCHORS[upperIndex] || lower;
+  const t = upper === lower ? 0 : (Math.log10(value) - Math.log10(lower.mmh)) / (Math.log10(upper.mmh) - Math.log10(lower.mmh));
+  return oklchToSrgb(
+    lower.lightness + (upper.lightness - lower.lightness) * t,
+    lower.chroma + (upper.chroma - lower.chroma) * t,
+    lower.hue + (upper.hue - lower.hue) * t
+  );
+}
 const THUNDERSTORM_COLORS = Object.freeze({
   10: [138 / 255, 77 / 255, 1, 1],
   11: [192 / 255, 0, 1, 1],
@@ -34,19 +67,21 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
-function makeProgram(gl, shaderData) {
+function makeProgram(gl, shaderData, vertexColors = false) {
   const vertexSource = [
     '#version 300 es',
     shaderData.vertexShaderPrelude,
     shaderData.define,
-    'in vec2 a_position;\nvoid main() { gl_Position = projectTile(a_position); }'
+    vertexColors
+      ? 'in vec2 a_position;\nin vec4 a_color;\nout vec4 v_color;\nvoid main() { v_color = a_color; gl_Position = projectTile(a_position); }'
+      : 'in vec2 a_position;\nvoid main() { gl_Position = projectTile(a_position); }'
   ].join('\n');
   const fragmentSource = [
     '#version 300 es',
     'precision highp float;',
-    'uniform vec4 u_color;',
+    vertexColors ? 'in vec4 v_color;' : 'uniform vec4 u_color;',
     'out vec4 fragColor;',
-    'void main() { fragColor = u_color; }'
+    `void main() { fragColor = ${vertexColors ? 'v_color' : 'u_color'}; }`
   ].join('\n');
   const program = gl.createProgram();
   gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
@@ -56,6 +91,7 @@ function makeProgram(gl, shaderData) {
   return {
     program,
     position: gl.getAttribLocation(program, 'a_position'),
+    vertexColor: vertexColors ? gl.getAttribLocation(program, 'a_color') : -1,
     color: gl.getUniformLocation(program, 'u_color'),
     matrix: gl.getUniformLocation(program, 'u_matrix'),
     fallbackMatrix: gl.getUniformLocation(program, 'u_projection_fallback_matrix'),
@@ -81,8 +117,13 @@ function addCell(vertices, west, east, south, north, insetWest = 0, insetEast = 
   );
 }
 
+function addCellColor(colors, color) {
+  for (let vertex = 0; vertex < 6; vertex++) colors.push(...color);
+}
+
 function buildGeometry(field) {
-  const precipitation = PRECIPITATION_BANDS.map(() => []);
+  const precipitationVertices = [];
+  const precipitationColors = [];
   const thunderstorm = Object.fromEntries(Object.keys(THUNDERSTORM_COLORS).map((code) => [code, []]));
   const hail = Object.fromEntries(Object.keys(HAIL_COLORS).map((code) => [code, []]));
   const width = field.longitudes.length;
@@ -97,8 +138,8 @@ function buildGeometry(field) {
       const hasHail = field.hailCode[index] !== 0;
       const mmh = field.mmh[index];
       if (mmh > 0) {
-        const bandIndex = PRECIPITATION_BANDS.findIndex(({ upper }) => mmh < upper);
-        addCell(precipitation[bandIndex], west, east, south, north);
+        addCell(precipitationVertices, west, east, south, north);
+        addCellColor(precipitationColors, precipitationColor(mmh));
       }
       if (hasStorm && thunderstorm[field.thunderstormCode[index]]) {
         const insetEast = hasHail ? 0.48 : 0.88;
@@ -111,7 +152,10 @@ function buildGeometry(field) {
     }
   }
   return {
-    precipitation: precipitation.map((vertices) => Float32Array.from(vertices)),
+    precipitation: {
+      vertices: Float32Array.from(precipitationVertices),
+      colors: Float32Array.from(precipitationColors)
+    },
     thunderstorm: Object.fromEntries(Object.entries(thunderstorm).map(([code, vertices]) => [code, Float32Array.from(vertices)])),
     hail: Object.fromEntries(Object.entries(hail).map(([code, vertices]) => [code, Float32Array.from(vertices)]))
   };
@@ -131,8 +175,9 @@ export class RawWeatherLayer {
 
   onAdd(map, gl) {
     this.map = map;
-    this.buffers = { precipitation: [], thunderstorm: {}, hail: {} };
-    for (const [index, vertices] of this.geometry.precipitation.entries()) this.buffers.precipitation[index] = this.createBuffer(gl, vertices);
+    this.buffers = { precipitation: {}, thunderstorm: {}, hail: {} };
+    this.buffers.precipitation.position = this.createBuffer(gl, this.geometry.precipitation.vertices);
+    this.buffers.precipitation.color = this.createBuffer(gl, this.geometry.precipitation.colors);
     for (const [code, vertices] of Object.entries(this.geometry.thunderstorm)) this.buffers.thunderstorm[code] = this.createBuffer(gl, vertices);
     for (const [code, vertices] of Object.entries(this.geometry.hail)) this.buffers.hail[code] = this.createBuffer(gl, vertices);
   }
@@ -146,7 +191,7 @@ export class RawWeatherLayer {
 
   onRemove(map, gl) {
     for (const entry of this.programs.values()) gl.deleteProgram(entry.program);
-    for (const buffer of this.buffers?.precipitation || []) gl.deleteBuffer(buffer);
+    for (const buffer of Object.values(this.buffers?.precipitation || {})) gl.deleteBuffer(buffer);
     for (const buffer of Object.values(this.buffers?.thunderstorm || {})) gl.deleteBuffer(buffer);
     for (const buffer of Object.values(this.buffers?.hail || {})) gl.deleteBuffer(buffer);
   }
@@ -162,19 +207,35 @@ export class RawWeatherLayer {
   }
 
   programFor(gl, shaderData) {
-    let program = this.programs.get(shaderData.variantName);
+    const key = `${shaderData.variantName}:solid`;
+    let program = this.programs.get(key);
     if (!program) {
       program = makeProgram(gl, shaderData);
-      this.programs.set(shaderData.variantName, program);
+      this.programs.set(key, program);
     }
     return program;
   }
 
-  draw(gl, program, vertices, buffer, color, projection) {
+  colorProgramFor(gl, shaderData) {
+    const key = `${shaderData.variantName}:vertex-color`;
+    let program = this.programs.get(key);
+    if (!program) {
+      program = makeProgram(gl, shaderData, true);
+      this.programs.set(key, program);
+    }
+    return program;
+  }
+
+  draw(gl, program, vertices, positionBuffer, color, projection, colorBuffer = null) {
     if (!vertices.length) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
     gl.enableVertexAttribArray(program.position);
     gl.vertexAttribPointer(program.position, 2, gl.FLOAT, false, 0, 0);
+    if (colorBuffer) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+      gl.enableVertexAttribArray(program.vertexColor);
+      gl.vertexAttribPointer(program.vertexColor, 4, gl.FLOAT, false, 0, 0);
+    }
     setGeographicProjection(gl, {
       matrix: program.matrix,
       fallbackMatrix: program.fallbackMatrix,
@@ -183,22 +244,23 @@ export class RawWeatherLayer {
       clippingPlane: program.clippingPlane,
       projectionTransition: program.projectionTransition
     }, projection);
-    gl.uniform4f(program.color, ...color);
+    if (color) gl.uniform4f(program.color, ...color);
     gl.drawArrays(gl.TRIANGLES, 0, vertices.length / 2);
     gl.disableVertexAttribArray(program.position);
+    if (colorBuffer) gl.disableVertexAttribArray(program.vertexColor);
   }
 
   render(gl, args) {
     if (!this.active) return;
-    const program = this.programFor(gl, args.shaderData);
-    gl.useProgram(program.program);
     gl.disable(gl.BLEND);
     gl.disable(gl.DEPTH_TEST);
     const projection = args.defaultProjectionData;
-    for (let index = 0; index < this.geometry.precipitation.length; index++) {
-      this.draw(gl, program, this.geometry.precipitation[index], this.buffers.precipitation[index], PRECIPITATION_BANDS[index].color, projection);
-    }
+    const precipitationProgram = this.colorProgramFor(gl, args.shaderData);
+    gl.useProgram(precipitationProgram.program);
+    this.draw(gl, precipitationProgram, this.geometry.precipitation.vertices, this.buffers.precipitation.position, null, projection, this.buffers.precipitation.color);
     if (this.phenomena) {
+      const program = this.programFor(gl, args.shaderData);
+      gl.useProgram(program.program);
       for (const [code, vertices] of Object.entries(this.geometry.thunderstorm)) {
         this.draw(gl, program, vertices, this.buffers.thunderstorm[code], THUNDERSTORM_COLORS[code], projection);
       }
