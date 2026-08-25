@@ -81,7 +81,8 @@ color are derived in the shader when a falling cycle wraps; CPU instances are
 not rebuilt. Every emitter instance remains present, but each event also uses a
 separate deterministic duty sequence derived from the same coverage: weak rain
 is about 0.60 visible, medium rain about 0.75–0.80, strong rain about 0.90, and
-maximum rain is fully occupied. Skipped events collapse their quad in the
+maximum rain is capped at 0.90 duty, effectively 7/8 visible events in the
+eight-event sequence. Skipped events collapse their quad in the
 vertex shader and leave spatial identity unchanged.
 
 The vertical column is deliberately exaggerated from 150 m to 15,000 m for the
