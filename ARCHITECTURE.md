@@ -40,8 +40,15 @@ provider format -> normalization -> temporal/spatial interpolation
 ```
 
 `real-weather.js` owns CSV parsing, validation, normalization, typed-array
-storage, and bilinear sampling. The snapshot is loaded once before map
-initialization; renderers receive only normalized channels. The legacy synthetic
+storage, and support-constrained bilinear sampling. The snapshot is loaded once
+before map initialization; renderers receive only normalized channels. For each
+query, the provider first locates the containing RAW source cell using the same
+midpoint boundaries as RAW. Rain, storm, and hail then apply their independent
+source-support masks (`mmh > 0`, nonzero thunderstorm code, and nonzero hail
+code): an unsupported containing cell returns zero, while a supported cell
+bilinearly interpolates only supported source nodes and renormalizes their
+weights. This keeps channel footprints close to RAW source-cell geometry while
+preserving smooth intensity transitions. The legacy synthetic
 `field.js` remains independent of MapLibre, WebGL, and UI but is not on the
 active data path.
 

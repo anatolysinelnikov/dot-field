@@ -43,6 +43,9 @@ export class RealWeatherField {
     this.rain = rain;
     this.storm = storm;
     this.hail = hail;
+    this.rainSupport = makeSupportMask(mmh, (value) => value > 0);
+    this.stormSupport = makeSupportMask(thunderstormCode, (value) => value !== 0);
+    this.hailSupport = makeSupportMask(hailCode, (value) => value !== 0);
     this.sourceRowCount = sourceRowCount;
     this.longitudeSpacing = longitudeSpacing;
     this.latitudeSpacing = latitudeSpacing;
@@ -109,22 +112,51 @@ export class RealWeatherField {
     if (longitude < this.bounds.west || longitude > this.bounds.east
       || latitude < this.bounds.south || latitude > this.bounds.north) return output;
 
+    const sourceCell = this.rawCellAt(longitude, latitude);
+
     const x = this.locate(this.longitudes, longitude);
     const y = this.locate(this.latitudes, latitude);
     const x0y0 = this.index(x.index, y.index);
     const x1y0 = x0y0 + 1;
     const x0y1 = this.index(x.index, y.index + 1);
     const x1y1 = x0y1 + 1;
-    const interpolate = (values) => {
-      const lower = values[x0y0] + (values[x1y0] - values[x0y0]) * x.fraction;
-      const upper = values[x0y1] + (values[x1y1] - values[x0y1]) * x.fraction;
-      return clamp(lower + (upper - lower) * y.fraction, 0, 1);
+    const interpolate = (values, support) => {
+      if (!support[sourceCell.index]) return 0;
+      const weight00 = (1 - x.fraction) * (1 - y.fraction);
+      const weight10 = x.fraction * (1 - y.fraction);
+      const weight01 = (1 - x.fraction) * y.fraction;
+      const weight11 = x.fraction * y.fraction;
+      let weightedValue = 0;
+      let totalWeight = 0;
+      if (support[x0y0]) {
+        totalWeight += weight00;
+        weightedValue += values[x0y0] * weight00;
+      }
+      if (support[x1y0]) {
+        totalWeight += weight10;
+        weightedValue += values[x1y0] * weight10;
+      }
+      if (support[x0y1]) {
+        totalWeight += weight01;
+        weightedValue += values[x0y1] * weight01;
+      }
+      if (support[x1y1]) {
+        totalWeight += weight11;
+        weightedValue += values[x1y1] * weight11;
+      }
+      return totalWeight > 0 ? clamp(weightedValue / totalWeight, 0, 1) : 0;
     };
-    output.rain = interpolate(this.rain);
-    output.storm = interpolate(this.storm);
-    output.hail = interpolate(this.hail);
+    output.rain = interpolate(this.rain, this.rainSupport);
+    output.storm = interpolate(this.storm, this.stormSupport);
+    output.hail = interpolate(this.hail, this.hailSupport);
     return output;
   }
+}
+
+function makeSupportMask(values, isSupported) {
+  const support = new Uint8Array(values.length);
+  for (let index = 0; index < values.length; index++) support[index] = isSupported(values[index]) ? 1 : 0;
+  return support;
 }
 
 function makeCellBounds(axis, spacing) {
