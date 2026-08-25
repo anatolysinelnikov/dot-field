@@ -446,12 +446,11 @@ function updateRawHover(event) {
 
 function selectRawCell(event) {
   if (state.renderMode !== 'raw') return;
+  if (selectedRawCell) return dismissRawTooltip();
   const cell = rawWeatherField.rawCellAt(event.lngLat.lng, event.lngLat.lat);
   if (!cell) return dismissRawTooltip();
-  const key = rawCellKey(cell);
-  if (selectedRawCellKey === key) return dismissRawTooltip();
   selectedRawCell = cell;
-  selectedRawCellKey = key;
+  selectedRawCellKey = rawCellKey(cell);
   showRawTooltip(cell, event.point);
 }
 
