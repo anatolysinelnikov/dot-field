@@ -317,7 +317,7 @@ export class RawWeatherLayer {
       projectionTransition: program.projectionTransition
     }, projection);
     gl.uniform4f(program.color, 1, 0, 0, 1);
-    gl.lineWidth(2);
+    gl.lineWidth(4);
     gl.drawArrays(gl.LINE_LOOP, 0, 4);
     gl.disableVertexAttribArray(program.position);
   }
