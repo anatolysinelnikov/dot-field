@@ -62,64 +62,61 @@ renders storm and hail for normal usage.
 
 `GeographicRainLayer` is independent and 3D-only. It owns a separate
 `GeographicSymbolPyramid`, evaluates the fixed `t = 0.5` frame, and consumes
-that pyramid's exact `anchors`, `rainRadius`, and `strongRadius` states. It
-never reads `GeographicDotsLayer` buffers. At L13/L14 every active Surface Dot
-owns exactly one emitter and one visible drop at the same anchor; there is no
+that pyramid's exact `anchors` and `rainRadius` states. Surface Dots are the
+primary quantitative precipitation representation; 3D drops are a
+secondary physical/temporal cue that makes active falling rain legible. It
+never reads `GeographicDotsLayer` buffers. At L13/L14 every retained emitter
+owns exactly one drop at the same current-LOD Dot anchor, and phase 0 remains
+that anchor's impact boundary for future pulse or puddle work. There is no
 horizontal scatter, bilinear candidate reconstruction, random motion, or
 camera-dependent identity.
 
 An emitter represents a continuous repeating sequence, but only its current
-drop is visible. Each emitter has a deterministic base phase and a rate driven
-by `rainRadius / sampleSpacing`: a compact coverage mapping raises the
-magnitude rate from 1.0× for weak rain to 1.45× for the strongest rain, then a
-stable 0.95×–1.05× identity variation keeps emitters asynchronous. The shader
-advances these rates with the global 0×–4× slider (default 2×). Strong rain is
-encoded temporally rather than with simultaneous slots: `strongFraction =
-clamp(strongRadius² / rainRadius², 0, 1)` selects the dark-blue share of an
-eight-event deterministic, evenly distributed sequence. The event index and
-color are derived in the shader when a falling cycle wraps; CPU instances are
-not rebuilt. Every emitter instance remains present, but each event also uses a
-separate deterministic duty sequence derived from the same coverage: weak rain
-is about 0.60 visible, medium rain about 0.75–0.80, strong rain about 0.90, and
-maximum rain is capped at 0.90 duty, effectively 7/8 visible events in the
-eight-event sequence. Skipped events collapse their quad in the
-vertex shader and leave spatial identity unchanged.
+drop is visible. An emitter is created only when `coverage = rainRadius /
+sampleSpacing >= 0.12`; Surface Dots themselves are never filtered. Each
+emitter has a deterministic base phase and a rate driven by
+`rainRadius / sampleSpacing`: a compact coverage mapping raises the magnitude
+rate from 1.0× for weak rain to 1.45× for the strongest rain, then a stable
+0.95×–1.05× identity variation keeps emitters asynchronous. The shader
+advances these rates with the global 0×–4× slider (default 2×). Event activity,
+rather than drop color or a large size range, carries the secondary temporal
+cue: the deterministic eight-event duty spans approximately 0.25–0.75, or
+2/8 visible events for weak retained rain to 6/8 for strong rain. Skipped events
+collapse their quad in the vertex shader and leave spatial identity unchanged.
 
 The vertical column is deliberately exaggerated from 150 m to 15,000 m for the
 normal main-compatible camera. `projectTileFor3D(vec2 posInTile, float elevation)`
 follows the local Globe radial direction. One instanced quad per drop is
 screen-facing but aligned to that projected radial direction. Its width is
-projected every frame from world-space `rainRadius` (target 60% of the Surface
-Dot diameter), using both local projected tangent derivatives along the
-billboard side axis in drawing-buffer pixel space so aspect ratio, DPR, and
-bearing changes do not rescale the same drop. The final billboard pixel offset
-is converted back to NDC component-wise. It has a 1.65× teardrop height, and
-width is clamped between `0.14 × sampleSpacing` and `0.60 × sampleSpacing`,
-preserving the outer-area scale while preventing center drops from filling
-their grid cells. There is no synthetic per-emitter size variation. The
+projected every frame from world-space `rainRadius`, using both local projected
+tangent derivatives along the billboard side axis in drawing-buffer pixel
+space so aspect ratio, DPR, and bearing changes do not rescale the same drop.
+The final billboard pixel offset is converted back to NDC component-wise. It
+has a 1.65× teardrop height, and width is narrowly mapped from retained
+coverage with a smoothstep from `0.18 × sampleSpacing` at the 0.12 cutoff to
+`0.32 × sampleSpacing` at the strong/high coverage endpoint. There is no
+synthetic per-emitter size variation. The
 projected radial direction also supplies a stable view-angle foreshortening:
 side views retain the full silhouette, while
 near radial/top-down views reduce the height to a minimum factor of 0.52 and
 blend the pointed triangle toward the rounded bulb.
 
 The fragment shader gives it anti-aliased procedural coverage: a rounded lower
-bulb toward Earth and a pointed upper end away from it, with no trail. The
-existing precipitation body colors receive only a small procedural upper-side
-highlight to separate 3D drops from Surface Dots. Visible events fade in only
-over the top 8% of their trajectory, then remain fully opaque through phase 0,
-the ground-contact/end-of-fall boundary. The previous altitude color
-lightening is removed. These are shader arithmetic only: no extra pass,
-texture, instance, or draw call is added; no ripple, puddle, or surface pulse is
+bulb toward Earth and a pointed upper end away from it, with no trail. Every
+drop uses the single body color `#0070CC`; `strongFraction` no longer affects
+3D drop color, and the Surface Dot colors remain `#0090FF` for normal rain and
+`#0000FF` for strong rain. Visible events fade in only over the top 8% of their
+trajectory, then remain fully opaque through phase 0, the ground-contact/end-
+of-fall boundary. These are shader arithmetic only: no extra pass, texture,
+instance, or draw call is added; no ripple, puddle, or surface pulse is
 implemented.
 
-Instances store only anchor, deterministic phase, emitter rate,
-`rainRadius`, `sampleSpacing`, strong fraction, and a stable event-sequence
-offset. The shader uses `fract(phase - fallingCycles * speed)`
-for altitude and derives the current strong/normal event from the continuous
-cycle count, so accumulated app-owned `fallingCycles` moves and recolors rain
-without rebuilding instances. The 0×–4× slider defaults to 2×; 0× freezes
-exactly in place. Ripples, splashes, storm, hail, lightning, clouds, wind, and
-weather-time animation are not implemented.
+Instances store only anchor, deterministic phase, emitter rate, `rainRadius`,
+`sampleSpacing`, and a stable event-sequence offset. The shader uses
+`fract(phase - fallingCycles * speed)` for altitude, so accumulated app-owned
+`fallingCycles` moves rain without rebuilding instances. The 0×–4× slider
+defaults to 2×; 0× freezes exactly in place. Ripples, splashes, storm, hail,
+lightning, clouds, wind, and weather-time animation are not implemented.
 
 Both renderers use reusable buffers and rebuild only when an LOD set changes.
 The static surface Dots never drive an animation RAF. The layers follow current-main MapTiler context
