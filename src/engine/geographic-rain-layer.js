@@ -33,6 +33,17 @@ function hashUnit(x, y, slot, salt) {
   value = Math.imul(value ^ (value >>> 13), 3266489917);
   return ((value ^ (value >>> 16)) >>> 0) / 4294967296;
 }
+function glslFloat(value) {
+  if (!Number.isFinite(value)) throw new Error('GLSL float constants must be finite numbers.');
+  const literal = String(value);
+  const exponentIndex = Math.max(literal.indexOf('e'), literal.indexOf('E'));
+  if (exponentIndex >= 0) {
+    const mantissa = literal.slice(0, exponentIndex);
+    const normalizedMantissa = mantissa.includes('.') ? mantissa : `${mantissa}.0`;
+    return normalizedMantissa + literal.slice(exponentIndex);
+  }
+  return literal.includes('.') ? literal : `${literal}.0`;
+}
 function emitterRateForCoverage(coverage) {
   const magnitude = smoothstep(EMITTER_RATE_COVERAGE_START, EMITTER_RATE_COVERAGE_END, clamp(coverage, 0, 1));
   return EMITTER_RATE_BASE + magnitude * (EMITTER_RATE_MAX - EMITTER_RATE_BASE);
@@ -66,37 +77,37 @@ out float v_foreshortening;
 void main() {
   float verticalPhase = fract(a_phase - u_fallingCycles * a_speed);
   float eventIndex = floor(u_fallingCycles * a_speed + 1.0 - a_phase);
-  float eventSlot = mod(eventIndex * 5.0 + a_eventOffset, ${EVENT_SEQUENCE_LENGTH}.0);
-  float eventDark = step(eventSlot + 0.5, a_strongFraction * ${EVENT_SEQUENCE_LENGTH}.0);
+  float eventSlot = mod(eventIndex * 5.0 + a_eventOffset, ${glslFloat(EVENT_SEQUENCE_LENGTH)});
+  float eventDark = step(eventSlot + 0.5, a_strongFraction * ${glslFloat(EVENT_SEQUENCE_LENGTH)});
   float coverage = a_sampleSpacing > 0.0 ? a_rainRadius / a_sampleSpacing : 0.0;
-  float dutyMagnitude = smoothstep(${EMITTER_RATE_COVERAGE_START}, ${EMITTER_RATE_COVERAGE_END}, clamp(coverage, 0.0, 1.0));
-  float eventDuty = mix(${DUTY_MIN}, ${DUTY_MAX}, dutyMagnitude);
-  float visibilitySlot = mod(eventIndex * 3.0 + a_eventOffset * 5.0 + 1.0, ${EVENT_SEQUENCE_LENGTH}.0);
-  float eventVisible = step(visibilitySlot + 0.5, eventDuty * ${EVENT_SEQUENCE_LENGTH}.0);
-  float topFade = 1.0 - smoothstep(1.0 - ${TOP_FADE_FRACTION}, 1.0, verticalPhase);
-  float altitude = ${COLUMN_BOTTOM_METRES}.0 + verticalPhase * ${COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES}.0;
+  float dutyMagnitude = smoothstep(${glslFloat(EMITTER_RATE_COVERAGE_START)}, ${glslFloat(EMITTER_RATE_COVERAGE_END)}, clamp(coverage, 0.0, 1.0));
+  float eventDuty = mix(${glslFloat(DUTY_MIN)}, ${glslFloat(DUTY_MAX)}, dutyMagnitude);
+  float visibilitySlot = mod(eventIndex * 3.0 + a_eventOffset * 5.0 + 1.0, ${glslFloat(EVENT_SEQUENCE_LENGTH)});
+  float eventVisible = step(visibilitySlot + 0.5, eventDuty * ${glslFloat(EVENT_SEQUENCE_LENGTH)});
+  float topFade = 1.0 - smoothstep(1.0 - ${glslFloat(TOP_FADE_FRACTION)}, 1.0, verticalPhase);
+  float altitude = ${glslFloat(COLUMN_BOTTOM_METRES)} + verticalPhase * ${glslFloat(COLUMN_TOP_METRES - COLUMN_BOTTOM_METRES)};
   vec4 center = projectTileFor3D(a_center, altitude);
-  vec4 radial = projectTileFor3D(a_center, altitude + ${RADIAL_REFERENCE_METRES}.0);
+  vec4 radial = projectTileFor3D(a_center, altitude + ${glslFloat(RADIAL_REFERENCE_METRES)});
   vec2 centerNdc = center.xy / center.w;
   vec2 radialDirectionPixels = (radial.xy / radial.w - centerNdc) / u_pixelsToClip;
   float radialLengthPixels = length(radialDirectionPixels);
   vec2 upPixels = radialLengthPixels > 0.000001 ? radialDirectionPixels / radialLengthPixels : vec2(0.0, 1.0);
   vec2 sidePixels = vec2(-upPixels.y, upPixels.x);
   float latitude = atan(sinh((0.5 - a_center.y) * 6.28318530718));
-  float metresPerMercatorUnit = ${EARTH_CIRCUMFERENCE_METRES} * max(0.001, abs(cos(latitude)));
-  float tangentOffset = ${RADIAL_REFERENCE_METRES}.0 / metresPerMercatorUnit;
+  float metresPerMercatorUnit = ${glslFloat(EARTH_CIRCUMFERENCE_METRES)} * max(0.001, abs(cos(latitude)));
+  float tangentOffset = ${glslFloat(RADIAL_REFERENCE_METRES)} / metresPerMercatorUnit;
   vec4 tangentX = projectTileFor3D(a_center + vec2(tangentOffset, 0.0), altitude);
   vec4 tangentY = projectTileFor3D(a_center + vec2(0.0, tangentOffset), altitude);
   vec2 tangentXDirectionPixels = (tangentX.xy / tangentX.w - centerNdc) / u_pixelsToClip;
   vec2 tangentYDirectionPixels = (tangentY.xy / tangentY.w - centerNdc) / u_pixelsToClip;
   float tangentLengthPixels = max(length(tangentXDirectionPixels), length(tangentYDirectionPixels));
   float foreshortening = tangentLengthPixels > 0.000001 ? clamp(radialLengthPixels / tangentLengthPixels, 0.0, 1.0) : 1.0;
-  float maxWidthWorld = a_sampleSpacing * ${MAX_DROP_WIDTH_OF_SPACING};
-  float nominalWidthWorld = a_rainRadius * 2.0 * ${DROP_WIDTH_OF_DOT_DIAMETER};
+  float maxWidthWorld = a_sampleSpacing * ${glslFloat(MAX_DROP_WIDTH_OF_SPACING)};
+  float nominalWidthWorld = a_rainRadius * 2.0 * ${glslFloat(DROP_WIDTH_OF_DOT_DIAMETER)};
   float widthWorld = min(min(nominalWidthWorld, maxWidthWorld) * a_sizeVariation, maxWidthWorld);
   float sideTangentLengthPixels = length(vec2(dot(tangentXDirectionPixels, sidePixels), dot(tangentYDirectionPixels, sidePixels)));
   float widthPixels = max(0.75, sideTangentLengthPixels * (widthWorld * 0.5 / tangentOffset)) * eventVisible;
-  float heightPixels = widthPixels * ${DROP_HEIGHT_OF_WIDTH} * mix(${MIN_FORESHORTENED_HEIGHT}, 1.0, foreshortening);
+  float heightPixels = widthPixels * ${glslFloat(DROP_HEIGHT_OF_WIDTH)} * mix(${glslFloat(MIN_FORESHORTENED_HEIGHT)}, 1.0, foreshortening);
   vec2 pixelOffset = sidePixels * a_vertex.x * widthPixels + upPixels * a_vertex.y * heightPixels;
   vec2 ndc = centerNdc + pixelOffset * u_pixelsToClip;
   gl_Position = vec4(ndc * center.w, center.z, center.w);
