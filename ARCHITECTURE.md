@@ -93,11 +93,12 @@ projected every frame from world-space `rainRadius` (target 60% of the Surface
 Dot diameter), using both local projected tangent derivatives along the
 billboard side axis in drawing-buffer pixel space so aspect ratio, DPR, and
 bearing changes do not rescale the same drop. The final billboard pixel offset
-is converted back to NDC component-wise. It has a 1.65× teardrop height and
-small deterministic variation. The final width is capped at `0.60 ×
-sampleSpacing`, preserving the outer-area scale while preventing center drops
-from filling their grid cells. The projected radial direction also supplies a
-stable view-angle foreshortening: side views retain the full silhouette, while
+is converted back to NDC component-wise. It has a 1.65× teardrop height, and
+width is clamped between `0.14 × sampleSpacing` and `0.60 × sampleSpacing`,
+preserving the outer-area scale while preventing center drops from filling
+their grid cells. There is no synthetic per-emitter size variation. The
+projected radial direction also supplies a stable view-angle foreshortening:
+side views retain the full silhouette, while
 near radial/top-down views reduce the height to a minimum factor of 0.52 and
 blend the pointed triangle toward the rounded bulb.
 
@@ -112,8 +113,8 @@ texture, instance, or draw call is added; no ripple, puddle, or surface pulse is
 implemented.
 
 Instances store only anchor, deterministic phase, emitter rate,
-`rainRadius`, `sampleSpacing`, size variation, strong fraction, and a stable
-event-sequence offset. The shader uses `fract(phase - fallingCycles * speed)`
+`rainRadius`, `sampleSpacing`, strong fraction, and a stable event-sequence
+offset. The shader uses `fract(phase - fallingCycles * speed)`
 for altitude and derives the current strong/normal event from the continuous
 cycle count, so accumulated app-owned `fallingCycles` moves and recolors rain
 without rebuilding instances. The 0×–4× slider defaults to 2×; 0× freezes
