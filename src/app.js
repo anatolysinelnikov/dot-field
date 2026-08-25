@@ -108,7 +108,7 @@ const map = new window.maplibregl.Map({
 map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top-right');
 
 const state = {
-  playing: true,
+  playing: false,
   time: 0,
   lastFrame: performance.now(),
   scrubbing: false,
@@ -122,7 +122,7 @@ const state = {
   resettingView: false,
   mapReady: false,
   weatherQueued: false,
-  renderMode: 'dots'
+  renderMode: 'raw'
 };
 const weatherLayer = new GeographicDotsLayer();
 const squaresLayer = new GeographicSquaresLayer();
@@ -410,6 +410,7 @@ function positionRawTooltip(point) {
 }
 
 function showRawTooltip(cell, point) {
+  rawLayer.setHighlightedCell(cell);
   rawTooltipContent.textContent = [
     `lon: ${cell.lon.toFixed(5)}`,
     `lat: ${cell.lat.toFixed(5)}`,
@@ -424,6 +425,7 @@ function showRawTooltip(cell, point) {
 function dismissRawTooltip() {
   selectedRawCell = null;
   selectedRawCellKey = null;
+  rawLayer.setHighlightedCell(null);
   rawTooltip.hidden = true;
 }
 
@@ -436,7 +438,7 @@ function updateRawHover(event) {
   if (state.renderMode !== 'raw' || selectedRawCell || rawMapDragging) return;
   const cell = rawWeatherField.rawCellAt(event.lngLat.lng, event.lngLat.lat);
   if (!cell) {
-    rawTooltip.hidden = true;
+    dismissRawTooltip();
     return;
   }
   showRawTooltip(cell, event.point);
@@ -536,7 +538,7 @@ map.on('dragend', () => {
   rawMapDragging = false;
 });
 map.on('mouseout', () => {
-  if (!selectedRawCell) rawTooltip.hidden = true;
+  if (!selectedRawCell) dismissRawTooltip();
 });
 function updateResetViewControl() {
   const center = map.getCenter();

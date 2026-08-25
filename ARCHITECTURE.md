@@ -12,7 +12,7 @@ This is a browser-native geographic weather prototype. It uses MapLibre GL JS in
 Globe projection, a validated static real-data CSV snapshot, a globally
 anchored Mercator sampling topology, and projection-aware MapLibre custom WebGL
 layers. The active modes are **RAW**, **Dots**, **Squares**, **Blur**, and
-**Areas**; Dots remains the default.
+**Areas**; RAW is the initial mode and Dots remains available as a selectable mode.
 
 The weather channels are always independent data channels:
 
@@ -66,8 +66,8 @@ app.js ----------------------> MapLibre GL JS / Globe camera and basemap
 logical weather zoom, MapLibre construction, active-layer routing, and readouts.
 It creates all four geographic custom layers once after the style loads and
 changes their active state instead of recreating the map or layers when the
-render mode changes. `Dots` is the initial mode; the selector order is RAW,
-Dots, Squares, Blur, Areas. The `Явления` control is visible only in RAW mode;
+render mode changes. RAW is the initial mode and playback starts paused; the
+selector order is RAW, Dots, Squares, Blur, Areas. The `Явления` control is visible only in RAW mode;
 the Smooth control is visible only in Areas mode.
 
 The MapTiler Dataviz Dark Globe basemap, native label and

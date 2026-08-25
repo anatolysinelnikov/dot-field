@@ -145,6 +145,21 @@ function addCellColor(colors, color) {
   for (let vertex = 0; vertex < 6; vertex++) colors.push(...color);
 }
 
+function cellOutline(field, cell) {
+  const west = field.longitudeCellBounds[cell.longitudeIndex];
+  const east = field.longitudeCellBounds[cell.longitudeIndex + 1];
+  const south = field.latitudeCellBounds[cell.latitudeIndex];
+  const north = field.latitudeCellBounds[cell.latitudeIndex + 1];
+  const southwest = lngLatToMercator(west, south);
+  const southeast = lngLatToMercator(east, south);
+  const northeast = lngLatToMercator(east, north);
+  const northwest = lngLatToMercator(west, north);
+  return Float32Array.from([
+    southwest[0], southwest[1], southeast[0], southeast[1],
+    northeast[0], northeast[1], northwest[0], northwest[1]
+  ]);
+}
+
 function buildGeometry(field) {
   const precipitationVertices = [];
   const precipitationColors = [];
@@ -194,14 +209,17 @@ export class RawWeatherLayer {
     this.geometry = buildGeometry(field);
     this.active = false;
     this.phenomena = true;
+    this.highlightedCell = null;
     this.programs = new Map();
   }
 
   onAdd(map, gl) {
     this.map = map;
+    this.gl = gl;
     this.buffers = { precipitation: {}, thunderstorm: {}, hail: {} };
     this.buffers.precipitation.position = this.createBuffer(gl, this.geometry.precipitation.vertices);
     this.buffers.precipitation.color = this.createBuffer(gl, this.geometry.precipitation.colors);
+    this.highlightBuffer = this.createBuffer(gl, new Float32Array());
     for (const [code, vertices] of Object.entries(this.geometry.thunderstorm)) this.buffers.thunderstorm[code] = this.createBuffer(gl, vertices);
     for (const [code, vertices] of Object.entries(this.geometry.hail)) this.buffers.hail[code] = this.createBuffer(gl, vertices);
   }
@@ -218,6 +236,7 @@ export class RawWeatherLayer {
     for (const buffer of Object.values(this.buffers?.precipitation || {})) gl.deleteBuffer(buffer);
     for (const buffer of Object.values(this.buffers?.thunderstorm || {})) gl.deleteBuffer(buffer);
     for (const buffer of Object.values(this.buffers?.hail || {})) gl.deleteBuffer(buffer);
+    if (this.highlightBuffer) gl.deleteBuffer(this.highlightBuffer);
   }
 
   setActive(active) {
@@ -227,6 +246,16 @@ export class RawWeatherLayer {
 
   setPhenomena(phenomena) {
     this.phenomena = phenomena;
+    this.map?.triggerRepaint();
+  }
+
+  setHighlightedCell(cell) {
+    this.highlightedCell = cell;
+    if (this.gl && this.highlightBuffer) {
+      const vertices = cell ? cellOutline(this.field, cell) : new Float32Array();
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.highlightBuffer);
+      this.gl.bufferData(this.gl.ARRAY_BUFFER, vertices, this.gl.DYNAMIC_DRAW);
+    }
     this.map?.triggerRepaint();
   }
 
@@ -274,6 +303,25 @@ export class RawWeatherLayer {
     if (colorBuffer) gl.disableVertexAttribArray(program.vertexColor);
   }
 
+  drawHighlight(gl, program, projection) {
+    if (!this.highlightedCell || !this.highlightBuffer) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightBuffer);
+    gl.enableVertexAttribArray(program.position);
+    gl.vertexAttribPointer(program.position, 2, gl.FLOAT, false, 0, 0);
+    setGeographicProjection(gl, {
+      matrix: program.matrix,
+      fallbackMatrix: program.fallbackMatrix,
+      projectionMatrix: program.projectionMatrix,
+      tileMercatorCoords: program.tileMercatorCoords,
+      clippingPlane: program.clippingPlane,
+      projectionTransition: program.projectionTransition
+    }, projection);
+    gl.uniform4f(program.color, 1, 0, 0, 1);
+    gl.lineWidth(1);
+    gl.drawArrays(gl.LINE_LOOP, 0, 4);
+    gl.disableVertexAttribArray(program.position);
+  }
+
   render(gl, args) {
     if (!this.active) return;
     gl.disable(gl.BLEND);
@@ -291,6 +339,11 @@ export class RawWeatherLayer {
       for (const [code, vertices] of Object.entries(this.geometry.hail)) {
         this.draw(gl, program, vertices, this.buffers.hail[code], HAIL_COLORS[code], projection);
       }
+      this.drawHighlight(gl, program, projection);
+    } else {
+      const program = this.programFor(gl, args.shaderData);
+      gl.useProgram(program.program);
+      this.drawHighlight(gl, program, projection);
     }
   }
 }
