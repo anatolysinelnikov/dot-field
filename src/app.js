@@ -11,6 +11,7 @@ import {
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
 import { GeographicScalarLayer } from './engine/geographic-scalar-layer.js';
+import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 
 const MAX_SAMPLING_LATITUDE = 85;
 const COMPACT_MAP_SHORT_SIDE = 680;
@@ -23,8 +24,12 @@ const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
 const renderModeSelector = document.querySelector('#renderModeSelector');
 const renderModeButtons = [...renderModeSelector.querySelectorAll('[data-render-mode]')];
+const rawPhenomenaControl = document.querySelector('#rawPhenomenaControl');
+const rawPhenomena = document.querySelector('#rawPhenomena');
 const areaSmoothControl = document.querySelector('#areaSmoothControl');
 const areaSmooth = document.querySelector('#areaSmooth');
+const rawTooltip = document.querySelector('#rawTooltip');
+const rawTooltipContent = document.querySelector('#rawTooltipContent');
 
 const mapContainer = document.querySelector('#map');
 const shortSide = Math.min(
@@ -39,7 +44,7 @@ const initialMinZoom =
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 
-await loadActiveWeatherField();
+const rawWeatherField = await loadActiveWeatherField();
 
 async function loadMapTilerKey() {
   try {
@@ -122,7 +127,8 @@ const state = {
 const weatherLayer = new GeographicDotsLayer();
 const squaresLayer = new GeographicSquaresLayer();
 const scalarLayer = new GeographicScalarLayer();
-const geographicLayers = [scalarLayer, squaresLayer, weatherLayer];
+const rawLayer = new RawWeatherLayer(rawWeatherField);
+const geographicLayers = [rawLayer, scalarLayer, squaresLayer, weatherLayer];
 let lastMapErrorSignature = '';
 
 function cameraState() {
@@ -341,6 +347,7 @@ function queueWeatherUpdate() {
     state.weatherQueued = false;
     if (!state.mapReady) return;
     const time = state.time / LOOP_SECONDS;
+    if (state.renderMode === 'raw') return;
     if (state.renderMode === 'dots') weatherLayer.updateWeather(time);
     else if (state.renderMode === 'squares') squaresLayer.updateWeather(time);
     else scalarLayer.updateWeather(time);
@@ -350,10 +357,14 @@ function queueWeatherUpdate() {
 function applyRenderMode() {
   const mode = state.renderMode;
   const time = state.time / LOOP_SECONDS;
+  const rawActive = mode === 'raw';
   const scalarActive = mode === 'blur' || mode === 'areas';
+  rawLayer.setActive(rawActive);
+  rawLayer.setPhenomena(rawPhenomena.checked);
   weatherLayer.setActive(mode === 'dots');
   squaresLayer.setActive(mode === 'squares');
   scalarLayer.setActive(scalarActive);
+  if (rawActive) return;
   if (mode === 'dots') weatherLayer.updateWeather(time);
   else if (mode === 'squares') squaresLayer.updateWeather(time);
   else {
@@ -365,11 +376,73 @@ function applyRenderMode() {
 function setRenderMode(mode) {
   state.renderMode = mode;
   renderModeSelector.dataset.mode = mode;
+  rawPhenomenaControl.hidden = mode !== 'raw';
   areaSmoothControl.hidden = mode !== 'areas';
+  if (mode !== 'raw') dismissRawTooltip();
   for (const button of renderModeButtons) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
   }
   applyRenderMode();
+}
+
+let selectedRawCell = null;
+let selectedRawCellKey = null;
+
+function rawCellKey(cell) {
+  return `${cell.longitudeIndex}:${cell.latitudeIndex}`;
+}
+
+function positionRawTooltip(point) {
+  if (rawTooltip.hidden) return;
+  const margin = 8;
+  const maxLeft = Math.max(margin, mapContainer.clientWidth - rawTooltip.offsetWidth - margin);
+  const maxTop = Math.max(margin, mapContainer.clientHeight - rawTooltip.offsetHeight - margin);
+  rawTooltip.style.left = `${Math.min(point.x + 14, maxLeft)}px`;
+  rawTooltip.style.top = `${Math.min(point.y + 14, maxTop)}px`;
+}
+
+function showRawTooltip(cell, point) {
+  rawTooltipContent.textContent = [
+    `lon: ${cell.lon.toFixed(5)}`,
+    `lat: ${cell.lat.toFixed(5)}`,
+    `mmh: ${cell.mmh.toFixed(3)}`,
+    `thunderstorm: ${cell.thunderstorm}`,
+    `hail: ${cell.hail}`
+  ].join('\n');
+  rawTooltip.hidden = false;
+  positionRawTooltip(point);
+}
+
+function dismissRawTooltip() {
+  selectedRawCell = null;
+  selectedRawCellKey = null;
+  rawTooltip.hidden = true;
+}
+
+function updateRawTooltipPosition() {
+  if (state.renderMode !== 'raw' || !selectedRawCell) return;
+  positionRawTooltip(map.project([selectedRawCell.lon, selectedRawCell.lat]));
+}
+
+function updateRawHover(event) {
+  if (state.renderMode !== 'raw' || selectedRawCell) return;
+  const cell = rawWeatherField.rawCellAt(event.lngLat.lng, event.lngLat.lat);
+  if (!cell) {
+    rawTooltip.hidden = true;
+    return;
+  }
+  showRawTooltip(cell, event.point);
+}
+
+function selectRawCell(event) {
+  if (state.renderMode !== 'raw') return;
+  const cell = rawWeatherField.rawCellAt(event.lngLat.lng, event.lngLat.lat);
+  if (!cell) return dismissRawTooltip();
+  const key = rawCellKey(cell);
+  if (selectedRawCellKey === key) return dismissRawTooltip();
+  selectedRawCell = cell;
+  selectedRawCellKey = key;
+  showRawTooltip(cell, event.point);
 }
 
 function setPlaying(playing) {
@@ -410,6 +483,15 @@ for (const button of renderModeButtons) {
 areaSmooth.addEventListener('change', () => {
   if (state.renderMode === 'areas') applyRenderMode();
 });
+rawPhenomena.addEventListener('change', () => {
+  if (state.renderMode === 'raw') rawLayer.setPhenomena(rawPhenomena.checked);
+});
+document.addEventListener('pointerdown', (event) => {
+  if (!rawTooltip.hidden && !mapContainer.contains(event.target) && !rawTooltip.contains(event.target)) dismissRawTooltip();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') dismissRawTooltip();
+});
 timeSlider.addEventListener('pointerdown', (event) => {
   if (state.playing) setPlaying(false);
   state.scrubbing = true;
@@ -436,6 +518,11 @@ map.on('style.load', () => {
   if (!state.mapReady) map.setProjection({ type: 'globe' });
   initializeWeatherLayer();
 });
+map.on('mousemove', updateRawHover);
+map.on('click', selectRawCell);
+map.on('mouseout', () => {
+  if (!selectedRawCell) rawTooltip.hidden = true;
+});
 function updateResetViewControl() {
   const center = map.getCenter();
   const bearing = ((map.getBearing() + 180) % 360) - 180;
@@ -448,6 +535,7 @@ function updateResetViewControl() {
   resetView.hidden = !differs;
 }
 map.on('move', updateLogicalSamplingZoom);
+map.on('move', updateRawTooltipPosition);
 map.on('move', updateResetViewControl);
 map.on('rotate', updateResetViewControl);
 map.on('pitch', updateResetViewControl);
@@ -501,7 +589,9 @@ function frame(now) {
   // an otherwise idle map rendering continuously.
   if (state.mapReady && state.playing && !state.scrubbing) {
     const normalizedTime = state.time / LOOP_SECONDS;
-    if (state.renderMode === 'dots') weatherLayer.updateWeather(normalizedTime);
+    if (state.renderMode === 'raw') {
+      updateRawTooltipPosition();
+    } else if (state.renderMode === 'dots') weatherLayer.updateWeather(normalizedTime);
     else if (state.renderMode === 'squares') squaresLayer.updateWeather(normalizedTime);
     else scalarLayer.updateWeather(normalizedTime);
   }

@@ -34,10 +34,12 @@ function levelValue(levels, code, row, name) {
 }
 
 export class RealWeatherField {
-  constructor({ longitudes, latitudes, mmh, rain, storm, hail, sourceRowCount, longitudeSpacing, latitudeSpacing }) {
+  constructor({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rain, storm, hail, sourceRowCount, longitudeSpacing, latitudeSpacing }) {
     this.longitudes = longitudes;
     this.latitudes = latitudes;
     this.mmh = mmh;
+    this.thunderstormCode = thunderstormCode;
+    this.hailCode = hailCode;
     this.rain = rain;
     this.storm = storm;
     this.hail = hail;
@@ -48,10 +50,43 @@ export class RealWeatherField {
       west: longitudes[0], east: longitudes[longitudes.length - 1],
       south: latitudes[0], north: latitudes[latitudes.length - 1]
     });
+    this.longitudeCellBounds = makeCellBounds(longitudes, this.longitudeSpacing);
+    this.latitudeCellBounds = makeCellBounds(latitudes, this.latitudeSpacing);
   }
 
   index(longitudeIndex, latitudeIndex) {
     return latitudeIndex * this.longitudes.length + longitudeIndex;
+  }
+
+  locateSourceCell(axisBounds, value) {
+    if (value <= axisBounds[0]) return 0;
+    if (value >= axisBounds[axisBounds.length - 1]) return axisBounds.length - 2;
+    let low = 0;
+    let high = axisBounds.length - 1;
+    while (high - low > 1) {
+      const middle = (low + high) >> 1;
+      if (axisBounds[middle] <= value) low = middle;
+      else high = middle;
+    }
+    return low;
+  }
+
+  rawCellAt(longitude, latitude) {
+    if (longitude < this.longitudeCellBounds[0] || longitude > this.longitudeCellBounds[this.longitudeCellBounds.length - 1]
+      || latitude < this.latitudeCellBounds[0] || latitude > this.latitudeCellBounds[this.latitudeCellBounds.length - 1]) return null;
+    const longitudeIndex = this.locateSourceCell(this.longitudeCellBounds, longitude);
+    const latitudeIndex = this.locateSourceCell(this.latitudeCellBounds, latitude);
+    const index = this.index(longitudeIndex, latitudeIndex);
+    return {
+      index,
+      longitudeIndex,
+      latitudeIndex,
+      lon: this.longitudes[longitudeIndex],
+      lat: this.latitudes[latitudeIndex],
+      mmh: this.mmh[index],
+      thunderstorm: this.thunderstormCode[index],
+      hail: this.hailCode[index]
+    };
   }
 
   locate(axis, value) {
@@ -92,6 +127,14 @@ export class RealWeatherField {
   }
 }
 
+function makeCellBounds(axis, spacing) {
+  const bounds = new Float64Array(axis.length + 1);
+  bounds[0] = axis[0] - spacing / 2;
+  for (let index = 1; index < axis.length; index++) bounds[index] = (axis[index - 1] + axis[index]) / 2;
+  bounds[axis.length] = axis[axis.length - 1] + spacing / 2;
+  return bounds;
+}
+
 export function parseRealWeatherCsv(csvText) {
   const lines = csvText.trim().split(/\r?\n/);
   if (!lines.length || lines[0].split(',').map((value) => value.trim()).join(',') !== EXPECTED_COLUMNS.join(',')) {
@@ -123,7 +166,9 @@ export function parseRealWeatherCsv(csvText) {
   if (rows.length !== expectedRows) fail(`expected ${expectedRows} rows, received ${rows.length}.`);
 
   const size = expectedRows;
-  const mmh = new Float32Array(size);
+  const mmh = new Float64Array(size);
+  const thunderstormCode = new Uint8Array(size);
+  const hailCode = new Uint8Array(size);
   const rain = new Float32Array(size);
   const storm = new Float32Array(size);
   const hail = new Float32Array(size);
@@ -138,12 +183,14 @@ export function parseRealWeatherCsv(csvText) {
     if (occupied[index]) fail(`duplicate grid node at ${row.lon},${row.lat}.`);
     occupied[index] = 1;
     mmh[index] = row.mmh;
+    thunderstormCode[index] = row.thunderstorm;
+    hailCode[index] = row.hail;
     rain[index] = clamp(row.mmh / RAIN_FULL_SCALE_MMH, 0, 1);
     storm[index] = levelValue(THUNDERSTORM_LEVELS, row.thunderstorm, rowIndex + 2, 'thunderstorm');
     hail[index] = levelValue(HAIL_LEVELS, row.hail, rowIndex + 2, 'hail');
   }
   if (occupied.some((value) => value === 0)) fail('one or more grid nodes are missing.');
-  return new RealWeatherField({ longitudes, latitudes, mmh, rain, storm, hail, sourceRowCount: rows.length, longitudeSpacing, latitudeSpacing });
+  return new RealWeatherField({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rain, storm, hail, sourceRowCount: rows.length, longitudeSpacing, latitudeSpacing });
 }
 
 export async function loadRealWeatherSnapshot(url) {

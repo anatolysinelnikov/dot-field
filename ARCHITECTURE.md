@@ -11,7 +11,8 @@
 This is a browser-native geographic weather prototype. It uses MapLibre GL JS in
 Globe projection, a validated static real-data CSV snapshot, a globally
 anchored Mercator sampling topology, and projection-aware MapLibre custom WebGL
-layers. The active modes are **Dots**, **Squares**, **Blur**, and **Areas**.
+layers. The active modes are **RAW**, **Dots**, **Squares**, **Blur**, and
+**Areas**; Dots remains the default.
 
 The weather channels are always independent data channels:
 
@@ -23,6 +24,8 @@ The active renderer split is intentional:
 
 ```text
 real geographic field snapshot
+        |
+        +-- direct source-grid cells ------------------------------> RAW
         |
         +-- discrete Mercator LOD --> Dots / Squares
         |
@@ -50,10 +53,9 @@ index.html + styles.css
         v
 app.js ----------------------> MapLibre GL JS / Globe camera and basemap
  |                                  |
- +-> geographic-lod.js              +-> MapLibre custom 3D layers
- |      geographic-symbol-pyramid.js      |
- |                                        +-> geographic-dots-layer.js
- +-> geographic-squares-layer.js          +-> geographic-squares-layer.js
+ +-> real-weather.js --------------------> raw-weather-layer.js
+ +-> geographic-lod.js ------------------> geographic-dots-layer.js
+ |      geographic-symbol-pyramid.js      geographic-squares-layer.js
  +-> geographic-scalar-lattice.js ---+
  +-> areas-reconstruction.js --------+----> geographic-scalar-layer.js
 ```
@@ -62,10 +64,11 @@ app.js ----------------------> MapLibre GL JS / Globe camera and basemap
 
 `app.js` owns UI state, playback, timeline scrubbing, custom camera controls,
 logical weather zoom, MapLibre construction, active-layer routing, and readouts.
-It creates all three geographic custom layers once after the style loads and
+It creates all four geographic custom layers once after the style loads and
 changes their active state instead of recreating the map or layers when the
-render mode changes. `Dots` is the initial mode; the selector order is Dots,
-Squares, Blur, Areas. The Smooth control is visible only in Areas mode.
+render mode changes. `Dots` is the initial mode; the selector order is RAW,
+Dots, Squares, Blur, Areas. The `Явления` control is visible only in RAW mode;
+the Smooth control is visible only in Areas mode.
 
 The MapTiler Dataviz Dark Globe basemap, native label and
 administrative-boundary ordering, water tint/boundary context, camera controls,
@@ -86,6 +89,7 @@ lazily synchronizes that representation to the exact global time before its
 next repaint, while preserving time, play/pause state, camera state, and
 logical weather zoom. Inactive layers retain lightweight topology/LOD state but
 do not evaluate weather, rebuild instance data, or upload temporal GPU data.
+RAW is static and never participates in temporal evaluation.
 Dots and Squares read out their active LOD/sample count. Blur and Areas report
 their fixed L14 reconstruction lattice instead of camera LOD.
 
@@ -100,8 +104,9 @@ The active provider is `data/mrl_z3_t+40min_376x239.csv`, containing 89,864 rows
 on a regular 376 × 239 longitude/latitude grid. `real-weather.js` validates the
 header, dimensions, complete grid, regular axes (within rounded-coordinate
 tolerance), nonnegative mm/h values, and supported thunderstorm/hail codes. It
-stores mm/h plus normalized rain, storm, and hail channels in typed arrays and
-bilinearly samples all three channels in geographic coordinates. Normalization is
+stores raw mm/h and phenomenon codes plus normalized rain, storm, and hail
+channels in typed arrays and bilinearly samples the normalized channels in
+geographic coordinates. Normalization is
 `clamp(mmh / 3, 0, 1)` for rain; thunderstorm codes 0/10/11/12 map to
 0/0.2660123/0.4818750/0.6977377; hail codes 0/16/17/18 map to
 0/0.2776807/0.4897500/0.7018193.
@@ -114,6 +119,24 @@ nodes with any nonzero channel, padded by one source-grid cell on each side:
 `39.93113..50.12886` longitude and `41.57035..45.12740` latitude. The complete
 CSV envelope remains available inside the provider and is not altered by this
 topology optimization.
+
+## RAW source-grid diagnostic — `src/engine/raw-weather-layer.js`
+
+RAW is a separate static diagnostic representation of the original 376 × 239
+provider grid. It constructs one world-space cell per source node from midpoint
+boundaries (half-spacing at the outer edges), draws raw `mmh > 0` cells as solid
+opaque blue, and draws raw thunderstorm/hail codes as solid magenta/yellow inset
+markers. It never calls the normalized bilinear sampler, Mercator LOD, the L14
+scalar lattice, reconstruction, smoothing, aggregation, or renderer mappings.
+The layer stores only nonzero drawing geometry for performance; zero cells remain
+inspectable through the provider's direct regular-grid cell lookup.
+
+RAW interaction is application-owned: pointer coordinates select the source cell
+directly from the loaded longitude/latitude axes, including zero-valued cells.
+Hover shows a diagnostic tooltip and click/tap pins it; Escape, outside clicks,
+or clicking the selected cell again dismiss it. Tooltip values are raw source
+coordinates, three-decimal mm/h, and integer phenomenon codes. RAW does not
+advance with the existing playback loop.
 
 ## Shared geographic Mercator topology — `src/engine/geographic-lod.js`
 
