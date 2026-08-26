@@ -60,8 +60,7 @@ app.js ----------------------> MapLibre GL JS / Globe camera and basemap
  +-> real-weather.js --------------------> raw-weather-layer.js
  +-> geographic-lod.js ------------------> geographic-dots-layer.js
  |      geographic-symbol-pyramid.js      geographic-squares-layer.js
- +-> geographic-scalar-lattice.js ---+
- +-> areas-reconstruction.js --------+----> geographic-scalar-layer.js
+ +-> geographic-scalar-lattice.js --------> geographic-scalar-layer.js
 ```
 
 ### Application orchestration — `src/app.js`
@@ -199,51 +198,45 @@ L14 gives a roughly 3 km local grid near the experiment anchor. Panning,
 rotation, pitch, resizing, and ordinary camera zoom only reproject this mesh;
 they do not rebuild it or reevaluate weather values.
 
-Each temporal keyframe evaluates reconstructed rain/storm/hail at those fixed
-vertices using the prepared geographic field. Smooth state and coverage
-remapping are computed only for Areas with Smooth enabled. Blur packs/uploads only its L14
-vertex values; Areas reconstructs/uploads only dense texture values. The scalar
-mesh is a surface-attached MapLibre custom 3D layer.
+Each temporal keyframe evaluates the bilinearly reconstructed source field at
+those fixed L14 vertices using the prepared geographic field. Smooth state and
+coverage remapping are computed only for Areas with Smooth enabled. Both Blur
+and Areas pack the selected L14 channel values into two reusable RGBA32F
+textures sized exactly to the lattice (466 × 225); the fragment shader performs
+explicit four-texel bilinear sampling from those textures. The indexed mesh is
+surface/projection tessellation only. The scalar mesh is a surface-attached
+MapLibre custom 3D layer.
 
 Dots, Squares, and Scalar share the same 100 ms temporal-frame boundary helper
 and MapLibre/WebGL projection-uniform helper. Squares retain CPU and GPU
-instance capacity across updates, and Blur retains its fixed-size GPU value
-buffer allocation; only data contents are updated for ordinary keyframes.
+instance capacity across updates, and Scalar retains its two fixed-size CPU/GPU
+texture pairs; only data contents are updated for ordinary keyframes.
 
 ## Blur — `src/engine/geographic-scalar-layer.js`
 
-In Blur mode the fragment shader retains the existing vertex-varying triangle
-interpolation path and applies the continuous visibility and
+In Blur mode the fragment shader bilinearly reconstructs rain/storm/hail from
+the shared unsmoothed L14 textures, then applies the continuous visibility and
 color-transfer intent: a soft rain support edge, light-blue rain transitioning
 to strong blue, then magenta storm and yellow hail composited above it. Hail is
-last. The shader computes final color and opacity directly from reconstructed
-values, avoiding blur of any discrete representation.
+last. The indexed triangles do not define scalar geometry, and no per-vertex
+weather attribute buffer is used.
 
-## Areas reconstruction and Smooth — `src/engine/geographic-scalar-layer.js`, `src/engine/areas-reconstruction.js`
+## Areas reconstruction and Smooth — `src/engine/geographic-scalar-layer.js`, `src/engine/geographic-scalar-lattice.js`
 
-Areas starts from the same deterministic L14 samples, but its default
-reconstruction is a separate, shape-preserving dense Mercator lattice. The
-explicit `AREA_RECONSTRUCTION_SUBDIVISIONS = 2` constant produces a 931 × 449
-reconstruction grid from the 466 × 225 source grid. Its CPU pass is a
-separable monotone cubic Hermite (PCHIP-style harmonic-slope) interpolator: it
-copies every original L14 node exactly, limits slopes to prevent cubic ringing,
-and constrains between-node values to their rectangular source-cell range.
-This improves continuity for small hail contours without changing the sampled
-field or applying low-pass smoothing.
-
-The expensive reconstruction workspace, dense temporal arrays, and two RGBA32F
-textures are allocated lazily on first Areas activation and retained thereafter.
-Reconstruction is performed only when Areas needs a temporal state: both
-adjacent states are rebuilt on Areas activation, arbitrary timeline jumps, or a
-Smooth toggle. During ordinary 100 ms temporal advancement, the already
-reconstructed `state1` buffer/texture becomes `state0`; only the new `state1`
-is reconstructed and uploaded. The two dense RGBA32F textures keep
-rain/storm/hail in RGB. The fragment shader uses portable explicit bilinear
-four-texel sampling of those dense textures, then temporally mixes the results
-before applying the existing five precipitation bands (`#0090FF` through
+Areas uses the same shared L14 RGBA32F textures and explicit four-texel
+bilinear reconstruction as Blur. With Smooth off, this raw L14 → bilinear field
+is mapped through the existing five precipitation bands (`#0090FF` through
 `#0000FF`), storm/hail thresholds, translucent magenta/yellow fills,
-hail-over-storm order, and derivative-based edge treatment. This avoids making
-float-linear texture support a requirement.
+hail-over-storm order, and derivative-based edge treatment. The default Areas
+field therefore differs from Blur only by transfer semantics, not by scalar
+reconstruction.
+
+The two texture arrays and two GPU textures are allocated lazily and retained
+for the life of the layer. On ordinary 100 ms temporal advancement, the
+previous state1 texture becomes state0 and only the new state1 texture data is
+rewritten and uploaded. Mode switching and arbitrary timeline jumps rebuild the
+same reusable L14 texture pair, so Blur, Areas, and Areas Smooth cannot retain a
+stale reconstruction path.
 
 The static L14 indexed triangles remain projection-only surface tessellation
 for MapLibre Globe. Their diagonals never determine Areas scalar contours, and
@@ -256,9 +249,10 @@ low-pass scale). The filter uses running separable windows while retaining the
 same edge-clamping semantics. This
 removes local detail without changing the lattice or responding to camera zoom.
 Rain band thresholds and storm/hail presence thresholds are coverage-remapped
-against the unsmoothed lattice, preserving the visual-coverage intent.
-Both filtered values and remapped thresholds are interpolated between temporal
+against the unsmoothed lattice, preserving the visual-coverage intent. Both
+filtered values and remapped thresholds are interpolated between temporal
 keyframes, so Smooth does not introduce visible 100 ms contour steps. Its
-deterministic generalized L14 values feed the same shape-preserving dense Areas
-reconstruction; Smooth is therefore still distinct from default reconstruction
-quality. Blur remains on its independent triangle-interpolated scalar path.
+deterministic generalized L14 values feed the same shared bilinear texture
+reconstruction; Smooth is therefore a deterministic L14 generalization rather
+than a separate spatial interpolant. Blur always uses the raw unsmoothed L14
+values.
