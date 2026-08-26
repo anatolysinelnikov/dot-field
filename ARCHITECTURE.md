@@ -27,7 +27,9 @@ real geographic field snapshot
         |
         +-- direct source-grid cells ------------------------------> RAW
         |
-        +-- discrete Mercator LOD --> Dots / Squares
+        +-- discrete Mercator LOD
+        |     +-- existing renderer-specific reductions --> Dots / Squares
+        |     +-- shared physical weather summaries (Phase 3; not consumed yet)
         |
         +-- fixed L14 scalar lattice --> Blur / Areas (+ optional Smooth)
 ```
@@ -63,6 +65,7 @@ app.js ----------------------> MapLibre GL JS / Globe camera and basemap
  +-> real-weather.js --------------------> raw-weather-layer.js
  +-> geographic-lod.js ------------------> geographic-dots-layer.js
  |      geographic-symbol-pyramid.js      geographic-squares-layer.js
+ +-> geographic-weather-pyramid.js (independent Phase 3 data model; no renderer consumer yet)
  +-> geographic-scalar-lattice.js --------> geographic-scalar-layer.js
 ```
 
@@ -163,6 +166,45 @@ or Squares runtime topology. Logical sampling zoom is
 application-owned and latitude-corrected for Globe camera behavior, so panning
 and rotating do not alter displayed weather density.
 
+## Shared physical weather summaries — `src/engine/geographic-weather-pyramid.js`
+
+The shared weather pyramid is a representation-independent data model for
+future discrete renderers. It uses the canonical samples from
+`selectMercatorGridSamples()` but has no dependency on Dots radii, Squares
+opacity/color, glyph geometry, WebGL, UI state, presentation mappings, or
+hazard-renderer functions. L14 is the direct point-sampling boundary: its
+`rainMmh`, storm severity, and hail severity come directly from the reconstructed
+physical field. L13 through L10 are recursively aggregated spatial summaries,
+never direct samples of the field or values from an existing renderer pyramid.
+
+Each summary is a struct of typed arrays with 16 `Float64Array` fields per
+sample (128 bytes/sample): `totalWeight`, `rainWeightedSumMmh`,
+`rainMaxMmh`, seven `rainCoverageWeight` arrays for the physical thresholds
+0.05, 0.10, 0.30, 1.00, 2.50, 10.0, and 50.0 mm/h,
+`stormCoverageWeight`, `stormWeightedSeverity`, `stormMaxSeverity`,
+`hailCoverageWeight`, `hailWeightedSeverity`, and `hailMaxSeverity`. Means are
+derived as weighted sum divided by `totalWeight`; they are not stored. Rain
+remains physical mm/h, including values above 50 mm/h. Coverage arrays retain
+distribution information that a mean alone would lose, and hazard maxima are
+retained alongside coverage and weighted severity.
+
+Adjacent-level centered contribution mappings are separate from LOD transition
+ownership. An aligned fine coordinate contributes with weight 1; a half-step
+coordinate splits 0.5/0.5 on that axis, with X/Y weights multiplied. Candidates
+outside the finite selected support are omitted and the remaining weights for
+that fine sample are divided by their sum, so every child retains total support
+weight 1. For each child summary contribution `w`, all additive statistics and
+coverage weights receive `w * child.totalWeight` or `w * child statistic`, and
+maxima retain the maximum over positive support. This makes the summaries
+recursively composable without re-thresholding child means.
+
+Provider categorical storm/hail codes remain source metadata and are not
+inferred from interpolated severities. RAW remains unchanged. The shared
+pyramid is intentionally not connected to Dots or Squares in Phase 3; those
+renderers continue using their existing independent reduction paths until Phase
+4. Any future level above L14 must sample the reconstructed field directly,
+not interpolate lower-LOD renderer values.
+
 ## Dots — `src/engine/geographic-dots-layer.js`
 
 Dots retain the existing symbol-pyramid implementation. `GeographicSymbolPyramid`
@@ -175,7 +217,9 @@ averages, shifts, or derives spatial coordinates from child positions or
 weather values. L14 is the single direct/reference level;
 L13, L12, L11, and L10 are each deterministically reduced from their immediate
 finer level. Rain and strong-rain areas are conserved independently; hail wins
-hazard priority during reduction. Parent anchors remain weather-independent and
+hazard priority during reduction. This is still the existing renderer-specific
+reduction path and does not consume the shared physical summary pyramid. Parent
+anchors remain weather-independent and
 LOD transitions use the same dyadic parent/child topology for every adjacent
 displayed level, including L14 ↔ L13; during those transitions, each child
 morphs to or from its canonical coarse-parent position.
@@ -206,9 +250,11 @@ only scalar rain, storm, and hail values. Rain averages immediate child values;
 storm and hail retain their average/max-biased reductions. LOD changes crossfade
 the deterministic parent and child cell sets during the existing 0.2 s
 transition; no new grid is created and no camera-dependent identity is
-introduced. Rain square visibility and light-to-strong blue color use the same
-physical rain transfer anchors as Dots; rain values above 3 mm/h therefore
-remain distinguishable through the progressive strong-color transfer.
+introduced. This remains the existing Squares-specific reduction path and does
+not consume the shared physical summary pyramid. Rain square visibility and
+light-to-strong blue color use the same physical rain transfer anchors as Dots;
+rain values above 3 mm/h therefore remain distinguishable through the
+progressive strong-color transfer.
 
 ## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`
 
