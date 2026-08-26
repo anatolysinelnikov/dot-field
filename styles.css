@@ -305,29 +305,6 @@ button:active { transform: translateY(1px); }
   gap: 8px;
 }
 
-.dots-strong-controls[hidden] { display: none; }
-
-.dots-strong-control {
-  position: static;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 4px 10px;
-  border: var(--control-border);
-  border-radius: var(--control-radius);
-  background: var(--control-panel);
-  box-shadow: var(--control-shadow);
-  backdrop-filter: var(--control-backdrop);
-  color: #c7d0df;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-#dotsStrongControl { gap: 8px; }
-#dotsStrongControl output { color: #e5ebf5; font-variant-numeric: tabular-nums; }
-#dotsStrongControl input[type="range"] { width: 140px; height: 26px; }
-
 .area-smooth-content {
   flex: 0 0 auto;
   width: max-content;

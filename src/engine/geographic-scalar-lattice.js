@@ -1,11 +1,11 @@
 import { AREA_PRECIPITATION_BANDS, RAIN_PRESENTATION_MAX_MMH } from './config.js';
 import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographicToSynthetic } from './geography.js';
-import { MAX_DISPLAY_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
+import { selectMercatorGridSamples } from './geographic-lod.js';
 
 // Blur and Areas share one L14 lattice.  Unlike the display LOD, this grid is
 // never selected from the camera: its vertices, cells, and identities persist
 // for the life of the map layer.
-export const SCALAR_GRID_LEVEL = MAX_DISPLAY_GRID_LEVEL;
+export const SCALAR_GRID_LEVEL = 14;
 export const SCALAR_SMOOTH_RADIUS = 3;
 export const SCALAR_SMOOTH_PASSES = 2;
 export const AREA_STORM_THRESHOLD = 0.075 * 0.45;

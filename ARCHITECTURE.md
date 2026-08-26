@@ -159,9 +159,8 @@ coordinate pair, so inherited vertices retain identity through LOD refinement.
 `selectMercatorGridSamples()` is the canonical spatial authority: every
 selected sample's `mercator` coordinate is the world-space position used by
 discrete representations.
-The camera never reseats the grid. Displayed Dots/Squares levels are L10–L14;
-L15 remains the canonical identity resolution but is not materialized as Dots
-or Squares runtime topology. Logical sampling zoom is
+The camera never reseats the grid. Canonical identity resolution and the
+maximum displayed Dots/Squares level are both L15. Logical sampling zoom is
 application-owned and latitude-corrected for Globe camera behavior, so panning
 and rotating do not alter displayed weather density.
 
@@ -171,10 +170,28 @@ The application owns one `GeographicWeatherPyramid` and passes it to both Dots
 and Squares. It is representation-independent and uses the canonical samples from
 `selectMercatorGridSamples()` but has no dependency on Dots radii, Squares
 opacity/color, glyph geometry, WebGL, UI state, presentation mappings, or
-hazard-renderer functions. L14 is the direct point-sampling boundary: its
-`rainMmh`, storm severity, and hail severity come directly from the reconstructed
-physical field. L13 through L10 are recursively aggregated spatial summaries,
-never direct samples of the field or values from an existing renderer pyramid.
+hazard-renderer functions. The parsed provider grid is anisotropic geographic
+data; near `WEATHER_REGION.center` its roughly 0.04° longitude/latitude source
+spacing is closest to canonical L13. `WEATHER_REFERENCE_LEVEL = 13` is thus the
+effective direct/aggregate boundary. L13, L14, and L15 independently evaluate
+their own canonical geographic coordinates through the bilinearly reconstructed
+physical field. L14/L15 add sampling resolution, not meteorological information.
+Only L12 through L10 are recursively aggregated spatial summaries from L13;
+they are never direct field samples or values from an existing renderer pyramid.
+
+```text
+provider source grid
+        ↓
+bilinear reconstructed physical field
+        ↓
+L15 direct sample
+L14 direct sample
+L13 direct/effective reference sample
+-------------------------------
+L12 centered spatial summary
+L11 centered spatial summary
+L10 centered spatial summary
+```
 
 Each summary is a struct of typed arrays with 16 `Float32Array` fields per
 sample (64 bytes/sample): `totalWeight`, `rainWeightedSumMmh`,
@@ -187,8 +204,8 @@ remains physical mm/h, including values above 50 mm/h. Coverage arrays retain
 distribution information that a mean alone would lose, and hazard maxima are
 retained alongside coverage and weighted severity.
 
-Adjacent-level centered contribution mappings are separate from LOD transition
-ownership. An aligned fine coordinate contributes with weight 1; a half-step
+Aggregate-side centered contribution mappings are separate from LOD transition
+ownership. They exist only for L13→L12→L11→L10. An aligned fine coordinate contributes with weight 1; a half-step
 coordinate splits 0.5/0.5 on that axis, with X/Y weights multiplied. Candidates
 outside the finite selected support are omitted and the remaining weights for
 that fine sample are divided by their sum, so every child retains total support
@@ -197,7 +214,7 @@ coverage weights receive `w * child.totalWeight` or `w * child statistic`, and
 maxima retain the maximum over positive support. This makes the summaries
 recursively composable without re-thresholding child means. The summary storage
 choice was validated against an equivalent Float64 calculation across the
-complete L10–L14 pyramid, deterministic fixtures, recursive composition, and
+complete L10–L15 topology, deterministic fixtures, recursive composition, and
 the real weather snapshot; the verifier records field-specific absolute and
 relative error bounds. Contribution weights remain Float64 because their
 topology is shared and their smaller memory cost does not justify a precision
@@ -207,8 +224,8 @@ Provider categorical storm/hail codes remain source metadata and are not
 inferred from interpolated severities. RAW remains unchanged. Dots and Squares
 map these same summaries into renderer-owned compact presentation buffers;
 neither renderer recursively aggregates radii, colors, opacity, or hazard
-glyph values. Any future level above L14 must sample the reconstructed field
-directly, not interpolate lower-LOD renderer values.
+glyph values. L14 and L15 sample the reconstructed field directly and
+independently; neither interpolates a lower discrete summary.
 
 Only the active discrete renderer retains temporal summary/mapping buffers;
 switching away releases that renderer's temporal state while retaining the
@@ -219,16 +236,16 @@ shared topology and reusable GPU capacities.
 Dots map each shared physical summary after it is produced. Base rain uses
 `spacing * sqrt(rainCoverage) * rainMmhToRadiusFraction(wetMeanMmh)`, where
 coverage is the shared 0.05 mm/h coverage and wet mean divides the rain weighted
-sum by that wet support. L14 is a direct point sample and uses the exact existing
-strong-rain presentation mapping from physical `rainMmh`. Coarse L10–L13
+sum by that wet support. L13, L14, and L15 are direct point samples and use the
+exact strong-rain presentation mapping from physical `rainMmh`. Coarse L10–L12
 strong-blue uses shared 2.5 mm/h coverage plus the retained peak:
 `spacing * sqrt(strongCoverage) *
-dotsStrongRainMmhToRadiusFraction(rainMaxMmh, strongFullMmh)`. The temporary
-full-saturation control remains Dots-only presentation state and never changes
-the shared summary. Coarse storm/hail glyphs use independent shared coverage,
+dotsStrongRainMmhToRadiusFraction(rainMaxMmh)`. Dots strong-blue saturation is
+now a fixed 35 mm/h presentation setting; the temporary tuning slider and
+mutable state were removed. Coarse storm/hail glyphs use independent shared coverage,
 positive mean severity, and retained maximum severity; the presentation severity
 retains the peak, coverage scales glyph area, and hail wins only when its mapped
-glyph is visible. Direct L14 hazards retain the existing
+glyph is visible. Direct L13/L14/L15 hazards retain the existing
 `geographicHazardRadii()` mapping.
 
 `GeographicLodTopology` in `geographic-lod.js` owns canonical anchors and the
@@ -239,18 +256,17 @@ positions and no-grid-jump behavior.
 
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
-transitions use deterministic parent/child topology and squared-radius morphs.
+transitions use deterministic parent/child topology below/equal to L13 and
+direct-pair refinement for L13↔L14 and L14↔L15.
 Rain glyph radii use the shared monotonic physical anchor transfer in squared
 radius/visual area; the light-blue base saturates at 0.86 spacing near 10 mm/h,
 while the nested Dots-only strong-blue overlay starts visually at 1.6 mm/h and
-uses a fixed monotonic squared-area shape stretched from that onset to its
-temporary 20–50 mm/h full-saturation control (default 35 mm/h). The selected
-full-saturation value is presentation/diagnostic state and does not affect
-other renderers.
+uses a fixed monotonic squared-area shape stretched from that onset to 35 mm/h.
+This fixed presentation setting does not affect other renderers.
 
 ## Squares — `src/engine/geographic-squares-layer.js`
 
-Squares use the same active globally anchored L10–L14 Mercator topology and
+Squares use the same active globally anchored L10–L15 Mercator topology and
 shared physical summaries as Dots, but map them into square color and opacity.
 Each active sample instantiates a square centered on its Mercator grid point;
 the cell side equals the active grid spacing. Geometry is projected by the same
@@ -268,11 +284,15 @@ progressive strong-color transfer.
 
 ## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`
 
-Blur and Areas share one fixed L14 lattice with 104,850 vertices (466 × 225).
+Blur and Areas share one explicitly fixed `SCALAR_GRID_LEVEL = 14` lattice with
+104,850 vertices (466 × 225). This scalar level is independent of the discrete
+maximum display LOD, so enabling discrete L15 cannot change scalar texture
+dimensions, smoothing resolution, or reconstruction topology.
 Its rows,
 columns, Mercator positions, and triangle indices are created once from the
 globally anchored geographic topology and cached for the life of the layer.
-L14 gives a roughly 3 km local grid near the experiment anchor. Panning,
+L14 gives roughly 1.8 km local east-west grid spacing near the experiment
+anchor. Panning,
 rotation, pitch, resizing, and ordinary camera zoom only reproject this mesh;
 they do not rebuild it or reevaluate weather values.
 

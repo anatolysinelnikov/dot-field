@@ -6,7 +6,10 @@ import {
   GeographicLodTopology
 } from './geographic-lod.js';
 
-export const WEATHER_REFERENCE_LEVEL = MAX_DISPLAY_GRID_LEVEL;
+// L13 is the nearest practical dyadic Mercator scale to the current parsed
+// provider grid near WEATHER_REGION.center. Levels above it are independent
+// denser samples of the reconstructed field; only lower levels aggregate.
+export const WEATHER_REFERENCE_LEVEL = 13;
 export const RAIN_COVERAGE_THRESHOLDS_MMH = Object.freeze([
   0.05,
   0.10,
@@ -166,7 +169,7 @@ export class GeographicWeatherPyramid {
     this.levels = topology.levels;
 
     this.contributions = new Map();
-    for (let level = MIN_GRID_LEVEL + 1; level <= MAX_DISPLAY_GRID_LEVEL; level++) {
+    for (let level = MIN_GRID_LEVEL + 1; level <= WEATHER_REFERENCE_LEVEL; level++) {
       this.contributions.set(level, buildCenteredContributions(this.levels.get(level), this.levels.get(level - 1)));
     }
   }
@@ -190,27 +193,42 @@ export class GeographicWeatherPyramid {
   evaluate(requestedLevels, frame, reusableStates = null) {
     if (!requestedLevels.length) return [];
     const minimumRequested = Math.min(...requestedLevels);
-    if (minimumRequested < MIN_GRID_LEVEL || Math.max(...requestedLevels) > WEATHER_REFERENCE_LEVEL) {
-      throw new Error(`Weather summary levels must be between L${MIN_GRID_LEVEL} and L${WEATHER_REFERENCE_LEVEL}.`);
+    if (minimumRequested < MIN_GRID_LEVEL || Math.max(...requestedLevels) > MAX_DISPLAY_GRID_LEVEL) {
+      throw new Error(`Weather summary levels must be between L${MIN_GRID_LEVEL} and L${MAX_DISPLAY_GRID_LEVEL}.`);
     }
 
     const summaries = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
-    let summary = evaluateDirectWeatherSummary(
-      this.levels.get(WEATHER_REFERENCE_LEVEL),
-      frame,
-      reusableStates?.[WEATHER_REFERENCE_LEVEL],
-      this.summaryArrayType
-    );
-    summaries[WEATHER_REFERENCE_LEVEL] = summary;
-    for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= minimumRequested; level--) {
-      summary = aggregateWeatherSummary(
-        this.levels.get(level),
-        summary,
-        this.contributions.get(level + 1),
-        reusableStates?.[level],
+    const uniqueRequested = [...new Set(requestedLevels)];
+    const aggregateRequested = uniqueRequested.filter((level) => level <= WEATHER_REFERENCE_LEVEL);
+    if (aggregateRequested.length) {
+      const minimumAggregateLevel = Math.min(...aggregateRequested);
+      let summary = evaluateDirectWeatherSummary(
+        this.levels.get(WEATHER_REFERENCE_LEVEL),
+        frame,
+        reusableStates?.[WEATHER_REFERENCE_LEVEL],
         this.summaryArrayType
       );
-      summaries[level] = summary;
+      summaries[WEATHER_REFERENCE_LEVEL] = summary;
+      for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= minimumAggregateLevel; level--) {
+        summary = aggregateWeatherSummary(
+          this.levels.get(level),
+          summary,
+          this.contributions.get(level + 1),
+          reusableStates?.[level],
+          this.summaryArrayType
+        );
+        summaries[level] = summary;
+      }
+    }
+    for (const level of uniqueRequested) {
+      if (level > WEATHER_REFERENCE_LEVEL) {
+        summaries[level] = evaluateDirectWeatherSummary(
+          this.levels.get(level),
+          frame,
+          reusableStates?.[level],
+          this.summaryArrayType
+        );
+      }
     }
     return summaries;
   }

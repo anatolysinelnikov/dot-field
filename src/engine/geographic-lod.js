@@ -7,7 +7,9 @@ export const MERCATOR_WORLD_SIZE = 512;
 export const TARGET_GRID_SPACING = 9;
 export const MIN_GRID_LEVEL = 10;
 export const MAX_GRID_LEVEL = 15;
-export const MAX_DISPLAY_GRID_LEVEL = 14;
+// The discrete renderers may materialize the complete canonical L15 identity
+// system. This is independent from the physical weather reference level.
+export const MAX_DISPLAY_GRID_LEVEL = 15;
 
 const LOD_LEVEL_OFFSET = Math.log2(MERCATOR_WORLD_SIZE / TARGET_GRID_SPACING);
 // The rounded zoom mapping first reaches the next level at N + 0.5.

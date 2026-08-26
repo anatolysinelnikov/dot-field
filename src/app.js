@@ -8,7 +8,7 @@ import {
   selectMercatorGridSamples,
   zoomToMercatorGridLevel
 } from './engine/geographic-lod.js';
-import { DEFAULT_DOTS_STRONG_FULL_MMH, GeographicDotsLayer } from './engine/geographic-dots-layer.js';
+import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
 import { GeographicScalarLayer } from './engine/geographic-scalar-layer.js';
@@ -29,9 +29,6 @@ const rawPhenomenaControl = document.querySelector('#rawPhenomenaControl');
 const rawPhenomena = document.querySelector('#rawPhenomena');
 const areaSmoothControl = document.querySelector('#areaSmoothControl');
 const areaSmooth = document.querySelector('#areaSmooth');
-const dotsStrongControls = document.querySelector('#dotsStrongControls');
-const dotsStrongFull = document.querySelector('#dotsStrongFull');
-const dotsStrongFullOutput = document.querySelector('#dotsStrongFullOutput');
 const lodDiagnostics = document.querySelector('#lodDiagnostics');
 const rawTooltip = document.querySelector('#rawTooltip');
 const rawTooltipContent = document.querySelector('#rawTooltipContent');
@@ -127,8 +124,7 @@ const state = {
   resettingView: false,
   mapReady: false,
   weatherQueued: false,
-  renderMode: 'raw',
-  dotsStrongFullMmh: DEFAULT_DOTS_STRONG_FULL_MMH
+  renderMode: 'raw'
 };
 const geographicWeatherPyramid = new GeographicWeatherPyramid();
 const weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid);
@@ -394,10 +390,8 @@ function applyRenderMode() {
   weatherLayer.setActive(mode === 'dots');
   squaresLayer.setActive(mode === 'squares');
   scalarLayer.setActive(scalarActive);
-  dotsStrongControls.hidden = mode !== 'dots';
   if (rawActive) return;
   if (mode === 'dots') {
-    weatherLayer.setStrongFullMmh(state.dotsStrongFullMmh, time);
     weatherLayer.updateWeather(time);
   }
   else if (mode === 'squares') squaresLayer.updateWeather(time);
@@ -412,7 +406,6 @@ function setRenderMode(mode) {
   renderModeSelector.dataset.mode = mode;
   rawPhenomenaControl.hidden = mode !== 'raw';
   areaSmoothControl.hidden = mode !== 'areas';
-  dotsStrongControls.hidden = mode !== 'dots';
   if (mode !== 'raw') dismissRawTooltip();
   for (const button of renderModeButtons) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
@@ -522,11 +515,6 @@ areaSmooth.addEventListener('change', () => {
 });
 rawPhenomena.addEventListener('change', () => {
   if (state.renderMode === 'raw') rawLayer.setPhenomena(rawPhenomena.checked);
-});
-dotsStrongFull.addEventListener('input', () => {
-  state.dotsStrongFullMmh = Number(dotsStrongFull.value);
-  dotsStrongFullOutput.textContent = `${state.dotsStrongFullMmh} mm/h`;
-  if (state.renderMode === 'dots') weatherLayer.setStrongFullMmh(state.dotsStrongFullMmh, state.time / LOOP_SECONDS);
 });
 document.addEventListener('pointerdown', (event) => {
   if (!rawTooltip.hidden && !mapContainer.contains(event.target) && !rawTooltip.contains(event.target)) dismissRawTooltip();

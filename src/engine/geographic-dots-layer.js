@@ -1,14 +1,12 @@
 import { prepareGeographicFieldFrame } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import {
-  DOTS_STRONG_RAIN_FULL_MMH_DEFAULT,
-  DOTS_STRONG_RAIN_FULL_MMH_MAX,
-  DOTS_STRONG_RAIN_FULL_MMH_MIN,
   dotsStrongRainMmhToRadius,
   dotsStrongRainMmhToRadiusFraction,
   rainMmhToRadiusFraction
 } from './precipitation-mapping.js';
 import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH, WEATHER_REFERENCE_LEVEL } from './geographic-weather-pyramid.js';
+import { MAX_DISPLAY_GRID_LEVEL } from './geographic-lod.js';
 import { geographicHazardRadii, geographicHazardRadiusForSeverity } from './hazard-renderer.js';
 
 const REFERENCE_GRID_LEVEL = WEATHER_REFERENCE_LEVEL;
@@ -44,8 +42,6 @@ const STORM = unitShape(circularPoints(8).map((point, index) => {
   return [point[0] * scale, point[1] * scale];
 }));
 
-export const DEFAULT_DOTS_STRONG_FULL_MMH = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT;
-
 export function areaLinearRadius(startRadius, endRadius, progress) {
   return Math.sqrt(startRadius * startRadius + (endRadius * endRadius - startRadius * startRadius) * progress);
 }
@@ -79,9 +75,9 @@ function makeMappedState(length, reusable) {
 }
 
 // Pure presentation mapping: physical summary values never feed a coarser LOD.
-export function mapDotsWeatherSummary(summary, strongFullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT, reusable = null) {
+export function mapDotsWeatherSummary(summary, reusable = null) {
   const state = makeMappedState(summary.samples.length, reusable);
-  const isDirectPointSummary = summary.level === REFERENCE_GRID_LEVEL;
+  const isDirectPointSummary = summary.level >= REFERENCE_GRID_LEVEL;
   const directHazardValue = { storm: 0, hail: 0 };
   const directHazard = { stormRadius: 0, hailRadius: 0 };
   for (let index = 0; index < summary.samples.length; index++) {
@@ -94,10 +90,10 @@ export function mapDotsWeatherSummary(summary, strongFullMmh = DOTS_STRONG_RAIN_
     state.rainRadius[index] = sample.spacing * Math.sqrt(rainCoverage) * rainMmhToRadiusFraction(wetMeanMmh);
     if (isDirectPointSummary) {
       const rainMmh = total > 0 ? summary.rainWeightedSumMmh[index] / total : 0;
-      state.strongRadius[index] = dotsStrongRainMmhToRadius(rainMmh, sample.spacing, strongFullMmh);
+      state.strongRadius[index] = dotsStrongRainMmhToRadius(rainMmh, sample.spacing);
     } else {
       state.strongRadius[index] = sample.spacing * Math.sqrt(strongCoverage)
-        * dotsStrongRainMmhToRadiusFraction(summary.rainMaxMmh[index], strongFullMmh);
+        * dotsStrongRainMmhToRadiusFraction(summary.rainMaxMmh[index]);
     }
 
     const hailCoverageWeight = summary.hailCoverageWeight[index];
@@ -304,7 +300,6 @@ export class GeographicDotsLayer {
     this.temporalProgress = 0;
     this.buffersDirty = true;
     this.active = true;
-    this.strongFullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT;
   }
 
   onAdd(map, gl) {
@@ -330,8 +325,8 @@ export class GeographicDotsLayer {
   evaluateKeyframe(index, reusableStates = null) {
     const time = index / TEMPORAL_FRAME_COUNT;
     const summaries = this.weatherPyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time), reusableStates?.summaries);
-    const mapped = new Array(REFERENCE_GRID_LEVEL + 1);
-    for (const level of this.activeLevels()) mapped[level] = mapDotsWeatherSummary(summaries[level], this.strongFullMmh, reusableStates?.mapped?.[level]);
+    const mapped = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
+    for (const level of this.activeLevels()) mapped[level] = mapDotsWeatherSummary(summaries[level], reusableStates?.mapped?.[level]);
     return { summaries, mapped };
   }
 
@@ -353,13 +348,6 @@ export class GeographicDotsLayer {
     this.transition = null;
     if (this.active) this.rebuildTemporal(time);
     else this.temporal = null;
-  }
-
-  setStrongFullMmh(fullMmh, time) {
-    const next = Math.max(DOTS_STRONG_RAIN_FULL_MMH_MIN, Math.min(DOTS_STRONG_RAIN_FULL_MMH_MAX, Number(fullMmh)));
-    if (!Number.isFinite(next) || next === this.strongFullMmh) return;
-    this.strongFullMmh = next;
-    if (this.active) this.rebuildTemporal(time);
   }
 
   setActive(active) {

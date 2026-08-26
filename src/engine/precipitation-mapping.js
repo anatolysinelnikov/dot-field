@@ -6,9 +6,8 @@ import { clamp, smoothstep } from './math.js';
 
 export const INTENSITY_THRESHOLDS = Object.freeze({ storm: 0.075, hail: 0.11 });
 export const DOTS_STRONG_RAIN_ONSET_MMH = 1.6;
-export const DOTS_STRONG_RAIN_FULL_MMH_DEFAULT = 35;
-export const DOTS_STRONG_RAIN_FULL_MMH_MIN = 20;
-export const DOTS_STRONG_RAIN_FULL_MMH_MAX = 50;
+// Fixed Dots-only presentation anchor. It is not mutable UI/runtime state.
+export const DOTS_STRONG_RAIN_FULL_MMH = 35;
 export const DOTS_STRONG_RAIN_SHAPE_ANCHORS = Object.freeze([
   { progress: 0.00, radius: 0.00 },
   { progress: 0.03, radius: 0.12 },
@@ -59,17 +58,17 @@ export function rainMmhToRadius(rainMmh, spacing) {
   return spacing * rainMmhToRadiusFraction(rainMmh);
 }
 
-export function dotsStrongRainMmhToRadiusFraction(rainMmh, fullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT) {
+export function dotsStrongRainMmhToRadiusFraction(rainMmh) {
   const mmh = Math.max(0, Number(rainMmh));
-  const full = clamp(Number(fullMmh), DOTS_STRONG_RAIN_FULL_MMH_MIN, DOTS_STRONG_RAIN_FULL_MMH_MAX);
+  const full = DOTS_STRONG_RAIN_FULL_MMH;
   if (mmh <= DOTS_STRONG_RAIN_ONSET_MMH) return 0;
   if (mmh >= full) return DOTS_STRONG_RAIN_SHAPE_ANCHORS[DOTS_STRONG_RAIN_SHAPE_ANCHORS.length - 1].radius;
   const progress = (mmh - DOTS_STRONG_RAIN_ONSET_MMH) / (full - DOTS_STRONG_RAIN_ONSET_MMH);
   return interpolateShapeRadius(progress, DOTS_STRONG_RAIN_SHAPE_ANCHORS);
 }
 
-export function dotsStrongRainMmhToRadius(rainMmh, spacing, fullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT) {
-  return spacing * dotsStrongRainMmhToRadiusFraction(rainMmh, fullMmh);
+export function dotsStrongRainMmhToRadius(rainMmh, spacing) {
+  return spacing * dotsStrongRainMmhToRadiusFraction(rainMmh);
 }
 
 function transferShader(name, anchors, maximumRadius) {

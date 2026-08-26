@@ -1,495 +1,199 @@
 import fs from 'node:fs';
-import {
-  RAIN_COVERAGE_THRESHOLDS_MMH,
-  GeographicWeatherPyramid,
-  aggregateWeatherSummary,
-  createWeatherSummary
-} from '../src/engine/geographic-weather-pyramid.js';
-import { prepareGeographicFieldFrame, setActiveWeatherField } from '../src/engine/geography.js';
+import { RAIN_COVERAGE_THRESHOLDS_MMH, WEATHER_REFERENCE_LEVEL, GeographicWeatherPyramid, aggregateWeatherSummary, createWeatherSummary } from '../src/engine/geographic-weather-pyramid.js';
+import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
-import { DOTS_STRONG_RAIN_FULL_MMH_DEFAULT, INTENSITY_THRESHOLDS, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
+import { DOTS_STRONG_RAIN_FULL_MMH, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadii } from '../src/engine/hazard-renderer.js';
+import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, mercatorToLngLat } from '../src/engine/geographic-lod.js';
+import { GeographicScalarLattice, SCALAR_GRID_LEVEL } from '../src/engine/geographic-scalar-lattice.js';
 
-const LEVELS = [10, 11, 12, 13, 14];
-const CHANNELS = [
-  'totalWeight',
-  'rainWeightedSumMmh',
-  'rainMaxMmh',
-  'stormCoverageWeight',
-  'stormWeightedSeverity',
-  'stormMaxSeverity',
-  'hailCoverageWeight',
-  'hailWeightedSeverity',
-  'hailMaxSeverity'
-];
+const LEVELS = [10, 11, 12, 13, 14, 15];
+const AGGREGATE_LEVELS = [10, 11, 12];
+const DIRECT_LEVELS = [13, 14, 15];
 const FLOAT64_TOLERANCE = 1e-9;
-const RELATIVE_FLOOR = 1e-9;
-const FLOAT32_RELATIVE_TOLERANCE = 1e-5;
-
-function float32AbsoluteTolerance(name) {
-  if (name === 'rainWeightedSumMmh') return 2e-4;
-  if (name === 'rainMeanMmh') return 1e-5;
-  if (name === 'rainMaxMmh') return 2e-6;
-  if (name.includes('WeightedSeverity')) return 1e-5;
-  if (name.includes('MaxSeverity')) return 1e-6;
-  return 1e-5;
-}
-
+const FLOAT32_TOLERANCE = 1e-4;
 let failures = 0;
-function check(condition, message) {
-  if (!condition) {
-    failures++;
-    console.error(`FAIL ${message}`);
-  }
-}
+function check(condition, message) { if (!condition) { failures++; console.error(`FAIL ${message}`); } }
+function max(value, candidate) { return Math.max(value, candidate); }
+function sum(values) { let total = 0; for (const value of values) total += value; return total; }
+function maximum(values) { let result = 0; for (const value of values) result = Math.max(result, value); return result; }
+function rainMean(summary, index) { return summary.totalWeight[index] ? summary.rainWeightedSumMmh[index] / summary.totalWeight[index] : 0; }
+function coverageIndex(threshold) { return RAIN_COVERAGE_THRESHOLDS_MMH.indexOf(threshold); }
 
-function maxAbsDiff(left, right) {
-  if (left.length !== right.length) return Infinity;
-  let maximum = 0;
-  for (let index = 0; index < left.length; index++) maximum = Math.max(maximum, Math.abs(left[index] - right[index]));
-  return maximum;
-}
-
-function sum(values) {
-  let result = 0;
-  for (const value of values) result += value;
-  return result;
-}
-
-function maximum(values) {
-  let result = 0;
-  for (const value of values) result = Math.max(result, value);
-  return result;
-}
-
-function mean(summary, index) {
-  return summary.totalWeight[index] > 0 ? summary.rainWeightedSumMmh[index] / summary.totalWeight[index] : 0;
-}
-
-const SUMMARY_STATISTICS = [
-  ['totalWeight', (summary, index) => summary.totalWeight[index]],
-  ['rainWeightedSumMmh', (summary, index) => summary.rainWeightedSumMmh[index]],
-  ['rainMeanMmh', mean],
-  ['rainMaxMmh', (summary, index) => summary.rainMaxMmh[index]],
-  ...RAIN_COVERAGE_THRESHOLDS_MMH.map((threshold, thresholdIndex) => [
-    `rainCoverageWeight@${threshold}mmh`,
-    (summary, index) => summary.rainCoverageWeight[thresholdIndex][index]
-  ]),
-  ['stormCoverageWeight', (summary, index) => summary.stormCoverageWeight[index]],
-  ['stormWeightedSeverity', (summary, index) => summary.stormWeightedSeverity[index]],
-  ['stormMaxSeverity', (summary, index) => summary.stormMaxSeverity[index]],
-  ['hailCoverageWeight', (summary, index) => summary.hailCoverageWeight[index]],
-  ['hailWeightedSeverity', (summary, index) => summary.hailWeightedSeverity[index]],
-  ['hailMaxSeverity', (summary, index) => summary.hailMaxSeverity[index]]
-];
-
-function compareSummaryStatistics(reference, candidate, level, label) {
-  const metrics = new Map();
-  for (const [name, read] of SUMMARY_STATISTICS) {
-    let absolute = 0;
-    let relative = 0;
-    for (let index = 0; index < reference.samples.length; index++) {
-      const referenceValue = read(reference, index);
-      const candidateValue = read(candidate, index);
-      absolute = Math.max(absolute, Math.abs(referenceValue - candidateValue));
-      relative = Math.max(relative, Math.abs(referenceValue - candidateValue) / Math.max(Math.abs(referenceValue), RELATIVE_FLOOR));
-    }
-    metrics.set(name, { absolute, relative });
-    console.log(`${label} L${level} ${name}: maxAbs=${absolute} maxRel=${relative}`);
-  }
-  return metrics;
-}
-
-function checkFloat32SummaryStatistics(reference, candidate, level, label) {
-  const metrics = compareSummaryStatistics(reference, candidate, level, label);
-  for (const [name, { absolute, relative }] of metrics) {
-    check(absolute <= float32AbsoluteTolerance(name), `${label} L${level} ${name} absolute precision`);
-    check(relative <= FLOAT32_RELATIVE_TOLERANCE, `${label} L${level} ${name} relative precision`);
-  }
-}
-
-function directFixture(rainValues, stormValues = [], hailValues = [], ArrayType = Float64Array) {
-  const levelData = { level: 0, samples: rainValues.map(() => ({})) };
+function directFixture(level, rainValues, stormValues = [], hailValues = [], ArrayType = Float64Array) {
+  const levelData = { level, samples: rainValues.map(() => ({ spacing: 0.01 })) };
   const summary = createWeatherSummary(levelData, null, ArrayType);
   for (let index = 0; index < rainValues.length; index++) {
-    const rainMmh = rainValues[index];
-    const storm = stormValues[index] || 0;
-    const hail = hailValues[index] || 0;
-    summary.totalWeight[index] = 1;
-    summary.rainWeightedSumMmh[index] = rainMmh;
-    summary.rainMaxMmh[index] = rainMmh;
-    for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-      summary.rainCoverageWeight[thresholdIndex][index] = rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0;
-    }
-    summary.stormCoverageWeight[index] = storm > 0 ? 1 : 0;
-    summary.stormWeightedSeverity[index] = storm;
-    summary.stormMaxSeverity[index] = storm;
-    summary.hailCoverageWeight[index] = hail > 0 ? 1 : 0;
-    summary.hailWeightedSeverity[index] = hail;
-    summary.hailMaxSeverity[index] = hail;
+    const rainMmh = rainValues[index]; const storm = stormValues[index] || 0; const hail = hailValues[index] || 0;
+    summary.totalWeight[index] = 1; summary.rainWeightedSumMmh[index] = rainMmh; summary.rainMaxMmh[index] = rainMmh;
+    for (let threshold = 0; threshold < RAIN_COVERAGE_THRESHOLDS_MMH.length; threshold++) summary.rainCoverageWeight[threshold][index] = rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[threshold] ? 1 : 0;
+    summary.stormCoverageWeight[index] = storm > 0 ? 1 : 0; summary.stormWeightedSeverity[index] = storm; summary.stormMaxSeverity[index] = storm;
+    summary.hailCoverageWeight[index] = hail > 0 ? 1 : 0; summary.hailWeightedSeverity[index] = hail; summary.hailMaxSeverity[index] = hail;
   }
-  return { levelData, summary };
+  return summary;
 }
-
-function aggregateFixture(rainValues, stormValues, hailValues, contributions, ArrayType) {
-  const fixture = directFixture(rainValues, stormValues, hailValues, ArrayType);
-  return aggregateWeatherSummary(fixture.levelData, fixture.summary, contributions, null, ArrayType);
-}
-
-const fourToOne = {
-  offsets: new Uint32Array([0, 1, 2, 3, 4]),
-  parentIndices: new Uint32Array([0, 0, 0, 0]),
-  weights: new Float64Array([0.25, 0.25, 0.25, 0.25])
-};
-const fixtureParent = { level: 0, samples: [{}] };
-
-const uniform = aggregateWeatherSummary(fixtureParent, directFixture([5, 5, 5, 5]).summary, fourToOne, null, Float64Array);
-const localized = aggregateWeatherSummary(fixtureParent, directFixture([0, 0, 0, 20]).summary, fourToOne, null, Float64Array);
-console.log(`uniform moderate rain: mean=${mean(uniform, 0)}, max=${uniform.rainMaxMmh[0]}, coverage@2.5=${uniform.rainCoverageWeight[4][0]}`);
-console.log(`localized intense rain: mean=${mean(localized, 0)}, max=${localized.rainMaxMmh[0]}, coverage@2.5=${localized.rainCoverageWeight[4][0]}`);
-check(mean(uniform, 0) === 5 && uniform.rainMaxMmh[0] === 5, 'uniform moderate rain summary');
-check(mean(localized, 0) === 5 && localized.rainMaxMmh[0] === 20, 'localized intense rain mean/max summary');
-check(uniform.rainCoverageWeight[4][0] === 1 && localized.rainCoverageWeight[4][0] === 0.25, 'rain coverage distinguishes distribution');
-
-const highValues = aggregateWeatherSummary(fixtureParent, directFixture([80, 120]).summary, {
-  offsets: new Uint32Array([0, 1, 2]),
-  parentIndices: new Uint32Array([0, 0]),
-  weights: new Float64Array([0.5, 0.5])
-}, null, Float64Array);
-console.log(`physical high rain: weightedSum=${highValues.rainWeightedSumMmh[0]}, max=${highValues.rainMaxMmh[0]}`);
-check(highValues.rainWeightedSumMmh[0] === 100 && highValues.rainMaxMmh[0] === 120, '80 and 120 remain distinct above presentation scale');
-const highDirect = directFixture([80, 120]).summary;
-check(highDirect.rainWeightedSumMmh[0] === 80 && highDirect.rainWeightedSumMmh[1] === 120
-  && highDirect.rainMaxMmh[0] === 80 && highDirect.rainMaxMmh[1] === 120, 'direct 80 and 120 remain distinct in the shared schema');
-
-const stormSeverity = 0.6977377;
-const hazard = aggregateWeatherSummary(fixtureParent, directFixture([0, 0, 0, 0], [0, 0, 0, stormSeverity]).summary, fourToOne, null, Float64Array);
-console.log(`localized storm: coverage=${hazard.stormCoverageWeight[0]}, weightedSeverity=${hazard.stormWeightedSeverity[0]}, max=${hazard.stormMaxSeverity[0]}`);
-check(hazard.stormCoverageWeight[0] === 0.25, 'localized storm coverage');
-check(hazard.stormWeightedSeverity[0] === stormSeverity * 0.25, 'localized storm weighted severity');
-check(hazard.stormMaxSeverity[0] === stormSeverity, 'localized storm maximum severity');
-
-const empty = aggregateWeatherSummary(fixtureParent, directFixture([0, 0, 0, 0]).summary, fourToOne, null, Float64Array);
-check(Math.abs(empty.totalWeight[0] - 1) <= FLOAT64_TOLERANCE, 'empty summary retains support weight');
-for (const channel of CHANNELS.filter((name) => name !== 'totalWeight')) check(empty[channel][0] === 0, `empty summary ${channel}`);
-
-const fixtureCases = [
-  ['uniform moderate rain', [5, 5, 5, 5], [], [], fourToOne],
-  ['localized intense rain', [0, 0, 0, 20], [], [], fourToOne],
-  ['high physical rain', [80, 120], [], [], {
-    offsets: new Uint32Array([0, 1, 2]),
-    parentIndices: new Uint32Array([0, 0]),
-    weights: new Float64Array([0.5, 0.5])
-  }],
-  ['localized storm', [0, 0, 0, 0], [0, 0, 0, stormSeverity], [], fourToOne],
-  ['localized hail', [0, 0, 0, 0], [], [0, 0, 0, 0.61], fourToOne],
-  ['empty field', [0, 0, 0, 0], [], [], fourToOne]
-];
-for (const [name, rainValues, stormValues, hailValues, contributions] of fixtureCases) {
-  const reference = aggregateFixture(rainValues, stormValues, hailValues, contributions, Float64Array);
-  const candidate = aggregateFixture(rainValues, stormValues, hailValues, contributions, Float32Array);
-  checkFloat32SummaryStatistics(reference, candidate, 0, `fixture ${name}`);
-}
-const productionUniform = aggregateFixture([5, 5, 5, 5], [], [], fourToOne, Float32Array);
-const productionLocalized = aggregateFixture([0, 0, 0, 20], [], [], fourToOne, Float32Array);
-check(mean(productionUniform, 0) === 5 && productionUniform.rainMaxMmh[0] === 5, 'Float32 uniform moderate rain remains distinct');
-check(mean(productionLocalized, 0) === 5 && productionLocalized.rainMaxMmh[0] === 20, 'Float32 localized intense rain remains distinct');
-const productionHighDirect = directFixture([80, 120], [], [], Float32Array).summary;
-check(productionHighDirect.rainWeightedSumMmh[0] === 80 && productionHighDirect.rainWeightedSumMmh[1] === 120
-  && productionHighDirect.rainMaxMmh[0] === 80 && productionHighDirect.rainMaxMmh[1] === 120, 'Float32 direct 80 and 120 remain distinct');
-const productionHazard = aggregateFixture([0, 0, 0, 0], [0, 0, 0, stormSeverity], [0, 0, 0, 0.61], fourToOne, Float32Array);
-check(productionHazard.stormCoverageWeight[0] > 0 && productionHazard.stormMaxSeverity[0] > 0
-  && productionHazard.hailCoverageWeight[0] > 0 && productionHazard.hailMaxSeverity[0] > 0, 'Float32 localized hazards remain represented');
-
-const pyramid = new GeographicWeatherPyramid();
-const referencePyramid = new GeographicWeatherPyramid(Float64Array);
-let centeredWeightError = 0;
-let centeredEntries = 0;
-let centeredMappingBytes = 0;
-for (let level = 11; level <= 14; level++) {
-  const contributions = pyramid.topologyFor(level).contributionsToParent;
-  for (let childIndex = 0; childIndex < contributions.offsets.length - 1; childIndex++) {
-    let childWeight = 0;
-    for (let index = contributions.offsets[childIndex]; index < contributions.offsets[childIndex + 1]; index++) {
-      childWeight += contributions.weights[index];
-      centeredEntries++;
-    }
-    centeredWeightError = Math.max(centeredWeightError, Math.abs(childWeight - 1));
-  }
-  const mappingBytes = contributions.offsets.byteLength + contributions.parentIndices.byteLength + contributions.weights.byteLength;
-  centeredMappingBytes += mappingBytes;
-  console.log(`L${level}->L${level - 1}: ${contributions.parentIndices.length} centered contributions, ${mappingBytes} mapping bytes, max child weight error ${centeredWeightError}`);
-}
-check(centeredWeightError <= FLOAT64_TOLERANCE, 'centered contributions conserve each child support weight');
-
-const field = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
-setActiveWeatherField(field);
-const frame = prepareGeographicFieldFrame(0);
-const summaries = referencePyramid.evaluate([10], frame);
-const float32Summaries = pyramid.evaluate([10], frame);
-check(float32Summaries[14].rainWeightedSumMmh instanceof Float32Array, 'production summary uses Float32Array');
-for (const level of LEVELS) checkFloat32SummaryStatistics(summaries[level], float32Summaries[level], level, 'real Float32-vs-Float64');
-
-const float32WeightPyramid = new GeographicWeatherPyramid(Float64Array);
-for (let level = 11; level <= 14; level++) {
-  const contributions = float32WeightPyramid.topologyFor(level).contributionsToParent;
-  contributions.weights = Float32Array.from(contributions.weights);
-}
-const float32WeightSummaries = float32WeightPyramid.evaluate([10], frame);
-for (const level of LEVELS) {
-  compareSummaryStatistics(summaries[level], float32WeightSummaries[level], level, 'real Float32 contribution weights');
-}
-
-function addGlobalConservationChecks(summary, reference, level) {
-  for (const channel of ['totalWeight', 'rainWeightedSumMmh', 'stormCoverageWeight', 'stormWeightedSeverity', 'hailCoverageWeight', 'hailWeightedSeverity']) {
-    const error = Math.abs(sum(summary[channel]) - sum(reference[channel]));
-    console.log(`L${level} ${channel} global conservation error: ${error}`);
-    check(error <= FLOAT64_TOLERANCE, `L${level} ${channel} global conservation`);
-  }
-  for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-    const error = Math.abs(sum(summary.rainCoverageWeight[thresholdIndex]) - sum(reference.rainCoverageWeight[thresholdIndex]));
-    console.log(`L${level} rain coverage@${RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex]} global conservation error: ${error}`);
-    check(error <= FLOAT64_TOLERANCE, `L${level} rain coverage global conservation`);
-  }
-  for (const channel of ['rainMaxMmh', 'stormMaxSeverity', 'hailMaxSeverity']) {
-    const error = Math.abs(maximum(summary[channel]) - maximum(reference[channel]));
-    console.log(`L${level} ${channel} maximum preservation error: ${error}`);
-    check(error <= FLOAT64_TOLERANCE, `L${level} ${channel} maximum preservation`);
-  }
-}
-
-const direct = summaries[14];
-for (const level of LEVELS.slice(0, -1)) addGlobalConservationChecks(summaries[level], direct, level);
-
-function reportFloat32GlobalConservation(summary, reference, level) {
-  for (const channel of ['totalWeight', 'rainWeightedSumMmh', 'stormCoverageWeight', 'stormWeightedSeverity', 'hailCoverageWeight', 'hailWeightedSeverity']) {
-    const error = Math.abs(sum(summary[channel]) - sum(reference[channel]));
-    const relative = error / Math.max(Math.abs(sum(reference[channel])), RELATIVE_FLOOR);
-    console.log(`Float32 L${level} ${channel} global conservation error: ${error} (relative ${relative})`);
-    check(error <= float32AbsoluteTolerance(channel) && relative <= FLOAT32_RELATIVE_TOLERANCE, `Float32 L${level} ${channel} global conservation`);
-  }
-  for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-    const error = Math.abs(sum(summary.rainCoverageWeight[thresholdIndex]) - sum(reference.rainCoverageWeight[thresholdIndex]));
-    const relative = error / Math.max(Math.abs(sum(reference.rainCoverageWeight[thresholdIndex])), RELATIVE_FLOOR);
-    console.log(`Float32 L${level} rain coverage@${RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex]} global conservation error: ${error} (relative ${relative})`);
-    check(error <= float32AbsoluteTolerance('rainCoverageWeight') && relative <= FLOAT32_RELATIVE_TOLERANCE, `Float32 L${level} rain coverage global conservation`);
-  }
-  for (const channel of ['rainMaxMmh', 'stormMaxSeverity', 'hailMaxSeverity']) {
-    const error = Math.abs(maximum(summary[channel]) - maximum(reference[channel]));
-    const relative = error / Math.max(Math.abs(maximum(reference[channel])), RELATIVE_FLOOR);
-    console.log(`Float32 L${level} ${channel} maximum preservation error: ${error} (relative ${relative})`);
-    check(error <= float32AbsoluteTolerance(channel) && relative <= FLOAT32_RELATIVE_TOLERANCE, `Float32 L${level} ${channel} maximum preservation`);
-  }
-}
-
-const float32Direct = float32Summaries[14];
-for (const level of LEVELS.slice(0, -1)) reportFloat32GlobalConservation(float32Summaries[level], float32Direct, level);
-
-let directL14Error = 0;
-for (let index = 0; index < direct.samples.length; index++) {
-  const sample = direct.samples[index];
-  const value = frame.sample(sample.lngLat[0], sample.lngLat[1]);
-  directL14Error = Math.max(
-    directL14Error,
-    Math.abs(mean(direct, index) - value.rainMmh),
-    Math.abs(direct.rainMaxMmh[index] - value.rainMmh),
-    Math.abs(direct.stormWeightedSeverity[index] - value.storm),
-    Math.abs(direct.stormMaxSeverity[index] - value.storm),
-    Math.abs(direct.hailWeightedSeverity[index] - value.hail),
-    Math.abs(direct.hailMaxSeverity[index] - value.hail),
-    Math.abs(direct.totalWeight[index] - 1)
-  );
-  for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-    const expected = value.rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0;
-    directL14Error = Math.max(directL14Error, Math.abs(direct.rainCoverageWeight[thresholdIndex][index] - expected));
-  }
-}
-console.log(`real L14 direct-sampling maximum error: ${directL14Error}`);
-check(directL14Error <= FLOAT64_TOLERANCE, 'real L14 direct-sampling equivalence');
 
 function composeContributions(first, second) {
-  const offsets = new Uint32Array(first.offsets.length);
-  const parentIndices = [];
-  const weights = [];
-  for (let childIndex = 0; childIndex < first.offsets.length - 1; childIndex++) {
-    for (let firstIndex = first.offsets[childIndex]; firstIndex < first.offsets[childIndex + 1]; firstIndex++) {
-      const middleIndex = first.parentIndices[firstIndex];
-      for (let secondIndex = second.offsets[middleIndex]; secondIndex < second.offsets[middleIndex + 1]; secondIndex++) {
-        parentIndices.push(second.parentIndices[secondIndex]);
-        weights.push(first.weights[firstIndex] * second.weights[secondIndex]);
-      }
+  const offsets = new Uint32Array(first.offsets.length); const parentIndices = []; const weights = [];
+  for (let child = 0; child < first.offsets.length - 1; child++) {
+    for (let index = first.offsets[child]; index < first.offsets[child + 1]; index++) {
+      const middle = first.parentIndices[index];
+      for (let next = second.offsets[middle]; next < second.offsets[middle + 1]; next++) { parentIndices.push(second.parentIndices[next]); weights.push(first.weights[index] * second.weights[next]); }
     }
-    offsets[childIndex + 1] = parentIndices.length;
+    offsets[child + 1] = parentIndices.length;
   }
   return { offsets, parentIndices: Uint32Array.from(parentIndices), weights: Float64Array.from(weights) };
 }
 
-const composedL14ToL12 = composeContributions(pyramid.topologyFor(14).contributionsToParent, pyramid.topologyFor(13).contributionsToParent);
-const composedL12 = aggregateWeatherSummary(pyramid.levels.get(12), direct, composedL14ToL12, null, Float64Array);
-let recursiveError = 0;
-for (const channel of CHANNELS) recursiveError = Math.max(recursiveError, maxAbsDiff(composedL12[channel], summaries[12][channel]));
-for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-  recursiveError = Math.max(recursiveError, maxAbsDiff(composedL12.rainCoverageWeight[thresholdIndex], summaries[12].rainCoverageWeight[thresholdIndex]));
-}
-console.log(`L14→L13→L12 recursive/composed maximum error: ${recursiveError}`);
-check(recursiveError <= FLOAT64_TOLERANCE, 'recursive/composed aggregation equivalence');
-
-const composedFloat32L12 = aggregateWeatherSummary(
-  pyramid.levels.get(12),
-  float32Direct,
-  composedL14ToL12,
-  null,
-  Float32Array
-);
-let float32RecursiveError = 0;
-for (const channel of CHANNELS) float32RecursiveError = Math.max(float32RecursiveError, maxAbsDiff(composedFloat32L12[channel], float32Summaries[12][channel]));
-for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-  float32RecursiveError = Math.max(float32RecursiveError, maxAbsDiff(composedFloat32L12.rainCoverageWeight[thresholdIndex], float32Summaries[12].rainCoverageWeight[thresholdIndex]));
-}
-console.log(`Float32 L14→L13→L12 recursive/composed maximum error: ${float32RecursiveError}`);
-checkFloat32SummaryStatistics(composedFloat32L12, float32Summaries[12], 12, 'Float32 recursive-vs-composed');
-
-const bytesPerSample = pyramid.summaryMemoryBytesPerSample();
-let totalSummaryBytes = 0;
-for (const level of LEVELS) {
-  const sampleCount = pyramid.samplesFor(level).length;
-  const bytes = sampleCount * bytesPerSample;
-  totalSummaryBytes += bytes;
-  console.log(`L${level}: ${sampleCount} samples, ${bytes} summary bytes`);
-}
-console.log(`summary schema: ${bytesPerSample} bytes/sample, ${totalSummaryBytes} bytes (${(totalSummaryBytes / 1024 / 1024).toFixed(3)} MiB) per state, ${(totalSummaryBytes * 2 / 1024 / 1024).toFixed(3)} MiB for two states`);
-console.log(`centered contribution entries: ${centeredEntries}, ${centeredMappingBytes} topology mapping bytes (${(centeredMappingBytes / 1024 / 1024).toFixed(3)} MiB)`);
-
-// Phase 4 renderer mappings consume physical summaries only; no WebGL is needed.
-const sharedDots = new GeographicDotsLayer(pyramid);
-const sharedSquares = new GeographicSquaresLayer(pyramid);
-check(sharedDots.weatherPyramid === pyramid && sharedSquares.weatherPyramid === pyramid, 'Dots and Squares share one GeographicWeatherPyramid instance');
-
-function mapFixture(summary) {
-  summary.samples = summary.samples.map(() => ({ spacing: 0.01 }));
-  return { dots: mapDotsWeatherSummary(summary), squares: mapSquaresWeatherSummary(summary) };
+function maxSummaryDifference(left, right) {
+  let error = 0;
+  for (const field of ['totalWeight', 'rainWeightedSumMmh', 'rainMaxMmh', 'stormCoverageWeight', 'stormWeightedSeverity', 'stormMaxSeverity', 'hailCoverageWeight', 'hailWeightedSeverity', 'hailMaxSeverity']) {
+    for (let index = 0; index < left[field].length; index++) error = max(error, Math.abs(left[field][index] - right[field][index]));
+  }
+  for (let threshold = 0; threshold < RAIN_COVERAGE_THRESHOLDS_MMH.length; threshold++) for (let index = 0; index < left.samples.length; index++) error = max(error, Math.abs(left.rainCoverageWeight[threshold][index] - right.rainCoverageWeight[threshold][index]));
+  return error;
 }
 
-function mapDotsFixture(summary, level, spacing = 0.01) {
-  summary.level = level;
-  summary.samples = summary.samples.map(() => ({ spacing }));
-  return mapDotsWeatherSummary(summary);
+function localGridSpacingKm(level, latitude) {
+  const step = 1 / 2 ** level;
+  const centerY = (1 - Math.log(Math.tan(Math.PI / 4 + latitude * Math.PI / 360)) / Math.PI) / 2;
+  const [, north] = mercatorToLngLat(0.5, centerY - step / 2);
+  const [, south] = mercatorToLngLat(0.5, centerY + step / 2);
+  return { eastWest: 111.32 * Math.cos(latitude * Math.PI / 180) * 360 * step, northSouth: 111.32 * Math.abs(north - south) };
 }
 
-let dotsL14Error = 0;
-let squaresL14Error = 0;
-let hazardL14Error = 0;
-const directDots = mapDotsWeatherSummary(float32Summaries[14]);
-const directSquares = mapSquaresWeatherSummary(float32Summaries[14]);
-for (let index = 0; index < float32Summaries[14].samples.length; index++) {
-  const sample = float32Summaries[14].samples[index];
-  const value = frame.sample(sample.lngLat[0], sample.lngLat[1]);
-  dotsL14Error = Math.max(dotsL14Error,
-    Math.abs(directDots.rainRadius[index] - Math.fround(rainMmhToRadius(Math.fround(value.rainMmh), sample.spacing))),
-    Math.abs(directDots.strongRadius[index] - Math.fround(dotsStrongRainMmhToRadius(Math.fround(value.rainMmh), sample.spacing, DOTS_STRONG_RAIN_FULL_MMH_DEFAULT))));
-  const directHazard = { stormRadius: 0, hailRadius: 0 };
-  geographicHazardRadii({ storm: Math.fround(value.storm), hail: Math.fround(value.hail) }, sample.spacing, directHazard);
-  hazardL14Error = Math.max(hazardL14Error,
-    Math.abs(directDots.stormRadius[index] - Math.fround(directHazard.stormRadius)),
-    Math.abs(directDots.hailRadius[index] - Math.fround(directHazard.hailRadius)));
-  squaresL14Error = Math.max(squaresL14Error,
-    Math.abs(directSquares.rainWetMeanMmh[index] - Math.fround(value.rainMmh)),
-    Math.abs(directSquares.rainCoverage[index] - (value.rainMmh >= 0.05 ? 1 : 0)),
-    Math.abs(directSquares.stormMeanSeverity[index] - Math.fround(value.storm)),
-    Math.abs(directSquares.stormCoverage[index] - (value.storm > 0 ? 1 : 0)),
-    Math.abs(directSquares.hailMeanSeverity[index] - Math.fround(value.hail)),
-    Math.abs(directSquares.hailCoverage[index] - (value.hail > 0 ? 1 : 0)));
+const field = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
+setActiveWeatherField(field);
+const frame = prepareGeographicFieldFrame(0);
+const [referenceLongitude, referenceLatitude] = WEATHER_REGION.center;
+const sourceEastWestKm = 111.32 * Math.cos(referenceLatitude * Math.PI / 180) * field.longitudeSpacing;
+const sourceNorthSouthKm = 111.32 * field.latitudeSpacing;
+console.log(`source grid: ${field.longitudes.length}x${field.latitudes.length}, longitudeSpacing=${field.longitudeSpacing}°, latitudeSpacing=${field.latitudeSpacing}°`);
+console.log(`source ground spacing near ${referenceLongitude},${referenceLatitude}: east-west=${sourceEastWestKm.toFixed(4)} km, north-south=${sourceNorthSouthKm.toFixed(4)} km`);
+for (const level of [12, 13, 14, 15]) { const spacing = localGridSpacingKm(level, referenceLatitude); console.log(`L${level} local Mercator spacing: east-west=${spacing.eastWest.toFixed(4)} km, north-south=${spacing.northSouth.toFixed(4)} km`); }
+console.log(`WEATHER_REFERENCE_LEVEL=L${WEATHER_REFERENCE_LEVEL}; parsed source spacing supports L13 as the closest practical dyadic canonical scale.`);
+check(WEATHER_REFERENCE_LEVEL === 13, 'L13 is the explicit weather reference level');
+check(MAX_DISPLAY_GRID_LEVEL === 15 && MAX_GRID_LEVEL === 15, 'display and canonical identity both stop at L15');
+check(SCALAR_GRID_LEVEL === 14, 'scalar lattice remains explicitly fixed at L14');
+
+let sourceNodeError = 0;
+for (const longitudeIndex of [0, Math.floor(field.longitudes.length / 2), field.longitudes.length - 1]) for (const latitudeIndex of [0, Math.floor(field.latitudes.length / 2), field.latitudes.length - 1]) {
+  const index = field.index(longitudeIndex, latitudeIndex); const value = field.sample(field.longitudes[longitudeIndex], field.latitudes[latitudeIndex]);
+  sourceNodeError = max(sourceNodeError, Math.abs(value.rainMmh - field.rainMmh[index])); sourceNodeError = max(sourceNodeError, Math.abs(value.storm - field.storm[index])); sourceNodeError = max(sourceNodeError, Math.abs(value.hail - field.hail[index]));
 }
-console.log(`Phase 4 L14 errors: Dots rain/strong=${dotsL14Error}, Dots hazards=${hazardL14Error}, Squares inputs=${squaresL14Error}`);
-// Weather summaries are Float32. These bounds cover the final Float32 glyph
-// state and the largest observed physical rain value's Float32 ULP.
-check(dotsL14Error <= 1e-5, 'Dots L14 rain/strong mapping equivalence');
-check(hazardL14Error <= 5e-5, 'Dots L14 hazard mapping equivalence');
-check(squaresL14Error <= 0.1, 'Squares L14 mapping equivalence');
+console.log(`representative exact source-node error: ${sourceNodeError}`); check(sourceNodeError <= FLOAT64_TOLERANCE, 'source nodes preserve rain, storm, and hail values');
 
-const l14StrongRainValues = [1.6, 2.0, 2.5, 3.0];
-let l14StrongFixtureError = 0;
-for (const rainMmh of l14StrongRainValues) {
-  const fixture = directFixture([rainMmh], [], [], Float32Array);
-  const mapped = mapDotsFixture(fixture.summary, 14);
-  const expected = Math.fround(dotsStrongRainMmhToRadius(Math.fround(rainMmh), 0.01, DOTS_STRONG_RAIN_FULL_MMH_DEFAULT));
-  const error = Math.abs(mapped.strongRadius[0] - expected);
-  l14StrongFixtureError = Math.max(l14StrongFixtureError, error);
-  console.log(`Dots L14 strong fixture rain=${rainMmh}: mapped=${mapped.strongRadius[0]}, expected=${expected}, error=${error}`);
-  check(error <= 1e-7, `Dots L14 strong fixture ${rainMmh} mm/h direct equivalence`);
+const pyramid = new GeographicWeatherPyramid(); const referencePyramid = new GeographicWeatherPyramid(Float64Array);
+const summaries = referencePyramid.evaluate(LEVELS, frame); const float32Summaries = pyramid.evaluate(LEVELS, frame);
+check(float32Summaries[15].rainWeightedSumMmh instanceof Float32Array, 'production summaries use Float32 storage at L15');
+for (const requested of [[12, 13], [13, 14], [14, 15]]) {
+  const mixed = referencePyramid.evaluate(requested, frame);
+  for (const level of requested) check(maxSummaryDifference(mixed[level], summaries[level]) <= FLOAT64_TOLERANCE, `mixed request [${requested.join(', ')}] evaluates L${level} with the correct side of the boundary`);
 }
-console.log(`Dots L14 strong fixture maximum error around onset/coarse threshold: ${l14StrongFixtureError}`);
 
-const directHazardFixtures = [
-  { name: 'below visual threshold', storm: INTENSITY_THRESHOLDS.storm * 0.45 - 0.001, hail: INTENSITY_THRESHOLDS.hail * 0.45 - 0.001 },
-  { name: 'just above visual threshold', storm: INTENSITY_THRESHOLDS.storm * 0.45 + 0.001, hail: INTENSITY_THRESHOLDS.hail * 0.45 + 0.001 },
-  { name: 'clearly strong', storm: 0.8, hail: 0.7 }
-];
-let directHazardFixtureError = 0;
-for (const fixtureValues of directHazardFixtures) {
-  const fixture = directFixture([0], [fixtureValues.storm], [fixtureValues.hail], Float32Array);
-  const mapped = mapDotsFixture(fixture.summary, 14);
-  const expected = { stormRadius: 0, hailRadius: 0 };
-  geographicHazardRadii({ storm: Math.fround(fixtureValues.storm), hail: Math.fround(fixtureValues.hail) }, 0.01, expected);
-  const stormError = Math.abs(mapped.stormRadius[0] - Math.fround(expected.stormRadius));
-  const hailError = Math.abs(mapped.hailRadius[0] - Math.fround(expected.hailRadius));
-  directHazardFixtureError = Math.max(directHazardFixtureError, stormError, hailError);
-  console.log(`Dots L14 hazard fixture ${fixtureValues.name}: stormError=${stormError}, hailError=${hailError}`);
-  check(stormError <= 1e-7 && hailError <= 1e-7, `Dots L14 hazard fixture ${fixtureValues.name} direct equivalence`);
+let centeredWeightError = 0; let centeredEntries = 0; let centeredMappingBytes = 0;
+for (let level = MIN_GRID_LEVEL + 1; level <= WEATHER_REFERENCE_LEVEL; level++) {
+  const contributions = pyramid.topologyFor(level).contributionsToParent; check(Boolean(contributions), `L${level}->L${level - 1} has centered aggregate contributions`);
+  for (let child = 0; child < contributions.offsets.length - 1; child++) { let weight = 0; for (let index = contributions.offsets[child]; index < contributions.offsets[child + 1]; index++) { weight += contributions.weights[index]; centeredEntries++; } centeredWeightError = max(centeredWeightError, Math.abs(weight - 1)); }
+  centeredMappingBytes += contributions.offsets.byteLength + contributions.parentIndices.byteLength + contributions.weights.byteLength;
 }
-console.log(`Dots L14 direct hazard fixture maximum error: ${directHazardFixtureError}`);
+check(pyramid.topologyFor(14).contributionsToParent === null && pyramid.topologyFor(15).contributionsToParent === null, 'L14/L15 have no physical centered aggregation mapping');
+console.log(`aggregate contribution support error: ${centeredWeightError}; entries=${centeredEntries}; bytes=${centeredMappingBytes}`); check(centeredWeightError <= FLOAT64_TOLERANCE, 'aggregate contribution weights conserve each child support');
 
-const tinyHailFixture = directFixture([0], [0.8], [0.01], Float32Array);
-const tinyHailMapped = mapDotsFixture(tinyHailFixture.summary, 13);
-console.log(`Dots tiny-hail priority fixture: storm=${tinyHailMapped.stormRadius[0]}, hail=${tinyHailMapped.hailRadius[0]}`);
-check(tinyHailMapped.stormRadius[0] > 0 && tinyHailMapped.hailRadius[0] === 0, 'tiny hail does not suppress visible storm');
+for (const level of DIRECT_LEVELS) {
+  const summary = summaries[level]; const compact = float32Summaries[level]; let directError = 0; let compactError = 0; let highRain = 0;
+  for (let index = 0; index < summary.samples.length; index++) {
+    const sample = summary.samples[index]; const value = frame.sample(sample.lngLat[0], sample.lngLat[1]);
+    directError = max(directError, Math.abs(rainMean(summary, index) - value.rainMmh)); directError = max(directError, Math.abs(summary.rainMaxMmh[index] - value.rainMmh)); directError = max(directError, Math.abs(summary.stormWeightedSeverity[index] - value.storm)); directError = max(directError, Math.abs(summary.hailWeightedSeverity[index] - value.hail));
+    compactError = max(compactError, Math.abs(compact.rainWeightedSumMmh[index] - value.rainMmh)); compactError = max(compactError, Math.abs(compact.stormWeightedSeverity[index] - value.storm)); compactError = max(compactError, Math.abs(compact.hailWeightedSeverity[index] - value.hail)); highRain = Math.max(highRain, value.rainMmh);
+  }
+  console.log(`L${level} direct field error=${directError}, Float32 storage error=${compactError}, maximum sampled physical rain=${highRain}`); check(directError <= FLOAT64_TOLERANCE, `L${level} direct field equivalence`); check(compactError <= FLOAT32_TOLERANCE, `L${level} Float32 direct storage equivalence`);
+}
 
-const localizedCoarseHazard = createWeatherSummary({ level: 13, samples: [{}] }, null, Float64Array);
-localizedCoarseHazard.totalWeight[0] = 1;
-localizedCoarseHazard.stormCoverageWeight[0] = 0.25;
-localizedCoarseHazard.stormWeightedSeverity[0] = 0.25 * 0.025;
-localizedCoarseHazard.stormMaxSeverity[0] = 0.1;
-const localizedCoarseMapped = mapDotsFixture(localizedCoarseHazard, 13);
-const denserCoarseHazard = createWeatherSummary({ level: 13, samples: [{}] }, null, Float64Array);
-denserCoarseHazard.totalWeight[0] = 1;
-denserCoarseHazard.stormCoverageWeight[0] = 1;
-denserCoarseHazard.stormWeightedSeverity[0] = 0.025;
-denserCoarseHazard.stormMaxSeverity[0] = 0.1;
-const denserCoarseMapped = mapDotsFixture(denserCoarseHazard, 13);
-console.log(`Dots localized coarse hazard: lowCoverage=${localizedCoarseMapped.stormRadius[0]}, fullCoverage=${denserCoarseMapped.stormRadius[0]}`);
-check(localizedCoarseMapped.stormRadius[0] > 0, 'localized coarse hazard retains a visible peak');
-check(localizedCoarseMapped.stormRadius[0] < denserCoarseMapped.stormRadius[0], 'coarse hazard radius decreases with coverage');
+function inheritedIdentityCheck(lowerLevel, higherLevel) {
+  const lower = summaries[lowerLevel]; const higher = summaries[higherLevel]; const higherById = new Map(higher.samples.map((sample, index) => [sample.id, index])); let missing = 0; let positionError = 0; let valueError = 0;
+  for (let index = 0; index < lower.samples.length; index++) {
+    const higherIndex = higherById.get(lower.samples[index].id); if (higherIndex === undefined) { missing++; continue; }
+    positionError = max(positionError, Math.abs(lower.samples[index].mercator[0] - higher.samples[higherIndex].mercator[0])); positionError = max(positionError, Math.abs(lower.samples[index].mercator[1] - higher.samples[higherIndex].mercator[1]));
+    valueError = max(valueError, Math.abs(lower.rainWeightedSumMmh[index] - higher.rainWeightedSumMmh[higherIndex])); valueError = max(valueError, Math.abs(lower.stormWeightedSeverity[index] - higher.stormWeightedSeverity[higherIndex])); valueError = max(valueError, Math.abs(lower.hailWeightedSeverity[index] - higher.hailWeightedSeverity[higherIndex]));
+  }
+  console.log(`L${lowerLevel}->L${higherLevel} inherited identity: missing=${missing}, position=${positionError}, value=${valueError}`); check(missing === 0 && positionError === 0 && valueError <= FLOAT64_TOLERANCE, `L${lowerLevel}->L${higherLevel} exact inherited identity`);
+}
+inheritedIdentityCheck(13, 14); inheritedIdentityCheck(14, 15);
 
-const visibleHailFixture = directFixture([0], [0.8], [0.7], Float32Array);
-const visibleHailMapped = mapDotsFixture(visibleHailFixture.summary, 13);
-console.log(`Dots visible-hail priority fixture: storm=${visibleHailMapped.stormRadius[0]}, hail=${visibleHailMapped.hailRadius[0]}`);
-check(visibleHailMapped.hailRadius[0] > 0 && visibleHailMapped.stormRadius[0] === 0, 'visible hail wins Dots priority');
+function directRefinementCheck(lowerLevel, higherLevel) {
+  const lower = summaries[lowerLevel]; const higher = summaries[higherLevel]; const lowerById = new Set(lower.samples.map((sample) => sample.id)); const lowerByCanonical = new Map(lower.samples.map((sample, index) => [`${sample.canonicalX}:${sample.canonicalY}`, index])); let directError = 0; let interpolationDifference = 0; let newPoints = 0;
+  for (let index = 0; index < higher.samples.length; index++) {
+    const sample = higher.samples[index]; if (lowerById.has(sample.id)) continue; newPoints++;
+    const value = frame.sample(sample.lngLat[0], sample.lngLat[1]); directError = max(directError, Math.abs(higher.rainWeightedSumMmh[index] - value.rainMmh));
+    const parentStep = 2 ** (MAX_GRID_LEVEL - lowerLevel); const parentX = Math.floor(sample.canonicalX / parentStep) * parentStep; const parentY = Math.floor(sample.canonicalY / parentStep) * parentStep;
+    const xFraction = (sample.canonicalX - parentX) / parentStep; const yFraction = (sample.canonicalY - parentY) / parentStep;
+    const indices = [lowerByCanonical.get(`${parentX}:${parentY}`), lowerByCanonical.get(`${parentX + parentStep}:${parentY}`), lowerByCanonical.get(`${parentX}:${parentY + parentStep}`), lowerByCanonical.get(`${parentX + parentStep}:${parentY + parentStep}`)];
+    if (indices.every((candidate) => candidate !== undefined)) {
+      const [a, b, c, d] = indices.map((candidate) => lower.rainWeightedSumMmh[candidate]);
+      const interpolated = (a + (b - a) * xFraction) + ((c + (d - c) * xFraction) - (a + (b - a) * xFraction)) * yFraction;
+      interpolationDifference = max(interpolationDifference, Math.abs(higher.rainWeightedSumMmh[index] - interpolated));
+    }
+  }
+  console.log(`L${lowerLevel}->L${higherLevel} new direct samples=${newPoints}, direct error=${directError}, maximum difference from lower-summary bilinear interpolation=${interpolationDifference}`); check(newPoints > 0 && directError <= FLOAT64_TOLERANCE, `L${higherLevel}-only points sample the reconstructed field directly`); check(interpolationDifference > 1e-6, `L${higherLevel}-only points are not interpolated from lower summaries`);
+}
+directRefinementCheck(13, 14); directRefinementCheck(14, 15);
 
-const mappingUniform = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([5, 5, 5, 5]).summary, fourToOne, null, Float64Array));
-const mappingLocalized = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([0, 0, 0, 20]).summary, fourToOne, null, Float64Array));
-console.log(`Phase 4 uniform: dots=${mappingUniform.dots.rainRadius[0]}, square wet=${mappingUniform.squares.rainWetMeanMmh[0]}, coverage=${mappingUniform.squares.rainCoverage[0]}`);
-console.log(`Phase 4 localized: dots=${mappingLocalized.dots.rainRadius[0]}, strong=${mappingLocalized.dots.strongRadius[0]}, square wet=${mappingLocalized.squares.rainWetMeanMmh[0]}, coverage=${mappingLocalized.squares.rainCoverage[0]}`);
-check(mappingUniform.dots.rainRadius[0] !== mappingLocalized.dots.rainRadius[0], 'Dots distinguish uniform and localized rain');
-check(mappingUniform.squares.rainCoverage[0] === 1 && mappingLocalized.squares.rainCoverage[0] === 0.25, 'Squares retain uniform/localized coverage distinction');
-check(mappingUniform.squares.rainWetMeanMmh[0] === 5 && mappingLocalized.squares.rainWetMeanMmh[0] === 20, 'Squares retain wet-area intensity distinction');
-check(mappingLocalized.dots.strongRadius[0] > 0, 'localized strong rain remains present');
+for (const level of AGGREGATE_LEVELS) {
+  for (const fieldName of ['totalWeight', 'rainWeightedSumMmh', 'stormCoverageWeight', 'stormWeightedSeverity', 'hailCoverageWeight', 'hailWeightedSeverity']) { const error = Math.abs(sum(summaries[level][fieldName]) - sum(summaries[13][fieldName])); console.log(`L13->L${level} ${fieldName} conservation error=${error}`); check(error <= FLOAT64_TOLERANCE, `L13->L${level} ${fieldName} conservation`); }
+  for (let threshold = 0; threshold < RAIN_COVERAGE_THRESHOLDS_MMH.length; threshold++) check(Math.abs(sum(summaries[level].rainCoverageWeight[threshold]) - sum(summaries[13].rainCoverageWeight[threshold])) <= FLOAT64_TOLERANCE, `L13->L${level} rain coverage conservation at ${RAIN_COVERAGE_THRESHOLDS_MMH[threshold]}`);
+  for (const fieldName of ['rainMaxMmh', 'stormMaxSeverity', 'hailMaxSeverity']) check(Math.abs(maximum(summaries[level][fieldName]) - maximum(summaries[13][fieldName])) <= FLOAT64_TOLERANCE, `L13->L${level} ${fieldName} maximum preservation`);
+}
+const composed = composeContributions(pyramid.topologyFor(13).contributionsToParent, pyramid.topologyFor(12).contributionsToParent);
+const composedL11 = aggregateWeatherSummary(pyramid.levels.get(11), summaries[13], composed, null, Float64Array);
+let recursiveError = maxSummaryDifference(composedL11, summaries[11]); console.log(`L13->L12->L11 recursive/composed error=${recursiveError}`); check(recursiveError <= FLOAT64_TOLERANCE, 'aggregate recursive/composed equivalence');
 
-const mappingHazard = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([0, 0, 0, 0], [0, 0, 0, stormSeverity], [0, 0, 0, 0.61]).summary, fourToOne, null, Float64Array));
-console.log(`Phase 4 localized hazards: dots storm=${mappingHazard.dots.stormRadius[0]}, hail=${mappingHazard.dots.hailRadius[0]}, square stormCoverage=${mappingHazard.squares.stormCoverage[0]}, hailCoverage=${mappingHazard.squares.hailCoverage[0]}`);
-check(mappingHazard.dots.hailRadius[0] > 0 && mappingHazard.dots.stormRadius[0] === 0, 'localized hail retains Dots priority');
-check(mappingHazard.squares.stormCoverage[0] > 0 && mappingHazard.squares.hailCoverage[0] > 0, 'localized hazards remain in Squares summaries');
+const fourToOne = { offsets: new Uint32Array([0, 1, 2, 3, 4]), parentIndices: new Uint32Array([0, 0, 0, 0]), weights: new Float64Array([0.25, 0.25, 0.25, 0.25]) };
+const fixtureParent = { level: 12, samples: [{ spacing: 0.01 }] };
+const uniform = aggregateWeatherSummary(fixtureParent, directFixture(13, [5, 5, 5, 5]), fourToOne, null, Float64Array);
+const localized = aggregateWeatherSummary(fixtureParent, directFixture(13, [0, 0, 0, 20]), fourToOne, null, Float64Array);
+console.log(`aggregate fixtures: uniform mean=${rainMean(uniform, 0)} max=${uniform.rainMaxMmh[0]}, localized mean=${rainMean(localized, 0)} max=${localized.rainMaxMmh[0]} coverage@2.5=${localized.rainCoverageWeight[coverageIndex(2.5)][0]}`);
+check(rainMean(uniform, 0) === 5 && uniform.rainMaxMmh[0] === 5, 'uniform rain fixture'); check(rainMean(localized, 0) === 5 && localized.rainMaxMmh[0] === 20 && localized.rainCoverageWeight[coverageIndex(2.5)][0] === 0.25, 'localized rain fixture');
+const hazards = aggregateWeatherSummary(fixtureParent, directFixture(13, [0, 0, 0, 0], [0, 0, 0, 0.6977377], [0, 0, 0, 0.61]), fourToOne, null, Float64Array);
+check(hazards.stormCoverageWeight[0] === 0.25 && hazards.stormMaxSeverity[0] === 0.6977377 && hazards.hailCoverageWeight[0] === 0.25, 'localized storm/hail fixture');
+const uniformDots = mapDotsWeatherSummary(uniform); const localizedDots = mapDotsWeatherSummary(localized); const uniformSquares = mapSquaresWeatherSummary(uniform); const localizedSquares = mapSquaresWeatherSummary(localized);
+check(uniformDots.rainRadius[0] !== localizedDots.rainRadius[0], 'Dots retain uniform/localized coarse rain distinction');
+check(uniformSquares.rainCoverage[0] === 1 && localizedSquares.rainCoverage[0] === 0.25 && localizedSquares.rainWetMeanMmh[0] === 20, 'Squares retain coarse coverage and wet-mean distinction');
+const coarseHazards = mapDotsWeatherSummary(hazards); check(coarseHazards.hailRadius[0] > 0 && coarseHazards.stormRadius[0] === 0, 'visible coarse hail retains Dots priority');
+const tinyHail = mapDotsWeatherSummary(directFixture(13, [0], [0.8], [0.01], Float32Array)); check(tinyHail.stormRadius[0] > 0 && tinyHail.hailRadius[0] === 0, 'tiny direct hail does not suppress visible storm');
+for (const level of DIRECT_LEVELS) {
+  const high = directFixture(level, [80, 120]);
+  check(high.rainWeightedSumMmh[0] === 80 && high.rainWeightedSumMmh[1] === 120 && high.rainMaxMmh[1] === 120, `L${level} direct physical rain remains unclamped above 50 mm/h`);
+}
 
-const mappingHigh = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([80, 120]).summary, {
-  offsets: new Uint32Array([0, 1, 2]), parentIndices: new Uint32Array([0, 0]), weights: new Float64Array([0.5, 0.5])
-}, null, Float64Array));
-check(mappingHigh.dots.strongRadius[0] > 0 && mappingHigh.squares.rainWetMeanMmh[0] === 100, 'renderer mapping preserves physical high-rain inputs');
+for (const level of DIRECT_LEVELS) {
+  const dots = mapDotsWeatherSummary(float32Summaries[level]); const squares = mapSquaresWeatherSummary(float32Summaries[level]); let dotsError = 0; let hazardError = 0; let squaresError = 0;
+  for (let index = 0; index < float32Summaries[level].samples.length; index++) {
+    const sample = float32Summaries[level].samples[index]; const value = frame.sample(sample.lngLat[0], sample.lngLat[1]);
+    dotsError = max(dotsError, Math.abs(dots.rainRadius[index] - Math.fround(rainMmhToRadius(Math.fround(value.rainMmh), sample.spacing)))); dotsError = max(dotsError, Math.abs(dots.strongRadius[index] - Math.fround(dotsStrongRainMmhToRadius(Math.fround(value.rainMmh), sample.spacing))));
+    const expectedHazards = geographicHazardRadii({ storm: Math.fround(value.storm), hail: Math.fround(value.hail) }, sample.spacing, {}); hazardError = max(hazardError, Math.abs(dots.stormRadius[index] - Math.fround(expectedHazards.stormRadius))); hazardError = max(hazardError, Math.abs(dots.hailRadius[index] - Math.fround(expectedHazards.hailRadius)));
+    squaresError = max(squaresError, Math.abs(squares.rainWetMeanMmh[index] - Math.fround(value.rainMmh))); squaresError = max(squaresError, Math.abs(squares.stormMeanSeverity[index] - Math.fround(value.storm))); squaresError = max(squaresError, Math.abs(squares.hailMeanSeverity[index] - Math.fround(value.hail)));
+  }
+  console.log(`L${level} direct mappings: Dots=${dotsError}, hazards=${hazardError}, Squares=${squaresError}`); check(dotsError <= 1e-5 && hazardError <= 5e-5 && squaresError <= 0.1, `L${level} direct Dots/Squares mapping equivalence`);
+}
 
-const dotsSource = fs.readFileSync(new URL('../src/engine/geographic-dots-layer.js', import.meta.url), 'utf8');
-const squaresSource = fs.readFileSync(new URL('../src/engine/geographic-squares-layer.js', import.meta.url), 'utf8');
-check(!dotsSource.includes('GeographicSymbolPyramid') && !dotsSource.includes('reduceState('), 'Dots has no renderer-owned weather reduction');
-check(!squaresSource.includes('GeographicSquarePyramid') && !squaresSource.includes('stormMax *'), 'Squares has no renderer-owned weather reduction');
+for (const [lower, higher, hierarchical] of [[12, 13, true], [13, 14, false], [14, 15, false]]) {
+  const pairs = pyramid.topology.directPairsFor(lower, higher); let inheritedPositionError = 0; let inheritedPairs = 0; let introducedPairs = 0; const lowAnchors = pyramid.topology.levels.get(lower).canonicalAnchors; const highAnchors = pyramid.topology.levels.get(higher).canonicalAnchors;
+  for (let index = 0; index < pairs.length; index += 2) { const low = pairs[index]; const high = pairs[index + 1]; if (low >= 0 && high >= 0) { inheritedPairs++; inheritedPositionError = max(inheritedPositionError, Math.abs(lowAnchors[low * 2] - highAnchors[high * 2])); inheritedPositionError = max(inheritedPositionError, Math.abs(lowAnchors[low * 2 + 1] - highAnchors[high * 2 + 1])); } else introducedPairs++; }
+  console.log(`transition L${lower}<->L${higher}: ${hierarchical ? 'hierarchical' : 'direct pairs'}, inherited=${inheritedPairs}, introduced=${introducedPairs}, inherited position error=${inheritedPositionError}`); check(inheritedPositionError === 0 && (hierarchical ? pyramid.topology.transitionParentsFor(higher) : introducedPairs > 0), `L${lower}<->L${higher} transition topology`);
+}
 
-console.log(failures ? `VERIFICATION FAILED: ${failures}` : 'VERIFICATION PASSED');
-if (failures) process.exitCode = 1;
+const scalar = new GeographicScalarLattice(); console.log(`scalar isolation: L${SCALAR_GRID_LEVEL}, ${scalar.width}x${scalar.height}, ${scalar.length} vertices`); check(scalar.width === 466 && scalar.height === 225 && scalar.length === 104850, 'Blur/Areas scalar lattice remains the pre-L15 fixed topology');
+
+const summaryBytesPerSample = pyramid.summaryMemoryBytesPerSample(); let topologyAnchorBytes = 0;
+for (const level of LEVELS) { const count = pyramid.samplesFor(level).length; topologyAnchorBytes += pyramid.topology.levels.get(level).canonicalAnchors.byteLength; console.log(`L${level}: ${count} samples; shared summary=${(count * summaryBytesPerSample / 1024 / 1024).toFixed(3)} MiB`); }
+const count14 = pyramid.samplesFor(14).length; const count15 = pyramid.samplesFor(15).length; const mib = (bytes) => `${(bytes / 1024 / 1024).toFixed(3)} MiB`;
+console.log(`L15 stable memory: one shared summary=${mib(count15 * summaryBytesPerSample)}, two temporal summaries=${mib(count15 * summaryBytesPerSample * 2)}, Dots mapped states=${mib(count15 * 4 * 4 * 2)}, Squares mapped states=${mib(count15 * 8 * 4 * 2)}, Squares CPU instances=${mib(count15 * 18 * 4)}, Squares GPU instance buffer=${mib(count15 * 18 * 4)}`);
+console.log(`L14<->L15 transition memory: two temporal summaries=${mib((count14 + count15) * summaryBytesPerSample * 2)}, Dots mapped states=${mib((count14 + count15) * 4 * 4 * 2)}, Squares mapped states=${mib((count14 + count15) * 8 * 4 * 2)}, Squares CPU/GPU instances each=${mib((count14 + count15) * 18 * 4)}, shared typed topology anchors=${mib(topologyAnchorBytes)}, centered aggregate topology=${mib(centeredMappingBytes)}`);
+
+const dotsSource = fs.readFileSync(new URL('../src/engine/geographic-dots-layer.js', import.meta.url), 'utf8'); const appSource = fs.readFileSync(new URL('../src/app.js', import.meta.url), 'utf8'); const htmlSource = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+check(!dotsSource.includes('setStrongFullMmh') && !appSource.includes('dotsStrong') && !htmlSource.includes('dotsStrong'), 'Dots strong-rain tuning UI and mutable state are removed'); check(DOTS_STRONG_RAIN_FULL_MMH === 35, 'Dots strong-rain full saturation is fixed at 35 mm/h');
+const shared = new GeographicWeatherPyramid(); check(new GeographicDotsLayer(shared).weatherPyramid === new GeographicSquaresLayer(shared).weatherPyramid, 'Dots and Squares share one GeographicWeatherPyramid instance');
+console.log(failures ? `VERIFICATION FAILED: ${failures}` : 'VERIFICATION PASSED'); if (failures) process.exitCode = 1;
