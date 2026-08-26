@@ -9,7 +9,7 @@ import { prepareGeographicFieldFrame, setActiveWeatherField } from '../src/engin
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
-import { DOTS_STRONG_RAIN_FULL_MMH_DEFAULT, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
+import { DOTS_STRONG_RAIN_FULL_MMH_DEFAULT, INTENSITY_THRESHOLDS, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadii } from '../src/engine/hazard-renderer.js';
 
 const LEVELS = [10, 11, 12, 13, 14];
@@ -372,6 +372,12 @@ function mapFixture(summary) {
   return { dots: mapDotsWeatherSummary(summary), squares: mapSquaresWeatherSummary(summary) };
 }
 
+function mapDotsFixture(summary, level, spacing = 0.01) {
+  summary.level = level;
+  summary.samples = summary.samples.map(() => ({ spacing }));
+  return mapDotsWeatherSummary(summary);
+}
+
 let dotsL14Error = 0;
 let squaresL14Error = 0;
 let hazardL14Error = 0;
@@ -402,6 +408,64 @@ console.log(`Phase 4 L14 errors: Dots rain/strong=${dotsL14Error}, Dots hazards=
 check(dotsL14Error <= 1e-5, 'Dots L14 rain/strong mapping equivalence');
 check(hazardL14Error <= 5e-5, 'Dots L14 hazard mapping equivalence');
 check(squaresL14Error <= 0.1, 'Squares L14 mapping equivalence');
+
+const l14StrongRainValues = [1.6, 2.0, 2.5, 3.0];
+let l14StrongFixtureError = 0;
+for (const rainMmh of l14StrongRainValues) {
+  const fixture = directFixture([rainMmh], [], [], Float32Array);
+  const mapped = mapDotsFixture(fixture.summary, 14);
+  const expected = Math.fround(dotsStrongRainMmhToRadius(Math.fround(rainMmh), 0.01, DOTS_STRONG_RAIN_FULL_MMH_DEFAULT));
+  const error = Math.abs(mapped.strongRadius[0] - expected);
+  l14StrongFixtureError = Math.max(l14StrongFixtureError, error);
+  console.log(`Dots L14 strong fixture rain=${rainMmh}: mapped=${mapped.strongRadius[0]}, expected=${expected}, error=${error}`);
+  check(error <= 1e-7, `Dots L14 strong fixture ${rainMmh} mm/h direct equivalence`);
+}
+console.log(`Dots L14 strong fixture maximum error around onset/coarse threshold: ${l14StrongFixtureError}`);
+
+const directHazardFixtures = [
+  { name: 'below visual threshold', storm: INTENSITY_THRESHOLDS.storm * 0.45 - 0.001, hail: INTENSITY_THRESHOLDS.hail * 0.45 - 0.001 },
+  { name: 'just above visual threshold', storm: INTENSITY_THRESHOLDS.storm * 0.45 + 0.001, hail: INTENSITY_THRESHOLDS.hail * 0.45 + 0.001 },
+  { name: 'clearly strong', storm: 0.8, hail: 0.7 }
+];
+let directHazardFixtureError = 0;
+for (const fixtureValues of directHazardFixtures) {
+  const fixture = directFixture([0], [fixtureValues.storm], [fixtureValues.hail], Float32Array);
+  const mapped = mapDotsFixture(fixture.summary, 14);
+  const expected = { stormRadius: 0, hailRadius: 0 };
+  geographicHazardRadii({ storm: Math.fround(fixtureValues.storm), hail: Math.fround(fixtureValues.hail) }, 0.01, expected);
+  const stormError = Math.abs(mapped.stormRadius[0] - Math.fround(expected.stormRadius));
+  const hailError = Math.abs(mapped.hailRadius[0] - Math.fround(expected.hailRadius));
+  directHazardFixtureError = Math.max(directHazardFixtureError, stormError, hailError);
+  console.log(`Dots L14 hazard fixture ${fixtureValues.name}: stormError=${stormError}, hailError=${hailError}`);
+  check(stormError <= 1e-7 && hailError <= 1e-7, `Dots L14 hazard fixture ${fixtureValues.name} direct equivalence`);
+}
+console.log(`Dots L14 direct hazard fixture maximum error: ${directHazardFixtureError}`);
+
+const tinyHailFixture = directFixture([0], [0.8], [0.01], Float32Array);
+const tinyHailMapped = mapDotsFixture(tinyHailFixture.summary, 13);
+console.log(`Dots tiny-hail priority fixture: storm=${tinyHailMapped.stormRadius[0]}, hail=${tinyHailMapped.hailRadius[0]}`);
+check(tinyHailMapped.stormRadius[0] > 0 && tinyHailMapped.hailRadius[0] === 0, 'tiny hail does not suppress visible storm');
+
+const localizedCoarseHazard = createWeatherSummary({ level: 13, samples: [{}] }, null, Float64Array);
+localizedCoarseHazard.totalWeight[0] = 1;
+localizedCoarseHazard.stormCoverageWeight[0] = 0.25;
+localizedCoarseHazard.stormWeightedSeverity[0] = 0.25 * 0.025;
+localizedCoarseHazard.stormMaxSeverity[0] = 0.1;
+const localizedCoarseMapped = mapDotsFixture(localizedCoarseHazard, 13);
+const denserCoarseHazard = createWeatherSummary({ level: 13, samples: [{}] }, null, Float64Array);
+denserCoarseHazard.totalWeight[0] = 1;
+denserCoarseHazard.stormCoverageWeight[0] = 1;
+denserCoarseHazard.stormWeightedSeverity[0] = 0.025;
+denserCoarseHazard.stormMaxSeverity[0] = 0.1;
+const denserCoarseMapped = mapDotsFixture(denserCoarseHazard, 13);
+console.log(`Dots localized coarse hazard: lowCoverage=${localizedCoarseMapped.stormRadius[0]}, fullCoverage=${denserCoarseMapped.stormRadius[0]}`);
+check(localizedCoarseMapped.stormRadius[0] > 0, 'localized coarse hazard retains a visible peak');
+check(localizedCoarseMapped.stormRadius[0] < denserCoarseMapped.stormRadius[0], 'coarse hazard radius decreases with coverage');
+
+const visibleHailFixture = directFixture([0], [0.8], [0.7], Float32Array);
+const visibleHailMapped = mapDotsFixture(visibleHailFixture.summary, 13);
+console.log(`Dots visible-hail priority fixture: storm=${visibleHailMapped.stormRadius[0]}, hail=${visibleHailMapped.hailRadius[0]}`);
+check(visibleHailMapped.hailRadius[0] > 0 && visibleHailMapped.stormRadius[0] === 0, 'visible hail wins Dots priority');
 
 const mappingUniform = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([5, 5, 5, 5]).summary, fourToOne, null, Float64Array));
 const mappingLocalized = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([0, 0, 0, 20]).summary, fourToOne, null, Float64Array));

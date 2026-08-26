@@ -219,13 +219,17 @@ shared topology and reusable GPU capacities.
 Dots map each shared physical summary after it is produced. Base rain uses
 `spacing * sqrt(rainCoverage) * rainMmhToRadiusFraction(wetMeanMmh)`, where
 coverage is the shared 0.05 mm/h coverage and wet mean divides the rain weighted
-sum by that wet support. The strong-blue overlay uses the shared 2.5 mm/h
-coverage and retained peak: `spacing * sqrt(strongCoverage) *
+sum by that wet support. L14 is a direct point sample and uses the exact existing
+strong-rain presentation mapping from physical `rainMmh`. Coarse L10–L13
+strong-blue uses shared 2.5 mm/h coverage plus the retained peak:
+`spacing * sqrt(strongCoverage) *
 dotsStrongRainMmhToRadiusFraction(rainMaxMmh, strongFullMmh)`. The temporary
 full-saturation control remains Dots-only presentation state and never changes
-the shared summary. Storm/hail glyphs use their independent summary coverage
-and positive mean severity; coverage scales glyph area, retained maxima gate
-presence, and hail wins presentation priority.
+the shared summary. Coarse storm/hail glyphs use independent shared coverage,
+positive mean severity, and retained maximum severity; the presentation severity
+retains the peak, coverage scales glyph area, and hail wins only when its mapped
+glyph is visible. Direct L14 hazards retain the existing
+`geographicHazardRadii()` mapping.
 
 `GeographicLodTopology` in `geographic-lod.js` owns canonical anchors and the
 deterministic one-parent child ownership used only for Dots geometric morphing.

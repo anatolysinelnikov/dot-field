@@ -5,10 +5,11 @@ import {
   DOTS_STRONG_RAIN_FULL_MMH_MAX,
   DOTS_STRONG_RAIN_FULL_MMH_MIN,
   dotsStrongRainMmhToRadius,
+  dotsStrongRainMmhToRadiusFraction,
   rainMmhToRadiusFraction
 } from './precipitation-mapping.js';
 import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH, WEATHER_REFERENCE_LEVEL } from './geographic-weather-pyramid.js';
-import { geographicHazardRadiusForSeverity } from './hazard-renderer.js';
+import { geographicHazardRadii, geographicHazardRadiusForSeverity } from './hazard-renderer.js';
 
 const REFERENCE_GRID_LEVEL = WEATHER_REFERENCE_LEVEL;
 export const STORM_INNER_RATIO = 0.38;
@@ -80,6 +81,9 @@ function makeMappedState(length, reusable) {
 // Pure presentation mapping: physical summary values never feed a coarser LOD.
 export function mapDotsWeatherSummary(summary, strongFullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT, reusable = null) {
   const state = makeMappedState(summary.samples.length, reusable);
+  const isDirectPointSummary = summary.level === REFERENCE_GRID_LEVEL;
+  const directHazardValue = { storm: 0, hail: 0 };
+  const directHazard = { stormRadius: 0, hailRadius: 0 };
   for (let index = 0; index < summary.samples.length; index++) {
     const sample = summary.samples[index];
     const total = summary.totalWeight[index];
@@ -88,24 +92,38 @@ export function mapDotsWeatherSummary(summary, strongFullMmh = DOTS_STRONG_RAIN_
     const wetMeanMmh = positiveMean(summary.rainWeightedSumMmh[index], rainCoverageWeight);
     const strongCoverage = summaryCoverage(summary, summary.rainCoverageWeight[STRONG_COVERAGE_INDEX][index], index);
     state.rainRadius[index] = sample.spacing * Math.sqrt(rainCoverage) * rainMmhToRadiusFraction(wetMeanMmh);
-    state.strongRadius[index] = sample.spacing * Math.sqrt(strongCoverage)
-      * dotsStrongRainMmhToRadius(summary.rainMaxMmh[index], 1, strongFullMmh);
+    if (isDirectPointSummary) {
+      const rainMmh = total > 0 ? summary.rainWeightedSumMmh[index] / total : 0;
+      state.strongRadius[index] = dotsStrongRainMmhToRadius(rainMmh, sample.spacing, strongFullMmh);
+    } else {
+      state.strongRadius[index] = sample.spacing * Math.sqrt(strongCoverage)
+        * dotsStrongRainMmhToRadiusFraction(summary.rainMaxMmh[index], strongFullMmh);
+    }
 
     const hailCoverageWeight = summary.hailCoverageWeight[index];
     const hailCoverage = summaryCoverage(summary, hailCoverageWeight, index);
     const hailMean = positiveMean(summary.hailWeightedSeverity[index], hailCoverageWeight);
-    const hailPresent = total > 0 && summary.hailMaxSeverity[index] > 0;
-    state.hailRadius[index] = hailPresent
-      ? Math.sqrt(hailCoverage) * geographicHazardRadiusForSeverity('hail', hailMean, sample.spacing)
-      : 0;
-
     const stormCoverageWeight = summary.stormCoverageWeight[index];
     const stormCoverage = summaryCoverage(summary, stormCoverageWeight, index);
     const stormMean = positiveMean(summary.stormWeightedSeverity[index], stormCoverageWeight);
-    // Hail remains the presentation winner, while both physical summaries stay intact.
-    state.stormRadius[index] = !hailPresent && total > 0 && summary.stormMaxSeverity[index] > 0
-      ? Math.sqrt(stormCoverage) * geographicHazardRadiusForSeverity('storm', stormMean, sample.spacing)
-      : 0;
+    if (isDirectPointSummary) {
+      directHazardValue.storm = total > 0 ? summary.stormWeightedSeverity[index] / total : 0;
+      directHazardValue.hail = total > 0 ? summary.hailWeightedSeverity[index] / total : 0;
+      geographicHazardRadii(directHazardValue, sample.spacing, directHazard);
+      state.stormRadius[index] = directHazard.stormRadius;
+      state.hailRadius[index] = directHazard.hailRadius;
+    } else {
+      const hailPresentationSeverity = Math.max(hailMean, summary.hailMaxSeverity[index]);
+      const hailRadius = total > 0
+        ? Math.sqrt(hailCoverage) * geographicHazardRadiusForSeverity('hail', hailPresentationSeverity, sample.spacing)
+        : 0;
+      const stormPresentationSeverity = Math.max(stormMean, summary.stormMaxSeverity[index]);
+      state.hailRadius[index] = hailRadius;
+      // Hail wins only when its mapped glyph is actually visible; both physical summaries remain intact.
+      state.stormRadius[index] = hailRadius > 0 || total <= 0
+        ? 0
+        : Math.sqrt(stormCoverage) * geographicHazardRadiusForSeverity('storm', stormPresentationSeverity, sample.spacing);
+    }
   }
   return state;
 }
