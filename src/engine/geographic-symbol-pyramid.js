@@ -1,6 +1,6 @@
 import { geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
 import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
-import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
+import { intensityToRadius, strongRainIntensityToRadius } from './precipitation-mapping.js';
 import { geographicHazardRadii } from './hazard-renderer.js';
 
 export const REFERENCE_GRID_LEVEL = 14;
@@ -116,7 +116,7 @@ export function evaluateDirect(level, frame, reusable) {
     }
     geographicPreparedIntensityAt(frame, point, value);
     rainRadius[index] = intensityToRadius(value.rain, samples[index].spacing, 'rain');
-    strongRadius[index] = intensityToRadius(strongPrecipitationIntensity(value.rain), samples[index].spacing, 'rain');
+    strongRadius[index] = strongRainIntensityToRadius(value.rain, samples[index].spacing);
     geographicHazardRadii(value, samples[index].spacing, hazard);
     stormRadius[index] = hazard.stormRadius;
     hailRadius[index] = hazard.hailRadius;

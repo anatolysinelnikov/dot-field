@@ -1,6 +1,6 @@
 import { clamp } from './math.js';
+import { RAIN_FULL_SCALE_MMH } from './config.js';
 
-export const RAIN_FULL_SCALE_MMH = 3;
 const THUNDERSTORM_LEVELS = Object.freeze({ 0: 0, 10: 0.2660123, 11: 0.4818750, 12: 0.6977377 });
 const HAIL_LEVELS = Object.freeze({ 0: 0, 16: 0.2776807, 17: 0.4897500, 18: 0.7018193 });
 const EXPECTED_COLUMNS = ['lon', 'lat', 'mmh', 'thunderstorm', 'hail'];

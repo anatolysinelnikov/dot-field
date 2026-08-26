@@ -109,8 +109,9 @@ header, dimensions, complete grid, regular axes (within rounded-coordinate
 tolerance), nonnegative mm/h values, and supported thunderstorm/hail codes. It
 stores raw mm/h and phenomenon codes plus normalized rain, storm, and hail
 channels in typed arrays and bilinearly reconstructs the normalized channels
-between geographic source nodes. Normalization is
-`clamp(mmh / 3, 0, 1)` for rain; thunderstorm codes 0/10/11/12 map to
+between geographic source nodes. Rain normalization is the fixed physical
+scale `clamp(mmh / 50, 0, 1)`, with shared visual anchors at 0.05, 0.10,
+0.30, 1.00, 2.50, 10.0, and 50.0 mm/h. Thunderstorm codes 0/10/11/12 map to
 0/0.2660123/0.4818750/0.6977377; hail codes 0/16/17/18 map to
 0/0.2776807/0.4897500/0.7018193.
 
@@ -170,6 +171,9 @@ displayed level, including L14 ↔ L13.
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
 transitions use deterministic parent/child topology and squared-radius morphs.
+Rain glyph radii use the shared monotonic physical anchor transfer in squared
+radius/visual area; the light-blue base saturates at 0.86 spacing near 10 mm/h,
+while the nested strong-blue overlay uses its own 2.5–50 mm/h physical anchors.
 
 ## Squares — `src/engine/geographic-squares-layer.js`
 
@@ -186,7 +190,9 @@ only scalar rain, storm, and hail values. Rain averages immediate child values;
 storm and hail retain their average/max-biased reductions. LOD changes crossfade
 the deterministic parent and child cell sets during the existing 0.2 s
 transition; no new grid is created and no camera-dependent identity is
-introduced.
+introduced. Rain square visibility and light-to-strong blue color use the same
+physical rain transfer anchors as Dots; rain values above 3 mm/h therefore
+remain distinguishable through the progressive strong-color transfer.
 
 ## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`
 
@@ -215,9 +221,10 @@ texture pairs; only data contents are updated for ordinary keyframes.
 ## Blur — `src/engine/geographic-scalar-layer.js`
 
 In Blur mode the fragment shader bilinearly reconstructs rain/storm/hail from
-the shared unsmoothed L14 textures, then applies the continuous visibility and
-color-transfer intent: a soft rain support edge, light-blue rain transitioning
-to strong blue, then magenta storm and yellow hail composited above it. Hail is
+the shared unsmoothed L14 textures, then applies the continuous physical rain
+visibility transfer: a soft 0.05 mm/h onset, clearly readable light rain near
+0.30 mm/h, and a progressive light-blue to strong-blue transfer from 2.5 to
+50 mm/h. Magenta storm and yellow hail remain composited above it, with hail
 last. The indexed triangles do not define scalar geometry, and no per-vertex
 weather attribute buffer is used.
 
@@ -225,11 +232,12 @@ weather attribute buffer is used.
 
 Areas uses the same shared L14 RGBA32F textures and explicit four-texel
 bilinear reconstruction as Blur. With Smooth off, this raw L14 → bilinear field
-is mapped through the existing five precipitation bands (`#0090FF` through
-`#0000FF`), storm/hail thresholds, translucent magenta/yellow fills,
-hail-over-storm order, and derivative-based edge treatment. The default Areas
-field therefore differs from Blur only by transfer semantics, not by scalar
-reconstruction.
+is mapped through five physical rain bands at 0.10, 0.30, 1.00, 2.50, and
+10.0 mm/h (`#0090FF` through `#0000FF`), storm/hail thresholds, translucent
+magenta/yellow fills, hail-over-storm order, and derivative-based edge
+treatment. The default Areas field therefore differs from Blur only by
+transfer semantics, not by scalar reconstruction; values above 10 mm/h use
+the darkest discrete rain band.
 
 The two texture arrays and two GPU textures are allocated lazily and retained
 for the life of the layer. On ordinary 100 ms temporal advancement, the

@@ -1,7 +1,7 @@
-import { RAIN_MODERATE_MAX } from './config.js';
 import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographicToSynthetic } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
+import { RAIN_VISIBILITY_SHADER, STRONG_RAIN_SHADER } from './precipitation-mapping.js';
 
 const REFERENCE_GRID_LEVEL = 14;
 const INSTANCE_STRIDE = 8;
@@ -22,10 +22,12 @@ function makeProgram(gl, shaderData) {
   ].join('\n');
   const fragmentSource = [
     '#version 300 es', 'precision highp float;', 'in vec3 v_values;\nuniform float u_opacity;\nout vec4 fragColor;',
-    `float strength(float value, float threshold) { return smoothstep(threshold * 0.45, 0.93, value); }
+    `${RAIN_VISIBILITY_SHADER}
+${STRONG_RAIN_SHADER}
+float strength(float value, float threshold) { return smoothstep(threshold * 0.45, 0.93, value); }
 void main() {
-  float rain = strength(v_values.x, 0.045);
-  float strong = smoothstep(${RAIN_MODERATE_MAX.toFixed(3)}, 0.9, v_values.x);
+  float rain = rainVisibility(v_values.x);
+  float strong = strongRain(v_values.x);
   vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), strong);
   float alpha = rain;
   float storm = strength(v_values.y, 0.075);

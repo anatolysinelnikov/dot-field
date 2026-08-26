@@ -1,6 +1,6 @@
-import { RAIN_MODERATE_MAX } from './config.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { AREA_HAIL_THRESHOLD, AREA_RAIN_THRESHOLDS, AREA_STORM_THRESHOLD, GeographicScalarLattice } from './geographic-scalar-lattice.js';
+import { RAIN_VISIBILITY_SHADER, STRONG_RAIN_SHADER } from './precipitation-mapping.js';
 
 const TEXTURE_STRIDE = 4;
 
@@ -32,14 +32,16 @@ function makeProgram(gl, shaderData, mode) {
   return mix(top, bottom, fraction.y);
 }
 float soften(float edge, float value) { float width = max(fwidth(value) * 1.25, 0.00001); return smoothstep(edge - width, edge + width, value); }
+${RAIN_VISIBILITY_SHADER}
+${STRONG_RAIN_SHADER}
 float hazardOpacity(float value, float onset, float visibleOnset, float strongAnchor, float core, float exponent) {
   if (value < visibleOnset) return 0.4 * pow(smoothstep(onset, visibleOnset, value), exponent);
   if (value < strongAnchor) return mix(0.4, 0.65, smoothstep(visibleOnset, strongAnchor, value));
   return mix(0.65, 1.0, smoothstep(strongAnchor, core, value));
 }
 vec4 blurColor(float rain, float storm, float hail) {
-  float rainOpacity = pow(smoothstep(0.006, 0.52, rain), 0.66);
-  float strong = smoothstep(${RAIN_MODERATE_MAX.toFixed(3)}, 0.9, rain);
+  float rainOpacity = pow(rainVisibility(rain), 0.66);
+  float strong = strongRain(rain);
   vec4 color = vec4(0.0, mix(0.565, 0.0, strong), 1.0, rainOpacity);
   float stormOpacity = hazardOpacity(storm, 0.006, 0.03375, 0.075, 0.54, 0.76);
   color.rgb = mix(color.rgb, vec3(1.0, 0.0, 1.0), stormOpacity);

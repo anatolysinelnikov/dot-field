@@ -2,7 +2,7 @@ import { prepareGeographicFieldFrame } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { lngLatToMercator } from './geographic-lod.js';
 import { geographicHazardRadii } from './hazard-renderer.js';
-import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
+import { intensityToRadius, strongRainIntensityToRadius } from './precipitation-mapping.js';
 import {
   GeographicSymbolPyramid,
   REFERENCE_GRID_LEVEL,
@@ -174,7 +174,7 @@ function evaluateSource(field, geometry, reusable) {
     value.hail = field.hail[index];
     const spacing = geometry.spacing[index];
     state.rainRadius[index] = intensityToRadius(value.rain, spacing, 'rain');
-    state.strongRadius[index] = intensityToRadius(strongPrecipitationIntensity(value.rain), spacing, 'rain');
+    state.strongRadius[index] = strongRainIntensityToRadius(value.rain, spacing);
     geographicHazardRadii(value, spacing, hazard);
     state.stormRadius[index] = hazard.stormRadius;
     state.hailRadius[index] = hazard.hailRadius;
