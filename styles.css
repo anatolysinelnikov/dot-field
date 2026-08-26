@@ -295,10 +295,20 @@ button:active { transform: translateY(1px); }
 
 .area-smooth[hidden] { display: none; }
 
-.dots-diagnostic {
+.dots-diagnostic-controls {
   position: absolute;
   left: calc(100% + 8px);
   top: 0;
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.dots-diagnostic-controls[hidden] { display: none; }
+
+.dots-diagnostic {
+  position: static;
   height: 100%;
   display: flex;
   align-items: center;
@@ -326,6 +336,10 @@ button:active { transform: translateY(1px); }
   font: inherit;
   font-size: 12px;
 }
+
+#dotsStrongControl { gap: 8px; }
+#dotsStrongControl output { color: #e5ebf5; font-variant-numeric: tabular-nums; }
+#dotsStrongControl input[type="range"] { width: 140px; height: 26px; }
 
 .area-smooth-content {
   flex: 0 0 auto;
@@ -366,11 +380,18 @@ input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; backgro
 input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; border-radius: 999px; background: #fff; }
 
 @media (max-width: 900px) {
-  .dots-diagnostic {
+  .dots-diagnostic-controls {
     left: auto;
     right: 0;
     top: auto;
     bottom: calc(100% + 8px);
+    height: auto;
+    flex-direction: column;
+    align-items: flex-end;
+  }
+
+  .dots-diagnostic {
+    height: 34px;
   }
 
   .area-smooth {

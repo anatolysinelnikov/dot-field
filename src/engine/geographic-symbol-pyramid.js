@@ -1,6 +1,10 @@
 import { geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
 import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
-import { intensityToRadius, strongRainIntensityToRadius } from './precipitation-mapping.js';
+import {
+  DOTS_STRONG_RAIN_FULL_MMH_DEFAULT,
+  dotsStrongRainIntensityToRadius,
+  intensityToRadius
+} from './precipitation-mapping.js';
 import { geographicHazardRadii } from './hazard-renderer.js';
 
 export const REFERENCE_GRID_LEVEL = 14;
@@ -97,7 +101,7 @@ export function buildCenteredContributions(fine, coarse) {
   return parentContributions;
 }
 
-export function evaluateDirect(level, frame, reusable) {
+export function evaluateDirect(level, frame, reusable, strongFullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT) {
   const state = makeState(level.samples.length, reusable);
   const { rainRadius, strongRadius, stormRadius, hailRadius } = state;
   const value = { rain: 0, storm: 0, hail: 0 };
@@ -116,7 +120,7 @@ export function evaluateDirect(level, frame, reusable) {
     }
     geographicPreparedIntensityAt(frame, point, value);
     rainRadius[index] = intensityToRadius(value.rain, samples[index].spacing, 'rain');
-    strongRadius[index] = strongRainIntensityToRadius(value.rain, samples[index].spacing);
+    strongRadius[index] = dotsStrongRainIntensityToRadius(value.rain, samples[index].spacing, strongFullMmh);
     geographicHazardRadii(value, samples[index].spacing, hazard);
     stormRadius[index] = hazard.stormRadius;
     hailRadius[index] = hazard.hailRadius;
@@ -300,7 +304,7 @@ export class GeographicSymbolPyramid {
     return this.centeredContributions;
   }
 
-  evaluate(requestedLevels, frame, reusableStates = null) {
+  evaluate(requestedLevels, frame, reusableStates = null, strongFullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT) {
     const states = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
     let wantsReference = false;
     let minimumRequested = REFERENCE_GRID_LEVEL;
@@ -315,7 +319,7 @@ export class GeographicSymbolPyramid {
     this.lastEvaluationCounts.fill(0);
     if (wantsReference) {
       const reference = this.levels.get(REFERENCE_GRID_LEVEL);
-      let state = evaluateDirect(reference, frame, reusableStates?.[REFERENCE_GRID_LEVEL]);
+      let state = evaluateDirect(reference, frame, reusableStates?.[REFERENCE_GRID_LEVEL], strongFullMmh);
       states[REFERENCE_GRID_LEVEL] = state;
       this.lastEvaluationCounts[REFERENCE_GRID_LEVEL] = reference.samples.length;
       for (let level = REFERENCE_GRID_LEVEL - 1; level >= minimumRequested; level--) {
@@ -329,7 +333,7 @@ export class GeographicSymbolPyramid {
       const level = requestedLevels[index];
       if (level <= REFERENCE_GRID_LEVEL) continue;
       const direct = this.levels.get(level);
-      states[level] = evaluateDirect(direct, frame, reusableStates?.[level]);
+      states[level] = evaluateDirect(direct, frame, reusableStates?.[level], strongFullMmh);
       this.lastEvaluationCounts[level] = direct.samples.length;
     }
     return states;

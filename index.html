@@ -41,18 +41,25 @@
           <span>Smooth</span>
         </span>
       </label>
-      <label id="dotsDiagnosticControl" class="dots-diagnostic" hidden>
-        <span>Dots path</span>
-        <select id="dotsDiagnostic" aria-label="Dots diagnostic path">
-          <option value="production" selected>Production</option>
-          <option value="source">Source</option>
-          <option value="l14-direct">L14 Direct</option>
-          <option value="l13-direct-grid">L13 Direct · Grid</option>
-          <option value="l13-reduced-grid">L13 Reduced · Grid</option>
-          <option value="l13-reduced-production">L13 Reduced · Production</option>
-          <option value="l13-centered">L13 Centered</option>
-        </select>
-      </label>
+      <div id="dotsDiagnosticControls" class="dots-diagnostic-controls" hidden>
+        <label id="dotsDiagnosticControl" class="dots-diagnostic">
+          <span>Dots path</span>
+          <select id="dotsDiagnostic" aria-label="Dots diagnostic path">
+            <option value="production" selected>Production</option>
+            <option value="source">Source</option>
+            <option value="l14-direct">L14 Direct</option>
+            <option value="l13-direct-grid">L13 Direct · Grid</option>
+            <option value="l13-reduced-grid">L13 Reduced · Grid</option>
+            <option value="l13-reduced-production">L13 Reduced · Production</option>
+            <option value="l13-centered">L13 Centered</option>
+          </select>
+        </label>
+        <label id="dotsStrongControl" class="dots-diagnostic">
+          <span>Dark blue full at</span>
+          <output id="dotsStrongFullOutput" for="dotsStrongFull">35 mm/h</output>
+          <input id="dotsStrongFull" type="range" min="20" max="50" step="1" value="35" aria-label="Dark blue full saturation rain rate">
+        </label>
+      </div>
     </div>
 
     <div class="zoom-controls" role="group" aria-label="Map controls">

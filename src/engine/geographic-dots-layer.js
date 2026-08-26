@@ -2,7 +2,13 @@ import { prepareGeographicFieldFrame } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { lngLatToMercator } from './geographic-lod.js';
 import { geographicHazardRadii } from './hazard-renderer.js';
-import { intensityToRadius, strongRainIntensityToRadius } from './precipitation-mapping.js';
+import {
+  DOTS_STRONG_RAIN_FULL_MMH_DEFAULT,
+  DOTS_STRONG_RAIN_FULL_MMH_MAX,
+  DOTS_STRONG_RAIN_FULL_MMH_MIN,
+  dotsStrongRainIntensityToRadius,
+  intensityToRadius
+} from './precipitation-mapping.js';
 import {
   GeographicSymbolPyramid,
   REFERENCE_GRID_LEVEL,
@@ -40,6 +46,8 @@ const STORM = unitShape(circularPoints(8).map((point, index) => {
   const scale = index % 2 === 0 ? 1 : STORM_INNER_RATIO;
   return [point[0] * scale, point[1] * scale];
 }));
+
+export const DEFAULT_DOTS_STRONG_FULL_MMH = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT;
 
 export function areaLinearRadius(startRadius, endRadius, progress) {
   return Math.sqrt(startRadius * startRadius + (endRadius * endRadius - startRadius * startRadius) * progress);
@@ -164,7 +172,7 @@ function makeDotsState(length, reusable) {
   };
 }
 
-function evaluateSource(field, geometry, reusable) {
+function evaluateSource(field, geometry, reusable, strongFullMmh) {
   const state = makeDotsState(geometry.spacing.length, reusable);
   const value = { rain: 0, storm: 0, hail: 0 };
   const hazard = { stormRadius: 0, hailRadius: 0 };
@@ -174,7 +182,7 @@ function evaluateSource(field, geometry, reusable) {
     value.hail = field.hail[index];
     const spacing = geometry.spacing[index];
     state.rainRadius[index] = intensityToRadius(value.rain, spacing, 'rain');
-    state.strongRadius[index] = strongRainIntensityToRadius(value.rain, spacing);
+    state.strongRadius[index] = dotsStrongRainIntensityToRadius(value.rain, spacing, strongFullMmh);
     geographicHazardRadii(value, spacing, hazard);
     state.stormRadius[index] = hazard.stormRadius;
     state.hailRadius[index] = hazard.hailRadius;
@@ -282,6 +290,7 @@ export class GeographicDotsLayer {
     this.buffersDirty = true;
     this.active = true;
     this.diagnostic = null;
+    this.strongFullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT;
   }
 
   onAdd(map, gl) {
@@ -307,19 +316,19 @@ export class GeographicDotsLayer {
   evaluateKeyframe(index, reusableStates = null) {
     if (this.diagnostic) return this.evaluateDiagnosticKeyframe(index, reusableStates);
     const time = index / TEMPORAL_FRAME_COUNT;
-    return this.pyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time), reusableStates);
+    return this.pyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time), reusableStates, this.strongFullMmh);
   }
 
   evaluateDiagnosticKeyframe(index, reusableState = null) {
     const diagnostic = this.diagnostic;
-    if (diagnostic.variant === 'source') return evaluateSource(diagnostic.field, diagnostic.geometry, reusableState);
+    if (diagnostic.variant === 'source') return evaluateSource(diagnostic.field, diagnostic.geometry, reusableState, this.strongFullMmh);
     const frame = prepareGeographicFieldFrame(index / TEMPORAL_FRAME_COUNT);
     if (diagnostic.variant === 'l13-reduced-grid' || diagnostic.variant === 'l13-reduced-production') {
-      diagnostic.reusableStates = this.pyramid.evaluate([13], frame, diagnostic.reusableStates);
+      diagnostic.reusableStates = this.pyramid.evaluate([13], frame, diagnostic.reusableStates, this.strongFullMmh);
       return diagnostic.reusableStates[13];
     }
     if (diagnostic.variant === 'l13-centered') {
-      diagnostic.reusableStates = this.pyramid.evaluate([14], frame, diagnostic.reusableStates);
+      diagnostic.reusableStates = this.pyramid.evaluate([14], frame, diagnostic.reusableStates, this.strongFullMmh);
       return reduceCenteredState(
         this.pyramid.levels.get(13),
         diagnostic.reusableStates[14],
@@ -327,7 +336,7 @@ export class GeographicDotsLayer {
         reusableState
       );
     }
-    return evaluateDirect(this.pyramid.levels.get(diagnostic.level), frame, reusableState);
+    return evaluateDirect(this.pyramid.levels.get(diagnostic.level), frame, reusableState, this.strongFullMmh);
   }
 
   rebuildTemporal(time) {
@@ -391,6 +400,16 @@ export class GeographicDotsLayer {
       ? this.diagnostic.geometry.anchors
       : this.pyramid.levels.get(this.diagnostic.level)[variant === 'l13-reduced-production' ? 'anchors' : 'gridAnchors'];
     if (this.active) this.rebuildDiagnosticTemporal(time);
+  }
+
+  setStrongFullMmh(fullMmh, time) {
+    const next = Math.max(DOTS_STRONG_RAIN_FULL_MMH_MIN, Math.min(DOTS_STRONG_RAIN_FULL_MMH_MAX, Number(fullMmh)));
+    if (!Number.isFinite(next) || next === this.strongFullMmh) return;
+    this.strongFullMmh = next;
+    if (this.active) {
+      if (this.diagnostic) this.rebuildDiagnosticTemporal(time);
+      else this.rebuildTemporal(time);
+    }
   }
 
   setActive(active) {

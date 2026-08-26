@@ -173,7 +173,11 @@ and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
 transitions use deterministic parent/child topology and squared-radius morphs.
 Rain glyph radii use the shared monotonic physical anchor transfer in squared
 radius/visual area; the light-blue base saturates at 0.86 spacing near 10 mm/h,
-while the nested strong-blue overlay uses its own 2.5–50 mm/h physical anchors.
+while the nested Dots-only strong-blue overlay starts visually at 1.6 mm/h and
+uses a fixed monotonic squared-area shape stretched from that onset to its
+temporary 20–50 mm/h full-saturation control (default 35 mm/h). The selected
+full-saturation value is presentation/diagnostic state and does not affect
+other renderers.
 
 ## Squares — `src/engine/geographic-squares-layer.js`
 
