@@ -17,9 +17,11 @@ export const RAIN_COVERAGE_THRESHOLDS_MMH = Object.freeze([
   50.0
 ]);
 
-function summaryMatchesLevel(summary, levelData) {
+function summaryMatchesLevel(summary, levelData, ArrayType) {
   return summary?.totalWeight?.length === levelData.samples.length
-    && summary.rainCoverageWeight?.length === RAIN_COVERAGE_THRESHOLDS_MMH.length;
+    && summary.rainCoverageWeight?.length === RAIN_COVERAGE_THRESHOLDS_MMH.length
+    && summary.totalWeight.constructor === ArrayType
+    && summary.rainCoverageWeight[0]?.constructor === ArrayType;
 }
 
 function zeroSummary(summary) {
@@ -35,8 +37,8 @@ function zeroSummary(summary) {
   summary.hailMaxSeverity.fill(0);
 }
 
-export function createWeatherSummary(levelData, reusable = null) {
-  if (summaryMatchesLevel(reusable, levelData)) {
+export function createWeatherSummary(levelData, reusable = null, ArrayType = Float32Array) {
+  if (summaryMatchesLevel(reusable, levelData, ArrayType)) {
     reusable.level = levelData.level;
     reusable.samples = levelData.samples;
     zeroSummary(reusable);
@@ -47,16 +49,16 @@ export function createWeatherSummary(levelData, reusable = null) {
   return {
     level: levelData.level,
     samples: levelData.samples,
-    totalWeight: new Float64Array(length),
-    rainWeightedSumMmh: new Float64Array(length),
-    rainMaxMmh: new Float64Array(length),
-    rainCoverageWeight: RAIN_COVERAGE_THRESHOLDS_MMH.map(() => new Float64Array(length)),
-    stormCoverageWeight: new Float64Array(length),
-    stormWeightedSeverity: new Float64Array(length),
-    stormMaxSeverity: new Float64Array(length),
-    hailCoverageWeight: new Float64Array(length),
-    hailWeightedSeverity: new Float64Array(length),
-    hailMaxSeverity: new Float64Array(length)
+    totalWeight: new ArrayType(length),
+    rainWeightedSumMmh: new ArrayType(length),
+    rainMaxMmh: new ArrayType(length),
+    rainCoverageWeight: RAIN_COVERAGE_THRESHOLDS_MMH.map(() => new ArrayType(length)),
+    stormCoverageWeight: new ArrayType(length),
+    stormWeightedSeverity: new ArrayType(length),
+    stormMaxSeverity: new ArrayType(length),
+    hailCoverageWeight: new ArrayType(length),
+    hailWeightedSeverity: new ArrayType(length),
+    hailMaxSeverity: new ArrayType(length)
   };
 }
 
@@ -102,8 +104,8 @@ export function buildCenteredContributions(fineLevel, coarseLevel) {
   };
 }
 
-export function evaluateDirectWeatherSummary(levelData, frame, reusable = null) {
-  const summary = createWeatherSummary(levelData, reusable);
+export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, ArrayType = Float32Array) {
+  const summary = createWeatherSummary(levelData, reusable, ArrayType);
   const value = { rainMmh: 0, storm: 0, hail: 0 };
   for (let index = 0; index < levelData.samples.length; index++) {
     const point = geographicToSynthetic(...levelData.samples[index].lngLat);
@@ -128,8 +130,8 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null) 
   return summary;
 }
 
-export function aggregateWeatherSummary(parentLevel, childSummary, contributions, reusable = null) {
-  const summary = createWeatherSummary(parentLevel, reusable);
+export function aggregateWeatherSummary(parentLevel, childSummary, contributions, reusable = null, ArrayType = Float32Array) {
+  const summary = createWeatherSummary(parentLevel, reusable, ArrayType);
   const childCount = childSummary.samples.length;
   for (let childIndex = 0; childIndex < childCount; childIndex++) {
     const start = contributions.offsets[childIndex];
@@ -158,7 +160,8 @@ export function aggregateWeatherSummary(parentLevel, childSummary, contributions
 }
 
 export class GeographicWeatherPyramid {
-  constructor() {
+  constructor(summaryArrayType = Float32Array) {
+    this.summaryArrayType = summaryArrayType;
     this.levels = new Map();
     for (let level = MIN_GRID_LEVEL; level <= MAX_DISPLAY_GRID_LEVEL; level++) {
       const selection = selectMercatorGridSamples(level);
@@ -188,7 +191,7 @@ export class GeographicWeatherPyramid {
   }
 
   summaryMemoryBytesPerSample() {
-    return (3 + RAIN_COVERAGE_THRESHOLDS_MMH.length + 6) * Float64Array.BYTES_PER_ELEMENT;
+    return (3 + RAIN_COVERAGE_THRESHOLDS_MMH.length + 6) * this.summaryArrayType.BYTES_PER_ELEMENT;
   }
 
   evaluate(requestedLevels, frame, reusableStates = null) {
@@ -199,14 +202,20 @@ export class GeographicWeatherPyramid {
     }
 
     const summaries = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
-    let summary = evaluateDirectWeatherSummary(this.levels.get(WEATHER_REFERENCE_LEVEL), frame, reusableStates?.[WEATHER_REFERENCE_LEVEL]);
+    let summary = evaluateDirectWeatherSummary(
+      this.levels.get(WEATHER_REFERENCE_LEVEL),
+      frame,
+      reusableStates?.[WEATHER_REFERENCE_LEVEL],
+      this.summaryArrayType
+    );
     summaries[WEATHER_REFERENCE_LEVEL] = summary;
     for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= minimumRequested; level--) {
       summary = aggregateWeatherSummary(
         this.levels.get(level),
         summary,
         this.contributions.get(level + 1),
-        reusableStates?.[level]
+        reusableStates?.[level],
+        this.summaryArrayType
       );
       summaries[level] = summary;
     }

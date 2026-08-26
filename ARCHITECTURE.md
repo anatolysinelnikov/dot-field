@@ -177,8 +177,8 @@ hazard-renderer functions. L14 is the direct point-sampling boundary: its
 physical field. L13 through L10 are recursively aggregated spatial summaries,
 never direct samples of the field or values from an existing renderer pyramid.
 
-Each summary is a struct of typed arrays with 16 `Float64Array` fields per
-sample (128 bytes/sample): `totalWeight`, `rainWeightedSumMmh`,
+Each summary is a struct of typed arrays with 16 `Float32Array` fields per
+sample (64 bytes/sample): `totalWeight`, `rainWeightedSumMmh`,
 `rainMaxMmh`, seven `rainCoverageWeight` arrays for the physical thresholds
 0.05, 0.10, 0.30, 1.00, 2.50, 10.0, and 50.0 mm/h,
 `stormCoverageWeight`, `stormWeightedSeverity`, `stormMaxSeverity`,
@@ -196,7 +196,13 @@ that fine sample are divided by their sum, so every child retains total support
 weight 1. For each child summary contribution `w`, all additive statistics and
 coverage weights receive `w * child.totalWeight` or `w * child statistic`, and
 maxima retain the maximum over positive support. This makes the summaries
-recursively composable without re-thresholding child means.
+recursively composable without re-thresholding child means. The summary storage
+choice was validated against an equivalent Float64 calculation across the
+complete L10–L14 pyramid, deterministic fixtures, recursive composition, and
+the real weather snapshot; the verifier records field-specific absolute and
+relative error bounds. Contribution weights remain Float64 because their
+topology is shared and their smaller memory cost does not justify a precision
+tradeoff.
 
 Provider categorical storm/hail codes remain source metadata and are not
 inferred from interpolated severities. RAW remains unchanged. The shared
