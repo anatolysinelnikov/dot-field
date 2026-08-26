@@ -28,8 +28,7 @@ const rawPhenomenaControl = document.querySelector('#rawPhenomenaControl');
 const rawPhenomena = document.querySelector('#rawPhenomena');
 const areaSmoothControl = document.querySelector('#areaSmoothControl');
 const areaSmooth = document.querySelector('#areaSmooth');
-const dotsDiagnosticControls = document.querySelector('#dotsDiagnosticControls');
-const dotsDiagnostic = document.querySelector('#dotsDiagnostic');
+const dotsStrongControls = document.querySelector('#dotsStrongControls');
 const dotsStrongFull = document.querySelector('#dotsStrongFull');
 const dotsStrongFullOutput = document.querySelector('#dotsStrongFullOutput');
 const lodDiagnostics = document.querySelector('#lodDiagnostics');
@@ -128,7 +127,6 @@ const state = {
   mapReady: false,
   weatherQueued: false,
   renderMode: 'raw',
-  dotsDiagnosticVariant: null,
   dotsStrongFullMmh: DEFAULT_DOTS_STRONG_FULL_MMH
 };
 const weatherLayer = new GeographicDotsLayer();
@@ -394,11 +392,10 @@ function applyRenderMode() {
   weatherLayer.setActive(mode === 'dots');
   squaresLayer.setActive(mode === 'squares');
   scalarLayer.setActive(scalarActive);
-  dotsDiagnosticControls.hidden = mode !== 'dots';
+  dotsStrongControls.hidden = mode !== 'dots';
   if (rawActive) return;
   if (mode === 'dots') {
     weatherLayer.setStrongFullMmh(state.dotsStrongFullMmh, time);
-    weatherLayer.setDiagnosticVariant(state.dotsDiagnosticVariant, rawWeatherField, time);
     weatherLayer.updateWeather(time);
   }
   else if (mode === 'squares') squaresLayer.updateWeather(time);
@@ -413,7 +410,7 @@ function setRenderMode(mode) {
   renderModeSelector.dataset.mode = mode;
   rawPhenomenaControl.hidden = mode !== 'raw';
   areaSmoothControl.hidden = mode !== 'areas';
-  dotsDiagnosticControls.hidden = mode !== 'dots';
+  dotsStrongControls.hidden = mode !== 'dots';
   if (mode !== 'raw') dismissRawTooltip();
   for (const button of renderModeButtons) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
@@ -523,10 +520,6 @@ areaSmooth.addEventListener('change', () => {
 });
 rawPhenomena.addEventListener('change', () => {
   if (state.renderMode === 'raw') rawLayer.setPhenomena(rawPhenomena.checked);
-});
-dotsDiagnostic.addEventListener('change', () => {
-  state.dotsDiagnosticVariant = dotsDiagnostic.value === 'production' ? null : dotsDiagnostic.value;
-  if (state.renderMode === 'dots') weatherLayer.setDiagnosticVariant(state.dotsDiagnosticVariant, rawWeatherField, state.time / LOOP_SECONDS);
 });
 dotsStrongFull.addEventListener('input', () => {
   state.dotsStrongFullMmh = Number(dotsStrongFull.value);

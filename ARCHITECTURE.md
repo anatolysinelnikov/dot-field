@@ -154,6 +154,9 @@ advance with the existing playback loop.
 The discrete topology is a globally anchored dyadic grid in normalized
 Web-Mercator coordinates. A sample identity is its integer L15 canonical
 coordinate pair, so inherited vertices retain identity through LOD refinement.
+`selectMercatorGridSamples()` is the canonical spatial authority: every
+selected sample's `mercator` coordinate is the world-space position used by
+discrete representations.
 The camera never reseats the grid. Displayed Dots/Squares levels are L10–L14;
 L15 remains the canonical identity resolution but is not materialized as Dots
 or Squares runtime topology. Logical sampling zoom is
@@ -163,13 +166,19 @@ and rotating do not alter displayed weather density.
 ## Dots — `src/engine/geographic-dots-layer.js`
 
 Dots retain the existing symbol-pyramid implementation. `GeographicSymbolPyramid`
-caches L10–L14 topology, direct field points, static anchors, dyadic ownership,
-and deterministic parent mappings. L14 is the single direct/reference level;
+caches L10–L14 topology, direct field points, canonical anchors, dyadic
+ownership, and deterministic parent mappings. Its `canonicalAnchors` array is
+copied directly from each level's `sample.mercator` coordinate. Dots and
+Squares therefore use identical canonical Mercator centers for every displayed
+LOD; coarse LOD processing aggregates weather/glyph data only and never
+averages, shifts, or derives spatial coordinates from child positions or
+weather values. L14 is the single direct/reference level;
 L13, L12, L11, and L10 are each deterministically reduced from their immediate
 finer level. Rain and strong-rain areas are conserved independently; hail wins
 hazard priority during reduction. Parent anchors remain weather-independent and
 LOD transitions use the same dyadic parent/child topology for every adjacent
-displayed level, including L14 ↔ L13.
+displayed level, including L14 ↔ L13; during those transitions, each child
+morphs to or from its canonical coarse-parent position.
 
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD

@@ -295,7 +295,7 @@ button:active { transform: translateY(1px); }
 
 .area-smooth[hidden] { display: none; }
 
-.dots-diagnostic-controls {
+.dots-strong-controls {
   position: absolute;
   left: calc(100% + 8px);
   top: 0;
@@ -305,9 +305,9 @@ button:active { transform: translateY(1px); }
   gap: 8px;
 }
 
-.dots-diagnostic-controls[hidden] { display: none; }
+.dots-strong-controls[hidden] { display: none; }
 
-.dots-diagnostic {
+.dots-strong-control {
   position: static;
   height: 100%;
   display: flex;
@@ -322,19 +322,6 @@ button:active { transform: translateY(1px); }
   color: #c7d0df;
   font-size: 12px;
   white-space: nowrap;
-}
-
-.dots-diagnostic[hidden] { display: none; }
-
-.dots-diagnostic select {
-  min-width: 180px;
-  padding: 3px 4px;
-  border: 1px solid rgba(176, 193, 220, .18);
-  border-radius: 5px;
-  background: #151b28;
-  color: #e5ebf5;
-  font: inherit;
-  font-size: 12px;
 }
 
 #dotsStrongControl { gap: 8px; }
@@ -380,7 +367,7 @@ input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; backgro
 input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; border-radius: 999px; background: #fff; }
 
 @media (max-width: 900px) {
-  .dots-diagnostic-controls {
+  .dots-strong-controls {
     left: auto;
     right: 0;
     top: auto;
@@ -390,7 +377,7 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
     align-items: flex-end;
   }
 
-  .dots-diagnostic {
+  .dots-strong-control {
     height: 34px;
   }
 
