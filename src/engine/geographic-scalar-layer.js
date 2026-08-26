@@ -139,7 +139,7 @@ export class GeographicScalarLayer {
 
   rebuildTemporal(time) {
     const frame = geographicTemporalFrameAt(time);
-    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    const nextIndex = frame.nextIndex;
     this.temporal = {
       index: frame.index,
       nextIndex,
@@ -240,7 +240,7 @@ export class GeographicScalarLayer {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
         const reusable = this.temporal.state0;
         this.temporal.index = frame.index;
-        this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+        this.temporal.nextIndex = frame.nextIndex;
         this.temporal.state0 = this.temporal.state1;
         this.temporal.state1 = this.lattice.evaluate(this.temporal.nextIndex / TEMPORAL_FRAME_COUNT, reusable);
         this.preparePresentation(true);

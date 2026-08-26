@@ -46,7 +46,8 @@ const initialMinZoom =
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 
-const rawWeatherField = await loadActiveWeatherField();
+const activeWeatherField = await loadActiveWeatherField();
+const rawWeatherField = activeWeatherField.rawFrame;
 
 async function loadMapTilerKey() {
   try {
@@ -493,7 +494,14 @@ function updateTimelineFromPointer(clientX) {
 }
 
 let scrubbingPointerId = null;
-playPause.addEventListener('click', () => setPlaying(!state.playing));
+playPause.addEventListener('click', () => {
+  if (!state.playing && state.time >= LOOP_SECONDS) {
+    state.time = 0;
+    timeSlider.value = '0';
+    queueWeatherUpdate();
+  }
+  setPlaying(!state.playing);
+});
 zoomIn.addEventListener('click', () => map.zoomIn());
 zoomOut.addEventListener('click', () => map.zoomOut());
 function resetMapView() {
@@ -619,7 +627,8 @@ function frame(now) {
   const delta = Math.min((now - state.lastFrame) / 1000, 0.1);
   state.lastFrame = now;
   if (state.playing && !state.scrubbing) {
-    state.time = (state.time + delta) % LOOP_SECONDS;
+    state.time = Math.min(state.time + delta, LOOP_SECONDS);
+    if (state.time === LOOP_SECONDS) setPlaying(false);
   }
   // A paused static layer has no temporal uniform to advance. Leaving its
   // repaint scheduling to MapLibre prevents the application RAF from keeping

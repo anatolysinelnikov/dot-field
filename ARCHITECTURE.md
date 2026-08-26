@@ -3,13 +3,13 @@
 ## Document status
 
 - Repository: `anatolysinelnikov/dot-field`
-- Architecture: `real-data-2026-08-25-1630MSK` geographic weather representations
+- Architecture: `real-data-2026-08-26-2200` geographic weather sequence playback
 - This document is maintained context, not implementation authority. The current code wins when they differ.
 
 ## Project model
 
 This is a browser-native geographic weather prototype. It uses MapLibre GL JS in
-Globe projection, a validated static real-data CSV snapshot, a globally
+Globe projection, a validated compact real-data precipitation sequence, a globally
 anchored Mercator sampling topology, and projection-aware MapLibre custom WebGL
 layers. The active modes are **RAW**, **Dots**, **Squares**, **Blur**, and
 **Areas**; RAW is the initial mode and Dots remains available as a selectable mode.
@@ -23,7 +23,7 @@ The weather channels are always independent data channels:
 The active renderer split is intentional:
 
 ```text
-real geographic field snapshot
+real geographic weather sequence
         |
         +-- direct source-grid cells ------------------------------> RAW
         |
@@ -40,16 +40,15 @@ provider format -> validation -> temporal/spatial interpolation
 -> geographic sampling/reconstruction -> rendering
 ```
 
-`real-weather.js` owns CSV parsing, validation, physical typed-array storage,
-and the representation-independent bilinear reconstruction from geographic
-source nodes. The snapshot is loaded once before map initialization; renderers
-receive physical `rainMmh` values plus normalized storm and hail channels. Rain,
-storm, and hail are sampled independently from the four surrounding source-node
-values, with ordinary bilinear weights. Rain remains physical `mm/h` through
-interpolation, sampling, LOD reduction, and scalar-lattice reconstruction;
-renderer presentation mappings may use the named 50 mm/h visual anchor but do
-not clamp the data field. The RAW midpoint-cell diagnostic does not constrain
-this reconstruction. The legacy synthetic
+`real-weather.js` owns CSV and compact-sequence validation, physical typed-array
+storage, and representation-independent geographic reconstruction. The active
+sequence samples physical `rainMmh` bilinearly from four geographic source nodes
+and linearly between its adjacent source frames; storm and hail are independent
+channels but are zero for this rain-only sequence. Rain remains physical `mm/h`
+through interpolation, sampling, LOD reduction, and scalar-lattice
+reconstruction; renderer presentation mappings may use the named 50 mm/h visual
+anchor but do not clamp the data field. The RAW midpoint-cell diagnostic does
+not constrain this reconstruction. The legacy synthetic
 `field.js` remains independent of MapLibre, WebGL, and UI but is not on the
 active data path.
 
@@ -91,13 +90,17 @@ runtime `config.local.json` shape. The ignored local file is supplied by the
 developer; the Pages workflow writes the deployment key into the staged site
 artifact only, without adding it to the repository.
 
-Animation remains an 18-second deterministic loop. The application creates
-adjacent 100 ms keyframes only for the active representation; switching a mode
+The finite source forecast traverses from 22:00 to 01:00 in the existing
+18-second UI duration: normalized time 0 samples frame 0 and normalized time 1
+samples frame 18. Playback stops at the endpoint rather than creating a
+final-to-first seam; pressing Play at the endpoint explicitly restarts it from
+the beginning. The application creates adjacent 100 ms keyframes only for the
+active representation, including an exact terminal keyframe; switching a mode
 lazily synchronizes that representation to the exact global time before its
 next repaint, while preserving time, play/pause state, camera state, and
 logical weather zoom. Inactive layers retain lightweight topology/LOD state but
 do not evaluate weather, rebuild instance data, or upload temporal GPU data.
-RAW is static and never participates in temporal evaluation.
+RAW is intentionally static and never participates in temporal evaluation.
 Dots and Squares read out their active LOD/sample count. Blur and Areas report
 their fixed L14 reconstruction lattice instead of camera LOD.
 
@@ -108,40 +111,38 @@ application RAF so its progress still completes while paused.
 
 ## Real-data geographic adapter — `src/engine/real-weather.js`, `src/engine/geography.js`
 
-The active provider is `data/mrl_z3_t+40min_376x239.csv`, containing 89,864 rows
-on a regular 376 × 239 longitude/latitude grid. `real-weather.js` validates the
-header, dimensions, complete grid, regular axes (within rounded-coordinate
-tolerance), nonnegative mm/h values, and supported thunderstorm/hail codes. It
-stores raw `mmh` and exposes the same physical values as `rainMmh`; storm and
-hail remain normalized phenomenon channels. All three channels are bilinearly
-reconstructed between geographic source nodes, with no 50 mm/h rain clamp. The
-provider also exposes value-free prepared sampling geometry for batches of
-stable geographic coordinates: a `Uint32Array` source-cell index plus two
-`Float64Array` interpolation-fraction arrays (20 bytes/sample) are prepared
-once per source-grid geometry and reused by later temporal frames. Weather
-values are never stored in this geometry. The normal single-point sampler
-remains the semantic reference path. The
-renderer mappings use visual anchors at 0.05, 0.10, 0.30, 1.00, 2.50, 10.0,
-and 50.0 mm/h; 50 mm/h is presentation scale only. Thunderstorm codes 0/10/11/12 map to
-0/0.2660123/0.4818750/0.6977377; hail codes 0/16/17/18 map to
-0/0.2776807/0.4897500/0.7018193.
+The active provider is the ignored local compact sequence at
+`data/generated/202608262200/metadata.json` plus `rain.f32`: 19 frames on one
+fixed 259 × 93 regular geographic grid, stored as little-endian Float32 in
+`[time][latitude][longitude]` order. Metadata validation requires the supported
+schema, dimensions, timestamps, binary layout/counts/byte count, positive axis
+spacing, mm/h normalized units, rain availability, and absent storm/hail
+channels; the fetched binary byte length must match exactly. Geographic axes
+are constructed deterministically from metadata. `RealWeatherSequence` keeps
+the existing bilinear spatial sampler and presents value-free temporal frames
+that linearly blend source frames; prepared geometry remains a `Uint32Array`
+source-cell index plus two `Float64Array` interpolation fractions (20
+bytes/sample), reusable across all 19 frames because it stores no weather
+values. The single-point sampler remains the semantic reference path.
 
 `geography.js` is the renderer-facing adapter. It loads and activates the
-snapshot once, keeps the existing time-frame API (all times sample the same
-static field), and converts the existing shared point interface to geographic
-longitude/latitude. `WEATHER_SUPPORT` is a stable rectangle around the source
-nodes with any nonzero channel, padded by one source-grid cell on each side:
-`39.93113..50.12886` longitude and `41.57035..45.12740` latitude. The complete
-CSV envelope remains available inside the provider and is not altered by this
-topology optimization.
+sequence before map initialization and converts the shared point interface to
+geographic longitude/latitude. It falls back to the checked-in
+`data/mrl_z3_t+40min_376x239.csv` snapshot only when the local sequence assets
+are unavailable (such as HTTP 404), with one concise warning; malformed
+metadata, inconsistent values/geometry, or an incorrect binary length fail
+visibly instead. `WEATHER_SUPPORT` remains the existing stable rectangle and is
+not expanded. The availability GeoJSON is diagnostic observation coverage only,
+not a forecast-rain mask.
 
 ## RAW source-grid diagnostic — `src/engine/raw-weather-layer.js`
 
 The source-of-truth weather data is defined at geographic source nodes. RAW is a
-separate static diagnostic representation of the original 376 × 239 provider
-grid: it interprets each source-node value as a piecewise-constant midpoint cell
+separate static diagnostic representation of the first sequence source frame on
+its 259 × 93 provider grid: it interprets each source-node value as a
+piecewise-constant midpoint cell
 (half-spacing at the outer edges), draws raw `mmh > 0` cells as solid opaque
-blue, and draws raw thunderstorm/hail codes as solid magenta/yellow inset
+blue. The compact sequence has no storm or hail, so RAW has no phenomenon
 markers. These RAW cell boundaries are diagnostic, not assumed meteorological
 boundaries. Values between source nodes use the shared bilinear reconstruction;
 RAW does not constrain Dots, Squares, Blur, or Areas. RAW never calls the
@@ -154,8 +155,8 @@ RAW interaction is application-owned: pointer coordinates select the source cell
 directly from the loaded longitude/latitude axes, including zero-valued cells.
 Hover shows a diagnostic tooltip and click/tap pins it; Escape, outside clicks,
 or clicking the selected cell again dismiss it. Tooltip values are raw source
-coordinates, three-decimal mm/h, and integer phenomenon codes. RAW does not
-advance with the existing playback loop.
+coordinates, three-decimal mm/h, and integer phenomenon codes. RAW currently
+does not advance with playback: it intentionally shows only source frame 0.
 
 ## Shared geographic Mercator topology — `src/engine/geographic-lod.js`
 
@@ -231,9 +232,9 @@ relative error bounds. Contribution weights remain Float64 because their
 topology is shared and their smaller memory cost does not justify a precision
 tradeoff.
 
-Provider categorical storm/hail codes remain source metadata and are not
-inferred from interpolated severities. RAW remains unchanged. Dots and Squares
-map these same summaries into renderer-owned compact presentation buffers;
+Storm and hail are zero throughout the active compact sequence and are never
+inferred from precipitation. Dots and Squares map these same summaries into
+renderer-owned compact presentation buffers;
 neither renderer recursively aggregates radii, colors, opacity, or hazard
 glyph values. L14 and L15 sample the reconstructed field directly and
 independently; neither interpolates a lower discrete summary.

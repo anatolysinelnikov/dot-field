@@ -1,4 +1,8 @@
-import { loadRealWeatherSnapshot } from './real-weather.js';
+import {
+  loadRealWeatherSequence,
+  loadRealWeatherSnapshot,
+  RealWeatherSequenceAssetsUnavailableError
+} from './real-weather.js';
 
 export const WEATHER_REGION = Object.freeze({
   center: [45.0300, 43.3500],
@@ -24,13 +28,12 @@ export function geographicToSynthetic(longitude, latitude) {
 
 export function geographicIntensityAt(longitude, latitude, time) {
   if (!activeWeatherField) throw new Error('Real weather snapshot has not been loaded.');
-  return activeWeatherField.sample(longitude, latitude);
+  return activeWeatherField.prepareFrame(time).sample(longitude, latitude);
 }
 
 export function prepareGeographicFieldFrame(time) {
   if (!activeWeatherField) throw new Error('Real weather snapshot has not been loaded.');
-  // The snapshot is static; retain the time argument for the existing API.
-  return activeWeatherField;
+  return activeWeatherField.prepareFrame(time);
 }
 
 export function geographicPreparedIntensityAt(frame, point, output) {
@@ -60,7 +63,17 @@ export function setActiveWeatherField(field) {
 }
 
 export async function loadActiveWeatherField() {
-  const field = await loadRealWeatherSnapshot('./data/mrl_z3_t+40min_376x239.csv');
+  let field;
+  try {
+    field = await loadRealWeatherSequence(
+      './data/generated/202608262200/metadata.json',
+      './data/generated/202608262200/rain.f32'
+    );
+  } catch (error) {
+    if (!(error instanceof RealWeatherSequenceAssetsUnavailableError)) throw error;
+    console.warn('Real weather sequence assets are unavailable; using the checked-in CSV snapshot.');
+    field = await loadRealWeatherSnapshot('./data/mrl_z3_t+40min_376x239.csv');
+  }
   setActiveWeatherField(field);
   return field;
 }

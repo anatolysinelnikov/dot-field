@@ -5,9 +5,19 @@ const HAIL_LEVELS = Object.freeze({ 0: 0, 16: 0.2776807, 17: 0.4897500, 18: 0.70
 const EXPECTED_COLUMNS = ['lon', 'lat', 'mmh', 'thunderstorm', 'hail'];
 const REGULAR_SPACING_TOLERANCE = 2e-5;
 const OUTSIDE_SOURCE_INDEX = 0xffffffff;
+const SEQUENCE_SCHEMA_VERSION = 'dot-field-netcdf-sequence-v1';
+const SEQUENCE_WIDTH = 259;
+const SEQUENCE_HEIGHT = 93;
+const SEQUENCE_FRAME_COUNT = 19;
+const SEQUENCE_DIMENSIONS = Object.freeze(['time', 'latitude', 'longitude']);
+const SEQUENCE_BINARY_FILENAME = 'rain.f32';
 
 function fail(message) {
   throw new Error(`Real weather CSV validation failed: ${message}`);
+}
+
+function failSequence(message) {
+  throw new Error(`Real weather sequence validation failed: ${message}`);
 }
 
 function parseNumber(value, row, name) {
@@ -58,6 +68,7 @@ export class RealWeatherField {
     });
     this.longitudeCellBounds = makeCellBounds(longitudes, this.longitudeSpacing);
     this.latitudeCellBounds = makeCellBounds(latitudes, this.latitudeSpacing);
+    this.rawFrame = this;
   }
 
   index(longitudeIndex, latitudeIndex) {
@@ -192,6 +203,132 @@ export class RealWeatherField {
     output.hail = interpolate(this.hail);
     return output;
   }
+
+  prepareFrame() {
+    return this;
+  }
+}
+
+export class RealWeatherSequenceFrame {
+  constructor(sequence, frame0, frame1, progress) {
+    this.sequence = sequence;
+    this.frame0 = frame0;
+    this.frame1 = frame1;
+    this.progress = progress;
+  }
+
+  isSamplingGeometryCompatible(geometry) {
+    return this.sequence.isSamplingGeometryCompatible(geometry);
+  }
+
+  prepareSamplingGeometry(longitudes, latitudes, reusable = null) {
+    return this.sequence.prepareSamplingGeometry(longitudes, latitudes, reusable);
+  }
+
+  samplePrepared(geometry, index, output = {}) {
+    return this.sequence.samplePreparedFrame(this, geometry, index, output);
+  }
+
+  sample(longitude, latitude, output = {}) {
+    return this.sequence.sampleFrame(this, longitude, latitude, output);
+  }
+}
+
+export class RealWeatherSequence extends RealWeatherField {
+  constructor({ longitudes, latitudes, rainFramesMmh, frameCount, longitudeSpacing, latitudeSpacing, timestamps }) {
+    const frameSize = longitudes.length * latitudes.length;
+    const emptyCodes = new Uint8Array(frameSize);
+    const emptyChannel = new Float32Array(frameSize);
+    super({
+      longitudes,
+      latitudes,
+      mmh: rainFramesMmh.subarray(0, frameSize),
+      thunderstormCode: emptyCodes,
+      hailCode: emptyCodes,
+      rainMmh: rainFramesMmh.subarray(0, frameSize),
+      storm: emptyChannel,
+      hail: emptyChannel,
+      sourceRowCount: frameSize,
+      longitudeSpacing,
+      latitudeSpacing
+    });
+    this.rainFramesMmh = rainFramesMmh;
+    this.frameCount = frameCount;
+    this.frameSize = frameSize;
+    this.timestamps = Object.freeze([...timestamps]);
+    // RAW is intentionally a static diagnostic of the initial source frame.
+    this.rawFrame = new RealWeatherField({
+      longitudes,
+      latitudes,
+      mmh: this.rainFramesMmh.subarray(0, frameSize),
+      thunderstormCode: emptyCodes,
+      hailCode: emptyCodes,
+      rainMmh: this.rainFramesMmh.subarray(0, frameSize),
+      storm: emptyChannel,
+      hail: emptyChannel,
+      sourceRowCount: frameSize,
+      longitudeSpacing,
+      latitudeSpacing
+    });
+  }
+
+  prepareFrame(time) {
+    const normalizedTime = clamp(Number.isFinite(time) ? time : 0, 0, 1);
+    const sourcePosition = normalizedTime * (this.frameCount - 1);
+    const frame0 = Math.floor(sourcePosition);
+    const frame1 = Math.min(frame0 + 1, this.frameCount - 1);
+    return new RealWeatherSequenceFrame(this, frame0, frame1, sourcePosition - frame0);
+  }
+
+  interpolateRain(frame, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction) {
+    const offset = frame * this.frameSize;
+    return interpolatePrepared(
+      this.rainFramesMmh,
+      offset + baseIndex,
+      offset + x1y0,
+      offset + x0y1,
+      offset + x1y1,
+      longitudeFraction,
+      latitudeFraction,
+      0,
+      Number.POSITIVE_INFINITY
+    );
+  }
+
+  samplePreparedFrame(frame, geometry, index, output = {}) {
+    output.rainMmh = 0;
+    output.storm = 0;
+    output.hail = 0;
+    const baseIndex = geometry.baseIndex[index];
+    if (baseIndex === OUTSIDE_SOURCE_INDEX) return output;
+    const x1y0 = baseIndex + 1;
+    const x0y1 = baseIndex + geometry.sourceWidth;
+    const x1y1 = x0y1 + 1;
+    const longitudeFraction = geometry.longitudeFraction[index];
+    const latitudeFraction = geometry.latitudeFraction[index];
+    const rain0 = this.interpolateRain(frame.frame0, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
+    const rain1 = this.interpolateRain(frame.frame1, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
+    output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
+    return output;
+  }
+
+  sampleFrame(frame, longitude, latitude, output = {}) {
+    output.rainMmh = 0;
+    output.storm = 0;
+    output.hail = 0;
+    if (longitude < this.bounds.west || longitude > this.bounds.east
+      || latitude < this.bounds.south || latitude > this.bounds.north) return output;
+    const x = this.locate(this.longitudes, longitude);
+    const y = this.locate(this.latitudes, latitude);
+    const baseIndex = this.index(x.index, y.index);
+    const x1y0 = baseIndex + 1;
+    const x0y1 = baseIndex + this.longitudes.length;
+    const x1y1 = x0y1 + 1;
+    const rain0 = this.interpolateRain(frame.frame0, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
+    const rain1 = this.interpolateRain(frame.frame1, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
+    output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
+    return output;
+  }
 }
 
 function makeCellBounds(axis, spacing) {
@@ -262,4 +399,134 @@ export async function loadRealWeatherSnapshot(url) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Unable to load real weather snapshot (${response.status}).`);
   return parseRealWeatherCsv(await response.text());
+}
+
+export class RealWeatherSequenceAssetsUnavailableError extends Error {
+  constructor(url, status) {
+    super(`Real weather sequence assets are unavailable (${status}) at ${url}.`);
+    this.name = 'RealWeatherSequenceAssetsUnavailableError';
+  }
+}
+
+function objectAt(value, name) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) failSequence(`${name} must be an object.`);
+  return value;
+}
+
+function sequenceNumber(value, name) {
+  if (!Number.isFinite(value)) failSequence(`${name} must be finite.`);
+  return value;
+}
+
+function sequenceInteger(value, name) {
+  if (!Number.isInteger(value)) failSequence(`${name} must be an integer.`);
+  return value;
+}
+
+function sequenceString(value, name) {
+  if (typeof value !== 'string' || !value) failSequence(`${name} must be a non-empty string.`);
+  return value;
+}
+
+function assertSequenceEqual(actual, expected, name) {
+  if (actual !== expected) failSequence(`${name} must be ${JSON.stringify(expected)}.`);
+}
+
+function validateSequenceMetadata(metadata) {
+  const root = objectAt(metadata, 'metadata');
+  assertSequenceEqual(root.schema_version, SEQUENCE_SCHEMA_VERSION, 'schema_version');
+  const binary = objectAt(root.binary, 'binary');
+  const grid = objectAt(root.spatial_grid, 'spatial_grid');
+  const time = objectAt(root.time, 'time');
+  const channels = objectAt(root.channels, 'channels');
+  const rain = objectAt(root.rain, 'rain');
+  const source = objectAt(root.source, 'source');
+
+  const width = sequenceInteger(grid.width, 'spatial_grid.width');
+  const height = sequenceInteger(grid.height, 'spatial_grid.height');
+  const frameCount = sequenceInteger(time.count, 'time.count');
+  assertSequenceEqual(width, SEQUENCE_WIDTH, 'spatial_grid.width');
+  assertSequenceEqual(height, SEQUENCE_HEIGHT, 'spatial_grid.height');
+  assertSequenceEqual(frameCount, SEQUENCE_FRAME_COUNT, 'time.count');
+  if (!Array.isArray(time.timestamps) || time.timestamps.length !== frameCount) failSequence('time.timestamps must contain one timestamp per frame.');
+  for (const [index, timestamp] of time.timestamps.entries()) {
+    sequenceString(timestamp, `time.timestamps[${index}]`);
+    if (!Number.isFinite(Date.parse(timestamp))) failSequence(`time.timestamps[${index}] is invalid.`);
+  }
+
+  assertSequenceEqual(binary.dtype, 'Float32', 'binary.dtype');
+  assertSequenceEqual(binary.byte_order, 'little-endian', 'binary.byte_order');
+  assertSequenceEqual(binary.filename, SEQUENCE_BINARY_FILENAME, 'binary.filename');
+  if (!Array.isArray(binary.logical_dimensions) || binary.logical_dimensions.length !== SEQUENCE_DIMENSIONS.length
+    || binary.logical_dimensions.some((dimension, index) => dimension !== SEQUENCE_DIMENSIONS[index])) {
+    failSequence(`binary.logical_dimensions must be ${SEQUENCE_DIMENSIONS.join(', ')}.`);
+  }
+  if (!Array.isArray(binary.shape) || binary.shape.length !== 3) failSequence('binary.shape must contain time, latitude, and longitude lengths.');
+  const expectedShape = [frameCount, height, width];
+  for (let index = 0; index < expectedShape.length; index++) {
+    if (sequenceInteger(binary.shape[index], `binary.shape[${index}]`) !== expectedShape[index]) failSequence('binary.shape does not match time and spatial dimensions.');
+  }
+  const expectedElementCount = frameCount * height * width;
+  const expectedByteCount = expectedElementCount * Float32Array.BYTES_PER_ELEMENT;
+  if (sequenceInteger(binary.element_count, 'binary.element_count') !== expectedElementCount) failSequence('binary.element_count does not match the declared shape.');
+  if (sequenceInteger(binary.byte_count, 'binary.byte_count') !== expectedByteCount) failSequence('binary.byte_count does not match the declared shape.');
+
+  const longitudeStart = sequenceNumber(grid.longitude_start, 'spatial_grid.longitude_start');
+  const latitudeStart = sequenceNumber(grid.latitude_start, 'spatial_grid.latitude_start');
+  const longitudeSpacing = sequenceNumber(grid.longitude_spacing, 'spatial_grid.longitude_spacing');
+  const latitudeSpacing = sequenceNumber(grid.latitude_spacing, 'spatial_grid.latitude_spacing');
+  if (!(longitudeSpacing > 0) || !(latitudeSpacing > 0)) failSequence('spatial grid spacing must be positive.');
+  assertSequenceEqual(grid.longitude_order, 'west_to_east', 'spatial_grid.longitude_order');
+  assertSequenceEqual(grid.latitude_order, 'south_to_north', 'spatial_grid.latitude_order');
+  assertSequenceEqual(source.normalized_units, 'mm/h', 'source.normalized_units');
+  if (channels.rain !== true || rain.available !== true) failSequence('rain must be available.');
+  if (channels.storm !== false || channels.hail !== false) failSequence('storm and hail must be unavailable.');
+
+  return { width, height, frameCount, expectedElementCount, expectedByteCount, longitudeStart, latitudeStart, longitudeSpacing, latitudeSpacing, timestamps: time.timestamps };
+}
+
+function axesFromSequenceMetadata({ width, height, longitudeStart, latitudeStart, longitudeSpacing, latitudeSpacing }) {
+  const longitudes = new Float64Array(width);
+  const latitudes = new Float64Array(height);
+  for (let index = 0; index < width; index++) longitudes[index] = longitudeStart + index * longitudeSpacing;
+  for (let index = 0; index < height; index++) latitudes[index] = latitudeStart + index * latitudeSpacing;
+  return { longitudes, latitudes };
+}
+
+async function fetchSequenceAsset(url) {
+  const response = await fetch(url);
+  if (response.status === 404 || response.status === 410) throw new RealWeatherSequenceAssetsUnavailableError(url, response.status);
+  if (!response.ok) throw new Error(`Unable to load real weather sequence asset ${url} (${response.status}).`);
+  return response;
+}
+
+export async function loadRealWeatherSequence(metadataUrl, binaryUrl) {
+  const metadataResponse = await fetchSequenceAsset(metadataUrl);
+  let metadata;
+  try {
+    metadata = await metadataResponse.json();
+  } catch {
+    failSequence('metadata is not valid JSON.');
+  }
+  const validated = validateSequenceMetadata(metadata);
+  const binaryResponse = await fetchSequenceAsset(binaryUrl);
+  const binaryBuffer = await binaryResponse.arrayBuffer();
+  if (binaryBuffer.byteLength !== validated.expectedByteCount) {
+    failSequence(`rain.f32 byte length is ${binaryBuffer.byteLength}, expected ${validated.expectedByteCount}.`);
+  }
+  const rainFramesMmh = new Float32Array(binaryBuffer);
+  if (rainFramesMmh.length !== validated.expectedElementCount) failSequence('rain.f32 element count does not match metadata.');
+  for (let index = 0; index < rainFramesMmh.length; index++) {
+    if (!Number.isFinite(rainFramesMmh[index]) || rainFramesMmh[index] < 0) failSequence(`rain.f32 has an invalid value at element ${index}.`);
+  }
+  const { longitudes, latitudes } = axesFromSequenceMetadata(validated);
+  return new RealWeatherSequence({
+    longitudes,
+    latitudes,
+    rainFramesMmh,
+    frameCount: validated.frameCount,
+    longitudeSpacing: validated.longitudeSpacing,
+    latitudeSpacing: validated.latitudeSpacing,
+    timestamps: validated.timestamps
+  });
 }

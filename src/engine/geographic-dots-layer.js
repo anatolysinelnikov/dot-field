@@ -339,7 +339,7 @@ export class GeographicDotsLayer {
 
   rebuildTemporal(time) {
     const frame = geographicTemporalFrameAt(time);
-    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    const nextIndex = frame.nextIndex;
     const levels = this.activeLevels();
     this.temporal = {
       index: frame.index,
@@ -399,7 +399,7 @@ export class GeographicDotsLayer {
       return;
     }
     const frame = geographicTemporalFrameAt(time);
-    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    const nextIndex = frame.nextIndex;
     if (!this.temporal || this.temporal.index !== frame.index || this.temporal.nextIndex !== nextIndex) {
       this.rebuildTemporal(time);
       return;
@@ -420,7 +420,7 @@ export class GeographicDotsLayer {
     if (!this.temporal || frame.index !== this.temporal.index) {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
         this.temporal.index = frame.index;
-        this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+        this.temporal.nextIndex = frame.nextIndex;
         for (const [level, temporalState] of this.temporal.levels) {
           const reusableState = temporalState.frames0;
           temporalState.frames0 = temporalState.frames1;

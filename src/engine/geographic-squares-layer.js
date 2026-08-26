@@ -136,7 +136,7 @@ export class GeographicSquaresLayer {
 
   rebuildTemporal(time) {
     const frame = geographicTemporalFrameAt(time);
-    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    const nextIndex = frame.nextIndex;
     const levels = this.activeLevels();
     this.temporal = {
       index: frame.index, nextIndex,
@@ -197,7 +197,7 @@ export class GeographicSquaresLayer {
       return;
     }
     const frame = geographicTemporalFrameAt(time);
-    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    const nextIndex = frame.nextIndex;
     if (!this.temporal || this.temporal.index !== frame.index || this.temporal.nextIndex !== nextIndex) {
       this.rebuildTemporal(time);
       return;
@@ -252,7 +252,7 @@ export class GeographicSquaresLayer {
     const frame = geographicTemporalFrameAt(time);
     if (!this.temporal || frame.index !== this.temporal.index) {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
-        this.temporal.index = frame.index; this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+        this.temporal.index = frame.index; this.temporal.nextIndex = frame.nextIndex;
         for (const [level, temporalState] of this.temporal.levels) {
           const reusable = temporalState.frames0;
           temporalState.frames0 = temporalState.frames1;
