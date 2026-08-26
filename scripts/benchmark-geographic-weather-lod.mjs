@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import { performance } from 'node:perf_hooks';
-import { setActiveWeatherField } from '../src/engine/geography.js';
+import { prepareGeographicFieldFrame, setActiveWeatherField } from '../src/engine/geography.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
 import { selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
-import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
+import { evaluateDirectWeatherSummary, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
 
@@ -11,6 +11,50 @@ const FRAME_TIME = 0.347;
 const TRANSITIONS = [[13, 14], [14, 15]];
 const weather = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
 setActiveWeatherField(weather);
+
+function median(values) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function benchmarkDirectLevel(level) {
+  const pyramid = new GeographicWeatherPyramid();
+  const levelData = pyramid.levels.get(level);
+  const frame = prepareGeographicFieldFrame(0.347);
+  const started = performance.now();
+  const geometry = pyramid.prepareSamplingGeometry(level, frame);
+  const stencilPreparationMs = performance.now() - started;
+  const stencilBytes = frame.samplingGeometryBytes(geometry);
+  let normalSummary = evaluateDirectWeatherSummary(levelData, frame, null, Float64Array);
+  let preparedSummary = evaluateDirectWeatherSummary(levelData, frame, null, Float64Array, geometry);
+  const normalTimes = [];
+  const preparedTimes = [];
+  for (let run = 0; run < 3; run++) {
+    let time = performance.now();
+    normalSummary = evaluateDirectWeatherSummary(levelData, frame, normalSummary, Float64Array);
+    normalTimes.push(performance.now() - time);
+    time = performance.now();
+    preparedSummary = evaluateDirectWeatherSummary(levelData, frame, preparedSummary, Float64Array, geometry);
+    preparedTimes.push(performance.now() - time);
+  }
+  return {
+    level,
+    samples: levelData.samples.length,
+    stencilPreparationMs,
+    stencilBytes,
+    normalMs: median(normalTimes),
+    preparedMs: median(preparedTimes),
+    speedup: median(normalTimes) / median(preparedTimes),
+    normalSummary,
+    preparedSummary
+  };
+}
+
+console.log('Direct physical sampling benchmark (median of 3 warmed runs; Float64 summaries)');
+for (const level of [13, 14, 15]) {
+  const result = benchmarkDirectLevel(level);
+  console.log(`L${level}: samples=${result.samples} normal=${result.normalMs.toFixed(3)}ms prepared=${result.preparedMs.toFixed(3)}ms speedup=${result.speedup.toFixed(2)}x stencilPrep=${result.stencilPreparationMs.toFixed(3)}ms stencilBytes=${result.stencilBytes}`);
+}
 
 function metricLayer(Layer, fromLevel, toLevel) {
   const pyramid = new GeographicWeatherPyramid();
@@ -22,6 +66,7 @@ function metricLayer(Layer, fromLevel, toLevel) {
     evaluations: 0,
     physicalSamples: 0,
     physicalMs: 0,
+    stencilPreparationMs: 0,
     keyframes: 0,
     keyframeMs: 0,
     mappedSamples: 0,
@@ -39,6 +84,14 @@ function metricLayer(Layer, fromLevel, toLevel) {
     metrics.evaluations++;
     metrics.physicalMs += performance.now() - started;
     for (const level of new Set(args[0])) metrics.physicalSamples += pyramid.samplesFor(level).length;
+    return result;
+  };
+  const prepareSamplingGeometry = pyramid.prepareSamplingGeometry.bind(pyramid);
+  pyramid.prepareSamplingGeometry = (level, frame) => {
+    const previous = pyramid.samplingGeometries.get(level);
+    const started = performance.now();
+    const result = prepareSamplingGeometry(level, frame);
+    if (result !== previous) metrics.stencilPreparationMs += performance.now() - started;
     return result;
   };
   const evaluateKeyframe = layer.evaluateKeyframe.bind(layer);
@@ -82,6 +135,7 @@ function metricLayer(Layer, fromLevel, toLevel) {
   metrics.evaluations = 0;
   metrics.physicalSamples = 0;
   metrics.physicalMs = 0;
+  metrics.stencilPreparationMs = 0;
   metrics.keyframes = 0;
   metrics.keyframeMs = 0;
   metrics.mappedSamples = 0;
@@ -106,6 +160,7 @@ function metricLayer(Layer, fromLevel, toLevel) {
   metrics.evaluations = 0;
   metrics.physicalSamples = 0;
   metrics.physicalMs = 0;
+  metrics.stencilPreparationMs = 0;
   metrics.keyframes = 0;
   metrics.keyframeMs = 0;
   metrics.mappedSamples = 0;
@@ -136,8 +191,8 @@ for (const [fromLevel, toLevel] of TRANSITIONS) {
       const start = result.start;
       const completion = result.completion;
       console.log(`${result.representation} L${result.fromLevel}->L${result.toLevel}`);
-      console.log(`  start: elapsed=${start.elapsedMs.toFixed(3)}ms physical=${start.physicalMs.toFixed(3)}ms mapping=${start.mappingMs.toFixed(3)}ms evaluations=${start.evaluations} physicalSamples=${start.physicalSamples} mappedSamples=${start.mappedSamples} keyframes=${start.keyframes} instanceBuilds=${start.instanceBuilds} packingBytes=${start.packingBytes} gpuUploadBytes=${start.gpuUploadBytes}`);
-      console.log(`  completion: elapsed=${completion.elapsedMs.toFixed(3)}ms physical=${completion.physicalMs.toFixed(3)}ms mapping=${completion.mappingMs.toFixed(3)}ms evaluations=${completion.evaluations} physicalSamples=${completion.physicalSamples} mappedSamples=${completion.mappedSamples} keyframes=${completion.keyframes} instanceBuilds=${completion.instanceBuilds} packingBytes=${completion.packingBytes} gpuUploadBytes=${completion.gpuUploadBytes}`);
+      console.log(`  start: elapsed=${start.elapsedMs.toFixed(3)}ms physical=${start.physicalMs.toFixed(3)}ms stencil=${start.stencilPreparationMs.toFixed(3)}ms mapping=${start.mappingMs.toFixed(3)}ms evaluations=${start.evaluations} physicalSamples=${start.physicalSamples} mappedSamples=${start.mappedSamples} keyframes=${start.keyframes} instanceBuilds=${start.instanceBuilds} instanceBytes=${start.instanceBytes} packingBytes=${start.packingBytes} gpuUploadBytes=${start.gpuUploadBytes} gpuAllocationBytes=${start.gpuAllocationBytes}`);
+      console.log(`  completion: elapsed=${completion.elapsedMs.toFixed(3)}ms physical=${completion.physicalMs.toFixed(3)}ms stencil=${completion.stencilPreparationMs.toFixed(3)}ms mapping=${completion.mappingMs.toFixed(3)}ms evaluations=${completion.evaluations} physicalSamples=${completion.physicalSamples} mappedSamples=${completion.mappedSamples} keyframes=${completion.keyframes} instanceBuilds=${completion.instanceBuilds} instanceBytes=${completion.instanceBytes} packingBytes=${completion.packingBytes} gpuUploadBytes=${completion.gpuUploadBytes} gpuAllocationBytes=${completion.gpuAllocationBytes}`);
     }
   }
 }

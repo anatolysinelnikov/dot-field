@@ -37,6 +37,20 @@ export function geographicPreparedIntensityAt(frame, point, output) {
   return frame.sample(point.x, point.y, output);
 }
 
+export function prepareGeographicSamplingGeometry(frame, samples, reusable = null) {
+  const longitudes = new Float64Array(samples.length);
+  const latitudes = new Float64Array(samples.length);
+  for (let index = 0; index < samples.length; index++) {
+    longitudes[index] = samples[index].lngLat[0];
+    latitudes[index] = samples[index].lngLat[1];
+  }
+  return frame.prepareSamplingGeometry(longitudes, latitudes, reusable);
+}
+
+export function geographicPreparedIntensityAtGeometry(frame, geometry, index, output) {
+  return frame.samplePrepared(geometry, index, output);
+}
+
 export function geographicPreparedIntensityAtXY(frame, longitude, latitude, output) {
   return frame.sample(longitude, latitude, output);
 }

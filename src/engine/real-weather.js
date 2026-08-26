@@ -4,6 +4,7 @@ const THUNDERSTORM_LEVELS = Object.freeze({ 0: 0, 10: 0.2660123, 11: 0.4818750, 
 const HAIL_LEVELS = Object.freeze({ 0: 0, 16: 0.2776807, 17: 0.4897500, 18: 0.7018193 });
 const EXPECTED_COLUMNS = ['lon', 'lat', 'mmh', 'thunderstorm', 'hail'];
 const REGULAR_SPACING_TOLERANCE = 2e-5;
+const OUTSIDE_SOURCE_INDEX = 0xffffffff;
 
 function fail(message) {
   throw new Error(`Real weather CSV validation failed: ${message}`);
@@ -30,6 +31,12 @@ function validateRegularAxis(axis, name) {
 function levelValue(levels, code, row, name) {
   if (!Object.hasOwn(levels, code)) fail(`row ${row} has an unsupported ${name} code ${code}.`);
   return levels[code];
+}
+
+function interpolatePrepared(values, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction, minimum = 0, maximum = 1) {
+  const lower = values[baseIndex] + (values[x1y0] - values[baseIndex]) * longitudeFraction;
+  const upper = values[x0y1] + (values[x1y1] - values[x0y1]) * longitudeFraction;
+  return clamp(lower + (upper - lower) * latitudeFraction, minimum, maximum);
 }
 
 export class RealWeatherField {
@@ -99,6 +106,67 @@ export class RealWeatherField {
       else high = middle;
     }
     return { index: low, fraction: (value - axis[low]) / (axis[low + 1] - axis[low]) };
+  }
+
+  isSamplingGeometryCompatible(geometry) {
+    return geometry?.sourceWidth === this.longitudes.length
+      && geometry.sourceHeight === this.latitudes.length
+      && geometry.longitudeStart === this.longitudes[0]
+      && geometry.longitudeSpacing === this.longitudeSpacing
+      && geometry.latitudeStart === this.latitudes[0]
+      && geometry.latitudeSpacing === this.latitudeSpacing;
+  }
+
+  prepareSamplingGeometry(longitudes, latitudes, reusable = null) {
+    if (longitudes.length !== latitudes.length) throw new Error('Sampling geometry longitude/latitude batches must have equal lengths.');
+    const length = longitudes.length;
+    const geometry = reusable?.baseIndex?.length === length ? reusable : {
+      baseIndex: new Uint32Array(length),
+      longitudeFraction: new Float64Array(length),
+      latitudeFraction: new Float64Array(length)
+    };
+    geometry.baseIndex.fill(OUTSIDE_SOURCE_INDEX);
+    for (let index = 0; index < length; index++) {
+      const longitude = longitudes[index];
+      const latitude = latitudes[index];
+      if (longitude < this.bounds.west || longitude > this.bounds.east
+        || latitude < this.bounds.south || latitude > this.bounds.north) continue;
+      const longitudePosition = this.locate(this.longitudes, longitude);
+      const latitudePosition = this.locate(this.latitudes, latitude);
+      geometry.baseIndex[index] = this.index(longitudePosition.index, latitudePosition.index);
+      geometry.longitudeFraction[index] = longitudePosition.fraction;
+      geometry.latitudeFraction[index] = latitudePosition.fraction;
+    }
+    geometry.sourceWidth = this.longitudes.length;
+    geometry.sourceHeight = this.latitudes.length;
+    geometry.longitudeStart = this.longitudes[0];
+    geometry.longitudeSpacing = this.longitudeSpacing;
+    geometry.latitudeStart = this.latitudes[0];
+    geometry.latitudeSpacing = this.latitudeSpacing;
+    return geometry;
+  }
+
+  samplingGeometryBytes(geometry) {
+    return geometry.baseIndex.byteLength
+      + geometry.longitudeFraction.byteLength
+      + geometry.latitudeFraction.byteLength;
+  }
+
+  samplePrepared(geometry, index, output = {}) {
+    output.rainMmh = 0;
+    output.storm = 0;
+    output.hail = 0;
+    const baseIndex = geometry.baseIndex[index];
+    if (baseIndex === OUTSIDE_SOURCE_INDEX) return output;
+    const x1y0 = baseIndex + 1;
+    const x0y1 = baseIndex + geometry.sourceWidth;
+    const x1y1 = x0y1 + 1;
+    const longitudeFraction = geometry.longitudeFraction[index];
+    const latitudeFraction = geometry.latitudeFraction[index];
+    output.rainMmh = interpolatePrepared(this.rainMmh, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction, 0, Number.POSITIVE_INFINITY);
+    output.storm = interpolatePrepared(this.storm, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
+    output.hail = interpolatePrepared(this.hail, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
+    return output;
   }
 
   sample(longitude, latitude, output = {}) {

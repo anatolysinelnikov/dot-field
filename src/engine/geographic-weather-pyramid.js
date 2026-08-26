@@ -1,4 +1,8 @@
-import { geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
+import {
+  geographicPreparedIntensityAtGeometry,
+  geographicPreparedIntensityAtXY,
+  prepareGeographicSamplingGeometry
+} from './geography.js';
 import {
   MAX_DISPLAY_GRID_LEVEL,
   MIN_GRID_LEVEL,
@@ -107,12 +111,12 @@ export function buildCenteredContributions(fineLevel, coarseLevel) {
   };
 }
 
-export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, ArrayType = Float32Array) {
+export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, ArrayType = Float32Array, samplingGeometry = null) {
   const summary = createWeatherSummary(levelData, reusable, ArrayType);
   const value = { rainMmh: 0, storm: 0, hail: 0 };
   for (let index = 0; index < levelData.samples.length; index++) {
-    const point = geographicToSynthetic(...levelData.samples[index].lngLat);
-    geographicPreparedIntensityAt(frame, point, value);
+    if (samplingGeometry) geographicPreparedIntensityAtGeometry(frame, samplingGeometry, index, value);
+    else geographicPreparedIntensityAtXY(frame, levelData.samples[index].lngLat[0], levelData.samples[index].lngLat[1], value);
     const rainMmh = value.rainMmh;
     const storm = value.storm;
     const hail = value.hail;
@@ -172,6 +176,7 @@ export class GeographicWeatherPyramid {
     for (let level = MIN_GRID_LEVEL + 1; level <= WEATHER_REFERENCE_LEVEL; level++) {
       this.contributions.set(level, buildCenteredContributions(this.levels.get(level), this.levels.get(level - 1)));
     }
+    this.samplingGeometries = new Map();
   }
 
   samplesFor(level) {
@@ -190,6 +195,14 @@ export class GeographicWeatherPyramid {
     return (3 + RAIN_COVERAGE_THRESHOLDS_MMH.length + 6) * this.summaryArrayType.BYTES_PER_ELEMENT;
   }
 
+  prepareSamplingGeometry(level, frame) {
+    const existing = this.samplingGeometries.get(level);
+    if (existing && frame.isSamplingGeometryCompatible(existing)) return existing;
+    const geometry = prepareGeographicSamplingGeometry(frame, this.samplesFor(level), existing);
+    this.samplingGeometries.set(level, geometry);
+    return geometry;
+  }
+
   evaluate(requestedLevels, frame, reusableStates = null) {
     if (!requestedLevels.length) return [];
     const minimumRequested = Math.min(...requestedLevels);
@@ -206,7 +219,8 @@ export class GeographicWeatherPyramid {
         this.levels.get(WEATHER_REFERENCE_LEVEL),
         frame,
         reusableStates?.[WEATHER_REFERENCE_LEVEL],
-        this.summaryArrayType
+        this.summaryArrayType,
+        this.prepareSamplingGeometry(WEATHER_REFERENCE_LEVEL, frame)
       );
       summaries[WEATHER_REFERENCE_LEVEL] = summary;
       for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= minimumAggregateLevel; level--) {
@@ -226,7 +240,8 @@ export class GeographicWeatherPyramid {
           this.levels.get(level),
           frame,
           reusableStates?.[level],
-          this.summaryArrayType
+          this.summaryArrayType,
+          this.prepareSamplingGeometry(level, frame)
         );
       }
     }

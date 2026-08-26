@@ -115,6 +115,12 @@ tolerance), nonnegative mm/h values, and supported thunderstorm/hail codes. It
 stores raw `mmh` and exposes the same physical values as `rainMmh`; storm and
 hail remain normalized phenomenon channels. All three channels are bilinearly
 reconstructed between geographic source nodes, with no 50 mm/h rain clamp. The
+provider also exposes value-free prepared sampling geometry for batches of
+stable geographic coordinates: a `Uint32Array` source-cell index plus two
+`Float64Array` interpolation-fraction arrays (20 bytes/sample) are prepared
+once per source-grid geometry and reused by later temporal frames. Weather
+values are never stored in this geometry. The normal single-point sampler
+remains the semantic reference path. The
 renderer mappings use visual anchors at 0.05, 0.10, 0.30, 1.00, 2.50, 10.0,
 and 50.0 mm/h; 50 mm/h is presentation scale only. Thunderstorm codes 0/10/11/12 map to
 0/0.2660123/0.4818750/0.6977377; hail codes 0/16/17/18 map to
@@ -175,7 +181,12 @@ data; near `WEATHER_REGION.center` its roughly 0.04° longitude/latitude source
 spacing is closest to canonical L13. `WEATHER_REFERENCE_LEVEL = 13` is thus the
 effective direct/aggregate boundary. L13, L14, and L15 independently evaluate
 their own canonical geographic coordinates through the bilinearly reconstructed
-physical field. L14/L15 add sampling resolution, not meteorological information.
+physical field. The pyramid lazily owns one reusable provider sampling geometry
+for each direct canonical level, so source-cell lookup is not repeated for each
+weather frame. L13/L14/L15 remain independent direct samples of the
+reconstructed field; the geometry contains no weather values and does not
+couple temporal frames or renderers. L14/L15 add sampling resolution, not
+meteorological information.
 Only L12 through L10 are recursively aggregated spatial summaries from L13;
 they are never direct field samples or values from an existing renderer pyramid.
 
