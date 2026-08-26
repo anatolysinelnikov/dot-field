@@ -317,7 +317,7 @@ button:active { transform: translateY(1px); }
 .dots-diagnostic[hidden] { display: none; }
 
 .dots-diagnostic select {
-  min-width: 92px;
+  min-width: 180px;
   padding: 3px 4px;
   border: 1px solid rgba(176, 193, 220, .18);
   border-radius: 5px;

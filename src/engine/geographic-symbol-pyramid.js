@@ -68,6 +68,35 @@ function makeState(length, reusable) {
   };
 }
 
+function centeredAxisCandidates(coordinate, parentStep) {
+  if (coordinate % parentStep === 0) return [[coordinate, 1]];
+  const halfStep = parentStep / 2;
+  return [[coordinate - halfStep, 0.5], [coordinate + halfStep, 0.5]];
+}
+
+export function buildCenteredContributions(fine, coarse) {
+  const parentContributions = Array.from({ length: coarse.samples.length }, () => []);
+  const parentStep = 2 ** (MAX_GRID_LEVEL - coarse.level);
+  const coarseIndices = coarse.samplesById;
+
+  for (let childIndex = 0; childIndex < fine.samples.length; childIndex++) {
+    const child = fine.samples[childIndex];
+    const candidates = [];
+    const xCandidates = centeredAxisCandidates(child.canonicalX, parentStep);
+    const yCandidates = centeredAxisCandidates(child.canonicalY, parentStep);
+    for (const [x, xWeight] of xCandidates) {
+      for (const [y, yWeight] of yCandidates) {
+        const parentIndex = coarseIndices.get(`${x}:${y}`);
+        if (parentIndex !== undefined) candidates.push([parentIndex, xWeight * yWeight]);
+      }
+    }
+    const totalWeight = candidates.reduce((sum, [, weight]) => sum + weight, 0);
+    if (!(totalWeight > 0)) throw new Error('Fine Mercator sample has no centered diagnostic parent.');
+    for (const [parentIndex, weight] of candidates) parentContributions[parentIndex].push([childIndex, weight / totalWeight]);
+  }
+  return parentContributions;
+}
+
 export function evaluateDirect(level, frame, reusable) {
   const state = makeState(level.samples.length, reusable);
   const { rainRadius, strongRadius, stormRadius, hailRadius } = state;
@@ -142,6 +171,47 @@ function reduceState(parent, children, childIndices, reusable) {
   return state;
 }
 
+export function reduceCenteredState(parent, children, contributions, reusable) {
+  const state = makeState(parent.samples.length, reusable);
+  const { rainRadius, strongRadius, stormRadius, hailRadius } = state;
+  const childRain = children.rainRadius;
+  const childStrong = children.strongRadius;
+  const childStorm = children.stormRadius;
+  const childHail = children.hailRadius;
+
+  for (let parentIndex = 0; parentIndex < parent.samples.length; parentIndex++) {
+    let rainArea = 0;
+    let strongArea = 0;
+    let hazardArea = 0;
+    let hasHail = false;
+    let hasStorm = false;
+    for (const [childIndex, weight] of contributions[parentIndex]) {
+      rainArea += weight * childRain[childIndex] * childRain[childIndex];
+      strongArea += weight * childStrong[childIndex] * childStrong[childIndex];
+      if (childHail[childIndex] > 0) {
+        hazardArea += weight * HAIL_AREA_COEFFICIENT * childHail[childIndex] * childHail[childIndex];
+        hasHail = true;
+      } else if (childStorm[childIndex] > 0) {
+        hazardArea += weight * STORM_AREA_COEFFICIENT * childStorm[childIndex] * childStorm[childIndex];
+        hasStorm = true;
+      }
+    }
+    rainRadius[parentIndex] = Math.sqrt(rainArea);
+    strongRadius[parentIndex] = Math.sqrt(strongArea);
+    if (hasHail) {
+      hailRadius[parentIndex] = Math.sqrt(hazardArea / HAIL_AREA_COEFFICIENT);
+      stormRadius[parentIndex] = 0;
+    } else if (hasStorm) {
+      stormRadius[parentIndex] = Math.sqrt(hazardArea / STORM_AREA_COEFFICIENT);
+      hailRadius[parentIndex] = 0;
+    } else {
+      stormRadius[parentIndex] = 0;
+      hailRadius[parentIndex] = 0;
+    }
+  }
+  return state;
+}
+
 function averageAnchor(children, anchors) {
   let x = 0;
   let y = 0;
@@ -174,6 +244,7 @@ export class GeographicSymbolPyramid {
         level,
         samples: selection.samples,
         samplesById: new Map(selection.samples.map((sample, index) => [sample.id, index])),
+        gridAnchors: new Float64Array(anchors),
         anchors,
         fieldPoints
       });
@@ -191,6 +262,8 @@ export class GeographicSymbolPyramid {
       }
       this.parents.set(level + 1, topology);
     }
+
+    this.centeredContributions = null;
 
     this.directPairs = new Map();
     for (let level = REFERENCE_GRID_LEVEL; level < MAX_DISPLAY_GRID_LEVEL; level++) {
@@ -215,6 +288,16 @@ export class GeographicSymbolPyramid {
   directPairsFor(lowerLevel, higherLevel) {
     if (higherLevel !== lowerLevel + 1) throw new Error('Direct grid pairs require adjacent levels.');
     return this.directPairs.get(higherLevel);
+  }
+
+  centeredContributionsFor() {
+    if (!this.centeredContributions) {
+      this.centeredContributions = buildCenteredContributions(
+        this.levels.get(REFERENCE_GRID_LEVEL),
+        this.levels.get(REFERENCE_GRID_LEVEL - 1)
+      );
+    }
+    return this.centeredContributions;
   }
 
   evaluate(requestedLevels, frame, reusableStates = null) {
