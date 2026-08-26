@@ -28,6 +28,9 @@ const rawPhenomenaControl = document.querySelector('#rawPhenomenaControl');
 const rawPhenomena = document.querySelector('#rawPhenomena');
 const areaSmoothControl = document.querySelector('#areaSmoothControl');
 const areaSmooth = document.querySelector('#areaSmooth');
+const dotsDiagnosticControl = document.querySelector('#dotsDiagnosticControl');
+const dotsDiagnostic = document.querySelector('#dotsDiagnostic');
+const lodDiagnostics = document.querySelector('#lodDiagnostics');
 const rawTooltip = document.querySelector('#rawTooltip');
 const rawTooltipContent = document.querySelector('#rawTooltipContent');
 
@@ -122,7 +125,8 @@ const state = {
   resettingView: false,
   mapReady: false,
   weatherQueued: false,
-  renderMode: 'raw'
+  renderMode: 'raw',
+  dotsDiagnosticVariant: null
 };
 const weatherLayer = new GeographicDotsLayer();
 const squaresLayer = new GeographicSquaresLayer();
@@ -142,6 +146,15 @@ function rebaseCamera() {
   state.camera = cameraState();
 }
 
+function updateLodDiagnostics() {
+  const zoom = state.logicalSamplingZoom.toFixed(2);
+  const transition = state.lodTransition;
+  const level = transition
+    ? `${transition.fromLevel} → ${transition.toLevel}`
+    : state.lod.level === null ? '—' : state.lod.level;
+  lodDiagnostics.textContent = `Zoom ${zoom} · LOD ${level}`;
+}
+
 function updateRawMapMaxZoom(latitude) {
   const nextRawMaxZoom = rawZoomForLogicalSamplingZoom(
     MAX_LOGICAL_SAMPLING_ZOOM,
@@ -159,11 +172,13 @@ function updateLogicalSamplingZoom() {
   if (state.resettingView) {
     state.camera = next;
     updateResetViewControl();
+    updateLodDiagnostics();
     return;
   }
   const previous = state.camera;
   if (!previous) {
     state.camera = next;
+    updateLodDiagnostics();
     return;
   }
   let delta = next.rawZoom - previous.rawZoom;
@@ -173,6 +188,7 @@ function updateLogicalSamplingZoom() {
   }
   state.camera = next;
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
+  updateLodDiagnostics();
 }
 
 function commitSamples(level, samples) {
@@ -180,6 +196,7 @@ function commitSamples(level, samples) {
   state.samples = samples;
   weatherLayer.setSamples(samples, state.time / LOOP_SECONDS);
   squaresLayer.setSamples(samples, state.time / LOOP_SECONDS);
+  updateLodDiagnostics();
 }
 
 function initializeWeatherLayer() {
@@ -300,6 +317,7 @@ function startAdjacentTransition(level, now) {
   };
   weatherLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
   squaresLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
+  updateLodDiagnostics();
   wakeApplicationFrame();
 }
 
@@ -330,6 +348,7 @@ function rebuildSamples(level, now = performance.now()) {
     };
     weatherLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
     squaresLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
+    updateLodDiagnostics();
     wakeApplicationFrame();
   }
 }
@@ -341,6 +360,7 @@ function updateLODTransition(now) {
   transition.rawProgress = rawProgress;
   weatherLayer.setTransitionProgress(smoothstep(0, 1, rawProgress));
   squaresLayer.setTransitionProgress(smoothstep(0, 1, rawProgress));
+  updateLodDiagnostics();
   if (rawProgress < 1) return;
   state.lodTransition = null;
   commitSamples(transition.toLevel, transition.toSamples);
@@ -371,8 +391,12 @@ function applyRenderMode() {
   weatherLayer.setActive(mode === 'dots');
   squaresLayer.setActive(mode === 'squares');
   scalarLayer.setActive(scalarActive);
+  dotsDiagnosticControl.hidden = mode !== 'dots';
   if (rawActive) return;
-  if (mode === 'dots') weatherLayer.updateWeather(time);
+  if (mode === 'dots') {
+    weatherLayer.setDiagnosticVariant(state.dotsDiagnosticVariant, rawWeatherField, time);
+    weatherLayer.updateWeather(time);
+  }
   else if (mode === 'squares') squaresLayer.updateWeather(time);
   else {
     scalarLayer.setPresentation(mode === 'areas' ? 'areas' : 'blur', mode === 'areas' && areaSmooth.checked, time);
@@ -385,6 +409,7 @@ function setRenderMode(mode) {
   renderModeSelector.dataset.mode = mode;
   rawPhenomenaControl.hidden = mode !== 'raw';
   areaSmoothControl.hidden = mode !== 'areas';
+  dotsDiagnosticControl.hidden = mode !== 'dots';
   if (mode !== 'raw') dismissRawTooltip();
   for (const button of renderModeButtons) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
@@ -494,6 +519,10 @@ areaSmooth.addEventListener('change', () => {
 });
 rawPhenomena.addEventListener('change', () => {
   if (state.renderMode === 'raw') rawLayer.setPhenomena(rawPhenomena.checked);
+});
+dotsDiagnostic.addEventListener('change', () => {
+  state.dotsDiagnosticVariant = dotsDiagnostic.value === 'production' ? null : dotsDiagnostic.value;
+  if (state.renderMode === 'dots') weatherLayer.setDiagnosticVariant(state.dotsDiagnosticVariant, rawWeatherField, state.time / LOOP_SECONDS);
 });
 document.addEventListener('pointerdown', (event) => {
   if (!rawTooltip.hidden && !mapContainer.contains(event.target) && !rawTooltip.contains(event.target)) dismissRawTooltip();

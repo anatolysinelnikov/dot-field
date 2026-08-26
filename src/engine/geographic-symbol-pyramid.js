@@ -68,7 +68,7 @@ function makeState(length, reusable) {
   };
 }
 
-function evaluateDirect(level, frame, reusable) {
+export function evaluateDirect(level, frame, reusable) {
   const state = makeState(level.samples.length, reusable);
   const { rainRadius, strongRadius, stormRadius, hailRadius } = state;
   const value = { rain: 0, storm: 0, hail: 0 };
@@ -77,8 +77,14 @@ function evaluateDirect(level, frame, reusable) {
   const { fieldPoints, samples } = level;
 
   for (let index = 0; index < samples.length; index++) {
-    point.x = fieldPoints[index * 2];
-    point.y = fieldPoints[index * 2 + 1];
+    if (fieldPoints) {
+      point.x = fieldPoints[index * 2];
+      point.y = fieldPoints[index * 2 + 1];
+    } else {
+      const directPoint = geographicToSynthetic(...samples[index].lngLat);
+      point.x = directPoint.x;
+      point.y = directPoint.y;
+    }
     geographicPreparedIntensityAt(frame, point, value);
     rainRadius[index] = intensityToRadius(value.rain, samples[index].spacing, 'rain');
     strongRadius[index] = intensityToRadius(strongPrecipitationIntensity(value.rain), samples[index].spacing, 'rain');

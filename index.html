@@ -15,11 +15,7 @@
       <img src="https://api.maptiler.com/resources/logo.svg" alt="MapTiler">
     </a>
 
-    <div class="legend" aria-hidden="true">
-      <span class="rain"><i class="rain-base"></i><i class="rain-strong"></i>Rain</span>
-      <span class="storm"><i></i>Thunderstorm</span>
-      <span class="hail"><i></i>Hail</span>
-    </div>
+    <div id="lodDiagnostics" class="lod-diagnostics" aria-live="polite">Zoom 5.80 · LOD —</div>
 
     <div id="rawTooltip" class="raw-tooltip" hidden role="status" aria-live="polite">
       <div id="rawTooltipContent"></div>
@@ -44,6 +40,16 @@
           <input id="areaSmooth" type="checkbox">
           <span>Smooth</span>
         </span>
+      </label>
+      <label id="dotsDiagnosticControl" class="dots-diagnostic" hidden>
+        <span>Dots path</span>
+        <select id="dotsDiagnostic" aria-label="Dots diagnostic path">
+          <option value="production" selected>Production</option>
+          <option value="source">Source</option>
+          <option value="l14-direct">L14 Direct</option>
+          <option value="l13-direct">L13 Direct</option>
+          <option value="l13-reduced">L13 Reduced</option>
+        </select>
       </label>
     </div>
 

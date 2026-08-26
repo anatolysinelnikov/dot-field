@@ -67,28 +67,17 @@ html, body { overflow: hidden; background: #080b12; }
 .maptiler-logo,
 .maplibregl-ctrl-top-right { display: none; }
 
-.legend {
+.lod-diagnostics {
   position: absolute;
   z-index: 2;
   top: max(18px, calc(env(safe-area-inset-top, 0px) + 10px));
   left: max(20px, calc(env(safe-area-inset-left, 0px) + 12px));
-  display: flex;
-  gap: 14px;
-  align-items: center;
   pointer-events: none;
   color: #c0cad8;
   font-size: 11px;
   letter-spacing: .08em;
-  text-transform: uppercase;
   text-shadow: 0 1px 3px #000;
 }
-
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
-.legend i { width: 7px; height: 7px; border-radius: 50%; display: block; }
-.rain-base { background: #0090FF; }
-.rain-strong { background: #0000FF; }
-.storm i { background: #FF00FF; clip-path: polygon(50% 0, 63.5% 36.5%, 100% 50%, 63.5% 63.5%, 50% 100%, 36.5% 63.5%, 0 50%, 36.5% 36.5%); transform: scale(1.18); }
-.hail i { background: #FFD400; clip-path: polygon(50% 0, 93.3% 25%, 93.3% 75%, 50% 100%, 6.7% 75%, 6.7% 25%); }
 
 .raw-tooltip {
   position: absolute;
@@ -306,6 +295,38 @@ button:active { transform: translateY(1px); }
 
 .area-smooth[hidden] { display: none; }
 
+.dots-diagnostic {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border: var(--control-border);
+  border-radius: var(--control-radius);
+  background: var(--control-panel);
+  box-shadow: var(--control-shadow);
+  backdrop-filter: var(--control-backdrop);
+  color: #c7d0df;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.dots-diagnostic[hidden] { display: none; }
+
+.dots-diagnostic select {
+  min-width: 92px;
+  padding: 3px 4px;
+  border: 1px solid rgba(176, 193, 220, .18);
+  border-radius: 5px;
+  background: #151b28;
+  color: #e5ebf5;
+  font: inherit;
+  font-size: 12px;
+}
+
 .area-smooth-content {
   flex: 0 0 auto;
   width: max-content;
@@ -345,6 +366,13 @@ input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; backgro
 input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; border-radius: 999px; background: #fff; }
 
 @media (max-width: 900px) {
+  .dots-diagnostic {
+    left: auto;
+    right: 0;
+    top: auto;
+    bottom: calc(100% + 8px);
+  }
+
   .area-smooth {
     left: auto;
     right: 0;
@@ -361,7 +389,7 @@ input[type="range"]::-moz-range-thumb { width: 26px; height: 18px; border: 0; bo
 }
 
 @media (max-width: 680px) {
-  .legend { top: max(14px, calc(env(safe-area-inset-top, 0px) + 10px)); left: max(14px, calc(env(safe-area-inset-left, 0px) + 10px)); gap: 9px; font-size: 10px; }
+  .lod-diagnostics { top: max(14px, calc(env(safe-area-inset-top, 0px) + 10px)); left: max(14px, calc(env(safe-area-inset-left, 0px) + 10px)); font-size: 10px; }
   .maptiler-logo { top: max(14px, calc(env(safe-area-inset-top, 0px) + 10px)); right: max(46px, calc(env(safe-area-inset-right, 0px) + 42px)); width: 70px; }
   .maplibregl-ctrl-top-right { top: max(14px, calc(env(safe-area-inset-top, 0px) + 10px)); right: max(14px, calc(env(safe-area-inset-right, 0px) + 10px)); }
   .zoom-controls {

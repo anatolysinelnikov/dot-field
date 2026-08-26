@@ -1,6 +1,9 @@
 import { prepareGeographicFieldFrame } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
-import { GeographicSymbolPyramid, REFERENCE_GRID_LEVEL, STORM_INNER_RATIO } from './geographic-symbol-pyramid.js';
+import { lngLatToMercator } from './geographic-lod.js';
+import { geographicHazardRadii } from './hazard-renderer.js';
+import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
+import { GeographicSymbolPyramid, REFERENCE_GRID_LEVEL, STORM_INNER_RATIO, evaluateDirect } from './geographic-symbol-pyramid.js';
 
 const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1], storm: [1, 0, 1, 1], hail: [1, 0.831, 0, 1] };
 const INSTANCE_STRIDE = 8;
@@ -112,6 +115,67 @@ function buildSameLevelTemporalInstances(time0, time1, anchors, radiusKey, write
   return writer.finish();
 }
 
+function sourceAxisSpacing(axis, index, project) {
+  const previous = index > 0 ? Math.abs(project(axis[index], axis[index - 1])) : 0;
+  const next = index + 1 < axis.length ? Math.abs(project(axis[index + 1], axis[index])) : 0;
+  if (!previous) return next;
+  if (!next) return previous;
+  return (previous + next) / 2;
+}
+
+function sourceDiagnosticGeometry(field) {
+  const longitudeCount = field.longitudes.length;
+  const latitudeCount = field.latitudes.length;
+  const anchors = new Float64Array(longitudeCount * latitudeCount * 2);
+  const spacing = new Float64Array(longitudeCount * latitudeCount);
+  for (let latitudeIndex = 0; latitudeIndex < latitudeCount; latitudeIndex++) {
+    const latitude = field.latitudes[latitudeIndex];
+    for (let longitudeIndex = 0; longitudeIndex < longitudeCount; longitudeIndex++) {
+      const index = field.index(longitudeIndex, latitudeIndex);
+      const [x, y] = lngLatToMercator(field.longitudes[longitudeIndex], latitude);
+      const dx = sourceAxisSpacing(field.longitudes, longitudeIndex, (left, right) => (
+        lngLatToMercator(left, latitude)[0] - lngLatToMercator(right, latitude)[0]
+      ));
+      const dy = sourceAxisSpacing(field.latitudes, latitudeIndex, (upper, lower) => (
+        lngLatToMercator(field.longitudes[longitudeIndex], upper)[1]
+          - lngLatToMercator(field.longitudes[longitudeIndex], lower)[1]
+      ));
+      anchors[index * 2] = x;
+      anchors[index * 2 + 1] = y;
+      spacing[index] = Math.sqrt(dx * dy);
+    }
+  }
+  return { anchors, spacing };
+}
+
+function makeDotsState(length, reusable) {
+  if (reusable?.rainRadius.length === length) return reusable;
+  return {
+    rainRadius: new Float64Array(length),
+    strongRadius: new Float64Array(length),
+    stormRadius: new Float64Array(length),
+    hailRadius: new Float64Array(length)
+  };
+}
+
+function evaluateSource(field, geometry, reusable) {
+  const state = makeDotsState(geometry.spacing.length, reusable);
+  const value = { rain: 0, storm: 0, hail: 0 };
+  const hazard = { stormRadius: 0, hailRadius: 0 };
+  for (let index = 0; index < geometry.spacing.length; index++) {
+    value.rain = field.rain[index];
+    value.storm = field.storm[index];
+    value.hail = field.hail[index];
+    const spacing = geometry.spacing[index];
+    state.rainRadius[index] = intensityToRadius(value.rain, spacing, 'rain');
+    state.strongRadius[index] = intensityToRadius(strongPrecipitationIntensity(value.rain), spacing, 'rain');
+    geographicHazardRadii(value, spacing, hazard);
+    state.stormRadius[index] = hazard.stormRadius;
+    state.hailRadius[index] = hazard.hailRadius;
+  }
+  return state;
+}
+
 function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, fromAnchors, toAnchors, pairs, fromIsLower, radiusKey, writer) {
   writer.reset();
   const fromRadii0 = fromTime0[radiusKey];
@@ -211,6 +275,7 @@ export class GeographicDotsLayer {
     this.temporalProgress = 0;
     this.buffersDirty = true;
     this.active = true;
+    this.diagnostic = null;
   }
 
   onAdd(map, gl) {
@@ -234,8 +299,20 @@ export class GeographicDotsLayer {
   }
 
   evaluateKeyframe(index, reusableStates = null) {
+    if (this.diagnostic) return this.evaluateDiagnosticKeyframe(index, reusableStates);
     const time = index / TEMPORAL_FRAME_COUNT;
     return this.pyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time), reusableStates);
+  }
+
+  evaluateDiagnosticKeyframe(index, reusableState = null) {
+    const diagnostic = this.diagnostic;
+    if (diagnostic.variant === 'source') return evaluateSource(diagnostic.field, diagnostic.geometry, reusableState);
+    const frame = prepareGeographicFieldFrame(index / TEMPORAL_FRAME_COUNT);
+    if (diagnostic.variant === 'l13-reduced') {
+      diagnostic.reusableStates = this.pyramid.evaluate([13], frame, diagnostic.reusableStates);
+      return diagnostic.reusableStates[13];
+    }
+    return evaluateDirect(this.pyramid.levels.get(diagnostic.level), frame, reusableState);
   }
 
   rebuildTemporal(time) {
@@ -251,11 +328,51 @@ export class GeographicDotsLayer {
     this.rebuildInstances();
   }
 
+  rebuildDiagnosticTemporal(time) {
+    const frame = geographicTemporalFrameAt(time);
+    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    this.diagnostic.reusableStates = null;
+    const frames0 = this.evaluateDiagnosticKeyframe(frame.index);
+    const pyramidStates0 = this.diagnostic.reusableStates;
+    this.diagnostic.reusableStates = null;
+    const frames1 = this.evaluateDiagnosticKeyframe(nextIndex);
+    this.temporal = {
+      index: frame.index,
+      nextIndex,
+      frames0,
+      frames1,
+      pyramidStates0,
+      pyramidStates1: this.diagnostic.reusableStates
+    };
+    this.temporalProgress = frame.progress;
+    this.rebuildInstances();
+  }
+
   setSamples(samples, time) {
     this.samples = samples;
     this.transition = null;
-    if (this.active) this.rebuildTemporal(time);
+    if (this.active) {
+      if (this.diagnostic) this.rebuildDiagnosticTemporal(time);
+      else this.rebuildTemporal(time);
+    }
     else this.temporal = null;
+  }
+
+  setDiagnosticVariant(variant, field, time) {
+    if (!variant) {
+      this.diagnostic = null;
+      this.temporal = null;
+      if (this.active) this.rebuildTemporal(time);
+      return;
+    }
+    this.diagnostic = {
+      variant,
+      field,
+      level: variant === 'l14-direct' ? 14 : 13,
+      geometry: variant === 'source' ? sourceDiagnosticGeometry(field) : null,
+      reusableStates: null
+    };
+    if (this.active) this.rebuildDiagnosticTemporal(time);
   }
 
   setActive(active) {
@@ -267,7 +384,10 @@ export class GeographicDotsLayer {
     this.samples = toSamples;
     this.transition = { fromSamples, toSamples };
     this.transitionProgress = progress;
-    if (this.active) this.rebuildTemporal(time);
+    if (this.active) {
+      if (this.diagnostic) this.rebuildDiagnosticTemporal(time);
+      else this.rebuildTemporal(time);
+    }
     else this.temporal = null;
   }
 
@@ -284,8 +404,11 @@ export class GeographicDotsLayer {
         this.temporal.index = frame.index;
         this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
         const reusableStates = this.temporal.frames0;
+        if (this.diagnostic?.variant === 'l13-reduced') this.diagnostic.reusableStates = this.temporal.pyramidStates0;
         this.temporal.frames0 = this.temporal.frames1;
         this.temporal.frames1 = this.evaluateKeyframe(this.temporal.nextIndex, reusableStates);
+        this.temporal.pyramidStates0 = this.temporal.pyramidStates1;
+        this.temporal.pyramidStates1 = this.diagnostic?.variant === 'l13-reduced' ? this.diagnostic.reusableStates : null;
         this.temporalProgress = frame.progress;
         this.rebuildInstances();
       } else {
@@ -304,7 +427,14 @@ export class GeographicDotsLayer {
 
   rebuildInstances() {
     const { frames0, frames1 } = this.temporal;
-    if (!this.transition) {
+    if (this.diagnostic) {
+      const anchors = this.diagnostic.variant === 'source'
+        ? this.diagnostic.geometry.anchors
+        : this.pyramid.levels.get(this.diagnostic.level).anchors;
+      for (const type of WEATHER_TYPES) {
+        this.setInstances(type, buildSameLevelTemporalInstances(frames0, frames1, anchors, RADIUS_KEYS[type], this.instanceWriters[type]));
+      }
+    } else if (!this.transition) {
       const level = this.samples[0].level;
       const anchors = this.pyramid.levels.get(level).anchors;
       for (const type of WEATHER_TYPES) {
