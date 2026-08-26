@@ -346,6 +346,7 @@ export class GeographicDotsLayer {
 
   setActive(active) {
     this.active = active;
+    if (!active) this.temporal = null;
     this.map?.triggerRepaint();
   }
 

@@ -117,7 +117,7 @@ export class GeographicSquaresLayer {
     for (const buffer of [this.vertexBuffer, ...(this.instanceBuffers || [])]) if (buffer) gl.deleteBuffer(buffer);
   }
 
-  setActive(active) { this.active = active; this.map?.triggerRepaint(); }
+  setActive(active) { this.active = active; if (!active) this.temporal = null; this.map?.triggerRepaint(); }
 
   activeLevels() {
     if (this.transition) return [this.transition.fromSamples[0].level, this.transition.toSamples[0].level];

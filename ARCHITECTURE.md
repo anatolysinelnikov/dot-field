@@ -210,6 +210,10 @@ neither renderer recursively aggregates radii, colors, opacity, or hazard
 glyph values. Any future level above L14 must sample the reconstructed field
 directly, not interpolate lower-LOD renderer values.
 
+Only the active discrete renderer retains temporal summary/mapping buffers;
+switching away releases that renderer's temporal state while retaining the
+shared topology and reusable GPU capacities.
+
 ## Dots — `src/engine/geographic-dots-layer.js`
 
 Dots map each shared physical summary after it is produced. Base rain uses
