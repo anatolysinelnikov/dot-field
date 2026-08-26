@@ -94,8 +94,9 @@ The finite source forecast traverses from 22:00 to 01:00 in the existing
 18-second UI duration: normalized time 0 samples frame 0 and normalized time 1
 samples frame 18. Playback stops at the endpoint rather than creating a
 final-to-first seam; pressing Play at the endpoint explicitly restarts it from
-the beginning. The application creates adjacent 100 ms keyframes only for the
-active representation, including an exact terminal keyframe; switching a mode
+the beginning. The application commits the terminal renderer update before it
+marks playback paused. The application creates adjacent 100 ms keyframes only
+for the active representation, including an exact terminal keyframe; switching a mode
 lazily synchronizes that representation to the exact global time before its
 next repaint, while preserving time, play/pause state, camera state, and
 logical weather zoom. Inactive layers retain lightweight topology/LOD state but

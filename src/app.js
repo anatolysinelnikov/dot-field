@@ -626,14 +626,15 @@ function frame(now) {
   applicationFrameQueued = false;
   const delta = Math.min((now - state.lastFrame) / 1000, 0.1);
   state.lastFrame = now;
+  let reachedEndpoint = false;
   if (state.playing && !state.scrubbing) {
     state.time = Math.min(state.time + delta, LOOP_SECONDS);
-    if (state.time === LOOP_SECONDS) setPlaying(false);
+    reachedEndpoint = state.time === LOOP_SECONDS;
   }
   // A paused static layer has no temporal uniform to advance. Leaving its
   // repaint scheduling to MapLibre prevents the application RAF from keeping
   // an otherwise idle map rendering continuously.
-  if (state.mapReady && state.playing && !state.scrubbing) {
+  if (state.mapReady && (state.playing || reachedEndpoint) && !state.scrubbing) {
     const normalizedTime = state.time / LOOP_SECONDS;
     if (state.renderMode === 'raw') {
       updateRawTooltipPosition();
@@ -641,6 +642,7 @@ function frame(now) {
     else if (state.renderMode === 'squares') squaresLayer.updateWeather(normalizedTime);
     else scalarLayer.updateWeather(normalizedTime);
   }
+  if (reachedEndpoint) setPlaying(false);
   updateLODTransition(now);
   if (!state.scrubbing) timeSlider.value = String(state.time / LOOP_SECONDS);
   if ((state.playing && !state.scrubbing) || state.lodTransition) wakeApplicationFrame();
