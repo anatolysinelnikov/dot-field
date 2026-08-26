@@ -1,13 +1,10 @@
 import {
   RAIN_BASE_RADIUS_ANCHORS,
-  RAIN_FULL_SCALE_MMH,
-  RAIN_STRONG_RADIUS_ANCHORS,
-  RAIN_VISIBILITY_FLOOR_MMH,
-  normalizedRainAnchor
+  RAIN_STRONG_RADIUS_ANCHORS
 } from './config.js';
 import { clamp, smoothstep } from './math.js';
 
-export const INTENSITY_THRESHOLDS = Object.freeze({ rain: normalizedRainAnchor(RAIN_VISIBILITY_FLOOR_MMH), storm: 0.075, hail: 0.11 });
+export const INTENSITY_THRESHOLDS = Object.freeze({ storm: 0.075, hail: 0.11 });
 export const DOTS_STRONG_RAIN_ONSET_MMH = 1.6;
 export const DOTS_STRONG_RAIN_FULL_MMH_DEFAULT = 35;
 export const DOTS_STRONG_RAIN_FULL_MMH_MIN = 20;
@@ -21,17 +18,13 @@ export const DOTS_STRONG_RAIN_SHAPE_ANCHORS = Object.freeze([
   { progress: 1.00, radius: 0.86 }
 ]);
 
-function normalizedToMmh(intensity) {
-  return clamp(intensity, 0, 1) * RAIN_FULL_SCALE_MMH;
-}
-
 function interpolateSquaredRadius(progress, lower, upper) {
   const area = lower.radius * lower.radius + (upper.radius * upper.radius - lower.radius * lower.radius) * clamp(progress, 0, 1);
   return Math.sqrt(area);
 }
 
-function interpolateRadiusFraction(intensity, anchors) {
-  const mmh = normalizedToMmh(intensity);
+function interpolateRadiusFraction(rainMmh, anchors) {
+  const mmh = Math.max(0, Number(rainMmh));
   if (mmh <= anchors[0].mmh) return anchors[0].radius;
   for (let index = 1; index < anchors.length; index++) {
     const upper = anchors[index];
@@ -58,12 +51,16 @@ function interpolateShapeRadius(progress, anchors) {
   return anchors[anchors.length - 1].radius;
 }
 
-export function rainRadiusFraction(intensity) {
-  return interpolateRadiusFraction(intensity, RAIN_BASE_RADIUS_ANCHORS);
+export function rainMmhToRadiusFraction(rainMmh) {
+  return interpolateRadiusFraction(rainMmh, RAIN_BASE_RADIUS_ANCHORS);
 }
 
-export function dotsStrongRainRadiusFraction(intensity, fullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT) {
-  const mmh = normalizedToMmh(intensity);
+export function rainMmhToRadius(rainMmh, spacing) {
+  return spacing * rainMmhToRadiusFraction(rainMmh);
+}
+
+export function dotsStrongRainMmhToRadiusFraction(rainMmh, fullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT) {
+  const mmh = Math.max(0, Number(rainMmh));
   const full = clamp(Number(fullMmh), DOTS_STRONG_RAIN_FULL_MMH_MIN, DOTS_STRONG_RAIN_FULL_MMH_MAX);
   if (mmh <= DOTS_STRONG_RAIN_ONSET_MMH) return 0;
   if (mmh >= full) return DOTS_STRONG_RAIN_SHAPE_ANCHORS[DOTS_STRONG_RAIN_SHAPE_ANCHORS.length - 1].radius;
@@ -71,18 +68,18 @@ export function dotsStrongRainRadiusFraction(intensity, fullMmh = DOTS_STRONG_RA
   return interpolateShapeRadius(progress, DOTS_STRONG_RAIN_SHAPE_ANCHORS);
 }
 
-export function dotsStrongRainIntensityToRadius(intensity, spacing, fullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT) {
-  return spacing * dotsStrongRainRadiusFraction(intensity, fullMmh);
+export function dotsStrongRainMmhToRadius(rainMmh, spacing, fullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT) {
+  return spacing * dotsStrongRainMmhToRadiusFraction(rainMmh, fullMmh);
 }
 
 function transferShader(name, anchors, maximumRadius) {
   const lines = [`float ${name}(float value) {`];
-  lines.push(`  if (value <= ${normalizedRainAnchor(anchors[0].mmh).toFixed(6)}) return ${(anchors[0].radius / maximumRadius).toFixed(6)};`);
+  lines.push(`  if (value <= ${anchors[0].mmh.toFixed(6)}) return ${(anchors[0].radius / maximumRadius).toFixed(6)};`);
   for (let index = 1; index < anchors.length; index++) {
     const lower = anchors[index - 1];
     const upper = anchors[index];
-    const lowerValue = normalizedRainAnchor(lower.mmh);
-    const upperValue = normalizedRainAnchor(upper.mmh);
+    const lowerValue = lower.mmh;
+    const upperValue = upper.mmh;
     const lowerArea = (lower.radius * lower.radius).toFixed(6);
     const upperArea = (upper.radius * upper.radius).toFixed(6);
     lines.push(`  if (value <= ${upperValue.toFixed(6)}) { float t = (value - ${lowerValue.toFixed(6)}) / ${(upperValue - lowerValue).toFixed(6)}; return sqrt(mix(${lowerArea}, ${upperArea}, clamp(t, 0.0, 1.0))) / ${maximumRadius.toFixed(6)}; }`);
@@ -100,9 +97,9 @@ export function intensityToStrength(intensity, layer, thresholds = INTENSITY_THR
 }
 
 export function intensityToRadius(intensity, spacing, layer) {
-  if (layer === 'rain') return spacing * rainRadiusFraction(intensity);
+  if (layer === 'rain') return spacing * rainMmhToRadiusFraction(intensity);
   // Hazard glyphs retain their existing normalized transfer semantics.
   const normalized = intensityToStrength(intensity, layer, INTENSITY_THRESHOLDS);
-  const overlap = layer === 'rain' ? 0.86 : layer === 'storm' ? 0.72 : 0.59;
-  return spacing * overlap * Math.pow(normalized, layer === 'rain' ? 0.47 : 0.56);
+  const overlap = layer === 'storm' ? 0.72 : 0.59;
+  return spacing * overlap * Math.pow(normalized, 0.56);
 }

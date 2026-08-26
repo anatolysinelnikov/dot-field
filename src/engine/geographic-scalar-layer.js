@@ -39,9 +39,9 @@ float hazardOpacity(float value, float onset, float visibleOnset, float strongAn
   if (value < strongAnchor) return mix(0.4, 0.65, smoothstep(visibleOnset, strongAnchor, value));
   return mix(0.65, 1.0, smoothstep(strongAnchor, core, value));
 }
-vec4 blurColor(float rain, float storm, float hail) {
-  float rainOpacity = pow(rainVisibility(rain), 0.66);
-  float strong = strongRain(rain);
+vec4 blurColor(float rainMmh, float storm, float hail) {
+  float rainOpacity = pow(rainVisibility(rainMmh), 0.66);
+  float strong = strongRain(rainMmh);
   vec4 color = vec4(0.0, mix(0.565, 0.0, strong), 1.0, rainOpacity);
   float stormOpacity = hazardOpacity(storm, 0.006, 0.03375, 0.075, 0.54, 0.76);
   color.rgb = mix(color.rgb, vec3(1.0, 0.0, 1.0), stormOpacity);
@@ -51,14 +51,14 @@ vec4 blurColor(float rain, float storm, float hail) {
   color.a = hailOpacity + color.a * (1.0 - hailOpacity);
   return color;
 }
-vec4 areasColor(float rain, float storm, float hail) {
+vec4 areasColor(float rainMmh, float storm, float hail) {
   float thresholds[5];
   thresholds[0] = u_rainThresholds.x; thresholds[1] = u_rainThresholds.y; thresholds[2] = u_rainThresholds.z; thresholds[3] = u_rainThresholds.w; thresholds[4] = u_rainThresholdLast;
   vec3 colors[5];
   colors[0] = vec3(0.0, 0.565, 1.0); colors[1] = vec3(0.0, 0.471, 1.0); colors[2] = vec3(0.0, 0.369, 1.0); colors[3] = vec3(0.0, 0.235, 1.0); colors[4] = vec3(0.0, 0.0, 1.0);
   vec4 color = vec4(0.0);
   for (int band = 0; band < 5; band++) {
-    float inside = soften(thresholds[band], rain);
+    float inside = soften(thresholds[band], rainMmh);
     color.rgb = mix(color.rgb, colors[band], inside);
     color.a = max(color.a, inside * 0.92);
   }
@@ -179,11 +179,11 @@ export class GeographicScalarLayer {
   rebuildTextureValues(state0, state1) {
     this.ensureTextureValues();
     for (let index = 0, offset = 0; index < this.lattice.length; index++, offset += TEXTURE_STRIDE) {
-      this.textureValues0[offset] = state0.rain[index];
+      this.textureValues0[offset] = state0.rainMmh[index];
       this.textureValues0[offset + 1] = state0.storm[index];
       this.textureValues0[offset + 2] = state0.hail[index];
       this.textureValues0[offset + 3] = 0;
-      this.textureValues1[offset] = state1.rain[index];
+      this.textureValues1[offset] = state1.rainMmh[index];
       this.textureValues1[offset + 1] = state1.storm[index];
       this.textureValues1[offset + 2] = state1.hail[index];
       this.textureValues1[offset + 3] = 0;
@@ -214,7 +214,7 @@ export class GeographicScalarLayer {
     }
     const state0Dirty = this.texturesDirty[1];
     for (let index = 0, offset = 0; index < this.lattice.length; index++, offset += TEXTURE_STRIDE) {
-      this.textureValues1[offset] = state1.rain[index];
+      this.textureValues1[offset] = state1.rainMmh[index];
       this.textureValues1[offset + 1] = state1.storm[index];
       this.textureValues1[offset + 2] = state1.hail[index];
       this.textureValues1[offset + 3] = 0;

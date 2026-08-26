@@ -47,8 +47,8 @@ void main() {
 }
 
 function makeState(length, reusable) {
-  if (reusable?.rain.length === length) return reusable;
-  return { rain: new Float32Array(length), storm: new Float32Array(length), hail: new Float32Array(length) };
+  if (reusable?.rainMmh.length === length) return reusable;
+  return { rainMmh: new Float32Array(length), storm: new Float32Array(length), hail: new Float32Array(length) };
 }
 
 function parentIdFor(sample, bounds, parentStep) {
@@ -92,10 +92,10 @@ class GeographicSquarePyramid {
     if (wantsReduced) {
       const reference = this.levels.get(REFERENCE_GRID_LEVEL);
       const direct = makeState(reference.samples.length, reusable?.[REFERENCE_GRID_LEVEL]);
-      const value = { rain: 0, storm: 0, hail: 0 };
+      const value = { rainMmh: 0, storm: 0, hail: 0 };
       for (let index = 0; index < reference.samples.length; index++) {
         geographicPreparedIntensityAtXY(frame, reference.fieldPoints[index * 2], reference.fieldPoints[index * 2 + 1], value);
-        direct.rain[index] = value.rain; direct.storm[index] = value.storm; direct.hail[index] = value.hail;
+        direct.rainMmh[index] = value.rainMmh; direct.storm[index] = value.storm; direct.hail[index] = value.hail;
       }
       states[REFERENCE_GRID_LEVEL] = direct;
       const minimum = Math.min(...levels.filter((level) => level <= REFERENCE_GRID_LEVEL));
@@ -105,12 +105,12 @@ class GeographicSquarePyramid {
         const state = makeState(parent.samples.length, reusable?.[level]);
         for (let parentIndex = 0; parentIndex < parent.samples.length; parentIndex++) {
           const indices = parent.children[parentIndex];
-          let rain = 0, storm = 0, hail = 0, stormMax = 0, hailMax = 0;
+          let rainMmh = 0, storm = 0, hail = 0, stormMax = 0, hailMax = 0;
           for (const child of indices) {
-            rain += children.rain[child]; storm += children.storm[child]; hail += children.hail[child];
+            rainMmh += children.rainMmh[child]; storm += children.storm[child]; hail += children.hail[child];
             stormMax = Math.max(stormMax, children.storm[child]); hailMax = Math.max(hailMax, children.hail[child]);
           }
-          state.rain[parentIndex] = rain / indices.length;
+          state.rainMmh[parentIndex] = rainMmh / indices.length;
           state.storm[parentIndex] = (storm / indices.length) * 0.42 + stormMax * 0.58;
           state.hail[parentIndex] = (hail / indices.length) * 0.28 + hailMax * 0.72;
         }
@@ -122,10 +122,10 @@ class GeographicSquarePyramid {
       if (level <= REFERENCE_GRID_LEVEL) continue;
       const entry = this.levels.get(level);
       const state = makeState(entry.samples.length, reusable?.[level]);
-      const value = { rain: 0, storm: 0, hail: 0 };
+      const value = { rainMmh: 0, storm: 0, hail: 0 };
       for (let index = 0; index < entry.samples.length; index++) {
         geographicPreparedIntensityAtXY(frame, entry.fieldPoints[index * 2], entry.fieldPoints[index * 2 + 1], value);
-        state.rain[index] = value.rain; state.storm[index] = value.storm; state.hail[index] = value.hail;
+        state.rainMmh[index] = value.rainMmh; state.storm[index] = value.storm; state.hail[index] = value.hail;
       }
       states[level] = state;
     }
@@ -191,8 +191,8 @@ export class GeographicSquaresLayer {
     if (result.length < length) result = new Float32Array(Math.max(length, result.length * 2, INSTANCE_STRIDE * 256));
     for (let index = 0, offset = 0; index < samples.length; index++, offset += INSTANCE_STRIDE) {
       result[offset] = samples[index].mercator[0]; result[offset + 1] = samples[index].mercator[1];
-      result[offset + 2] = state0.rain[index]; result[offset + 3] = state0.storm[index]; result[offset + 4] = state0.hail[index];
-      result[offset + 5] = state1.rain[index]; result[offset + 6] = state1.storm[index]; result[offset + 7] = state1.hail[index];
+      result[offset + 2] = state0.rainMmh[index]; result[offset + 3] = state0.storm[index]; result[offset + 4] = state0.hail[index];
+      result[offset + 5] = state1.rainMmh[index]; result[offset + 6] = state1.storm[index]; result[offset + 7] = state1.hail[index];
     }
     this.instanceData[group] = result;
     this.instanceCounts[group] = samples.length;

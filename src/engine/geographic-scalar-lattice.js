@@ -1,4 +1,4 @@
-import { AREA_PRECIPITATION_BANDS } from './config.js';
+import { AREA_PRECIPITATION_BANDS, RAIN_PRESENTATION_MAX_MMH } from './config.js';
 import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographicToSynthetic } from './geography.js';
 import { MAX_DISPLAY_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
 
@@ -16,7 +16,7 @@ export const AREA_RAIN_THRESHOLDS = Object.freeze(AREA_PRECIPITATION_BANDS.map((
 
 function makeChannels(length) {
   return {
-    rain: new Float32Array(length),
+    rainMmh: new Float32Array(length),
     storm: new Float32Array(length),
     hail: new Float32Array(length)
   };
@@ -79,32 +79,34 @@ function coverageThresholdFromHistogram(coverage, histogram) {
   return 0;
 }
 
-function coverageThreshold(raw, generalized, threshold, histogram) {
+function coverageThreshold(raw, generalized, threshold, histogram, valueMaximum = 1) {
   histogram.fill(0);
   let coverage = 0;
   for (let index = 0; index < raw.length; index++) {
-    const value = Math.max(0, Math.min(1, generalized[index]));
-    histogram[Math.min(HISTOGRAM_BINS - 1, Math.floor(value * HISTOGRAM_BINS))]++;
+    const value = Math.max(0, Math.min(valueMaximum, generalized[index]));
+    histogram[Math.min(HISTOGRAM_BINS - 1, Math.floor(value / valueMaximum * HISTOGRAM_BINS))]++;
     if (raw[index] >= threshold) coverage++;
   }
-  return coverageThresholdFromHistogram(coverage, histogram);
+  return coverageThresholdFromHistogram(coverage, histogram) * valueMaximum;
 }
 
 function remapThresholds(state, histogram, rainCoverage) {
   histogram.fill(0);
   rainCoverage.fill(0);
-  for (let index = 0; index < state.raw.rain.length; index++) {
-    const value = Math.max(0, Math.min(1, state.smooth.rain[index]));
-    histogram[Math.min(HISTOGRAM_BINS - 1, Math.floor(value * HISTOGRAM_BINS))]++;
-    const raw = state.raw.rain[index];
+  // This presentation-domain histogram is only for Smooth coverage remapping;
+  // state.smooth.rainMmh itself remains physical and unbounded.
+  for (let index = 0; index < state.raw.rainMmh.length; index++) {
+    const value = Math.max(0, Math.min(RAIN_PRESENTATION_MAX_MMH, state.smooth.rainMmh[index]));
+    histogram[Math.min(HISTOGRAM_BINS - 1, Math.floor(value / RAIN_PRESENTATION_MAX_MMH * HISTOGRAM_BINS))]++;
+    const raw = state.raw.rainMmh[index];
     for (let thresholdIndex = 0; thresholdIndex < AREA_RAIN_THRESHOLDS.length; thresholdIndex++) {
       if (raw >= AREA_RAIN_THRESHOLDS[thresholdIndex]) rainCoverage[thresholdIndex]++;
     }
   }
   let previous = 0;
   for (let index = 0; index < AREA_RAIN_THRESHOLDS.length; index++) {
-    const threshold = coverageThresholdFromHistogram(rainCoverage[index], histogram);
-    state.rainThresholds[index] = Math.max(previous + (index ? 1e-5 : 0), Math.min(1, threshold));
+    const threshold = coverageThresholdFromHistogram(rainCoverage[index], histogram) * RAIN_PRESENTATION_MAX_MMH;
+    state.rainThresholds[index] = Math.max(previous + (index ? 1e-5 : 0), Math.min(RAIN_PRESENTATION_MAX_MMH, threshold));
     previous = state.rainThresholds[index];
   }
   state.stormThreshold = coverageThreshold(state.raw.storm, state.smooth.storm, AREA_STORM_THRESHOLD, histogram);
@@ -154,10 +156,10 @@ export class GeographicScalarLattice {
   evaluate(time, reusable = null) {
     const state = reusable || makeState(this.length);
     const frame = prepareGeographicFieldFrame(time);
-    const value = { rain: 0, storm: 0, hail: 0 };
+    const value = { rainMmh: 0, storm: 0, hail: 0 };
     for (let index = 0; index < this.length; index++) {
       geographicPreparedIntensityAtXY(frame, this.fieldPoints[index * 2], this.fieldPoints[index * 2 + 1], value);
-      state.raw.rain[index] = value.rain;
+      state.raw.rainMmh[index] = value.rainMmh;
       state.raw.storm[index] = value.storm;
       state.raw.hail[index] = value.hail;
     }
@@ -168,7 +170,7 @@ export class GeographicScalarLattice {
   ensureSmooth(state) {
     if (state.smoothReady) return state;
     if (!state.smooth) state.smooth = makeChannels(this.length);
-    for (const channel of ['rain', 'storm', 'hail']) {
+    for (const channel of ['rainMmh', 'storm', 'hail']) {
       smoothChannel(state.raw[channel], state.smooth[channel], this.scratchA, this.scratchB, this.width, this.height);
     }
     remapThresholds(state, this.histogram, this.rainCoverage);

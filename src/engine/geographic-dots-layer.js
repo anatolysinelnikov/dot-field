@@ -6,8 +6,8 @@ import {
   DOTS_STRONG_RAIN_FULL_MMH_DEFAULT,
   DOTS_STRONG_RAIN_FULL_MMH_MAX,
   DOTS_STRONG_RAIN_FULL_MMH_MIN,
-  dotsStrongRainIntensityToRadius,
-  intensityToRadius
+  dotsStrongRainMmhToRadius,
+  rainMmhToRadius
 } from './precipitation-mapping.js';
 import {
   GeographicSymbolPyramid,
@@ -174,15 +174,15 @@ function makeDotsState(length, reusable) {
 
 function evaluateSource(field, geometry, reusable, strongFullMmh) {
   const state = makeDotsState(geometry.spacing.length, reusable);
-  const value = { rain: 0, storm: 0, hail: 0 };
+  const value = { rainMmh: 0, storm: 0, hail: 0 };
   const hazard = { stormRadius: 0, hailRadius: 0 };
   for (let index = 0; index < geometry.spacing.length; index++) {
-    value.rain = field.rain[index];
+    value.rainMmh = field.rainMmh[index];
     value.storm = field.storm[index];
     value.hail = field.hail[index];
     const spacing = geometry.spacing[index];
-    state.rainRadius[index] = intensityToRadius(value.rain, spacing, 'rain');
-    state.strongRadius[index] = dotsStrongRainIntensityToRadius(value.rain, spacing, strongFullMmh);
+    state.rainRadius[index] = rainMmhToRadius(value.rainMmh, spacing);
+    state.strongRadius[index] = dotsStrongRainMmhToRadius(value.rainMmh, spacing, strongFullMmh);
     geographicHazardRadii(value, spacing, hazard);
     state.stormRadius[index] = hazard.stormRadius;
     state.hailRadius[index] = hazard.hailRadius;

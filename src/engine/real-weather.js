@@ -1,5 +1,4 @@
 import { clamp } from './math.js';
-import { RAIN_FULL_SCALE_MMH } from './config.js';
 
 const THUNDERSTORM_LEVELS = Object.freeze({ 0: 0, 10: 0.2660123, 11: 0.4818750, 12: 0.6977377 });
 const HAIL_LEVELS = Object.freeze({ 0: 0, 16: 0.2776807, 17: 0.4897500, 18: 0.7018193 });
@@ -34,13 +33,13 @@ function levelValue(levels, code, row, name) {
 }
 
 export class RealWeatherField {
-  constructor({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rain, storm, hail, sourceRowCount, longitudeSpacing, latitudeSpacing }) {
+  constructor({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rainMmh, storm, hail, sourceRowCount, longitudeSpacing, latitudeSpacing }) {
     this.longitudes = longitudes;
     this.latitudes = latitudes;
     this.mmh = mmh;
     this.thunderstormCode = thunderstormCode;
     this.hailCode = hailCode;
-    this.rain = rain;
+    this.rainMmh = rainMmh;
     this.storm = storm;
     this.hail = hail;
     this.sourceRowCount = sourceRowCount;
@@ -103,7 +102,7 @@ export class RealWeatherField {
   }
 
   sample(longitude, latitude, output = {}) {
-    output.rain = 0;
+    output.rainMmh = 0;
     output.storm = 0;
     output.hail = 0;
     if (longitude < this.bounds.west || longitude > this.bounds.east
@@ -115,12 +114,12 @@ export class RealWeatherField {
     const x1y0 = x0y0 + 1;
     const x0y1 = this.index(x.index, y.index + 1);
     const x1y1 = x0y1 + 1;
-    const interpolate = (values) => {
+    const interpolate = (values, minimum = 0, maximum = 1) => {
       const lower = values[x0y0] + (values[x1y0] - values[x0y0]) * x.fraction;
       const upper = values[x0y1] + (values[x1y1] - values[x0y1]) * x.fraction;
-      return clamp(lower + (upper - lower) * y.fraction, 0, 1);
+      return clamp(lower + (upper - lower) * y.fraction, minimum, maximum);
     };
-    output.rain = interpolate(this.rain);
+    output.rainMmh = interpolate(this.rainMmh, 0, Number.POSITIVE_INFINITY);
     output.storm = interpolate(this.storm);
     output.hail = interpolate(this.hail);
     return output;
@@ -169,7 +168,6 @@ export function parseRealWeatherCsv(csvText) {
   const mmh = new Float64Array(size);
   const thunderstormCode = new Uint8Array(size);
   const hailCode = new Uint8Array(size);
-  const rain = new Float32Array(size);
   const storm = new Float32Array(size);
   const hail = new Float32Array(size);
   const occupied = new Uint8Array(size);
@@ -185,12 +183,11 @@ export function parseRealWeatherCsv(csvText) {
     mmh[index] = row.mmh;
     thunderstormCode[index] = row.thunderstorm;
     hailCode[index] = row.hail;
-    rain[index] = clamp(row.mmh / RAIN_FULL_SCALE_MMH, 0, 1);
     storm[index] = levelValue(THUNDERSTORM_LEVELS, row.thunderstorm, rowIndex + 2, 'thunderstorm');
     hail[index] = levelValue(HAIL_LEVELS, row.hail, rowIndex + 2, 'hail');
   }
   if (occupied.some((value) => value === 0)) fail('one or more grid nodes are missing.');
-  return new RealWeatherField({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rain, storm, hail, sourceRowCount: rows.length, longitudeSpacing, latitudeSpacing });
+  return new RealWeatherField({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rainMmh: mmh, storm, hail, sourceRowCount: rows.length, longitudeSpacing, latitudeSpacing });
 }
 
 export async function loadRealWeatherSnapshot(url) {

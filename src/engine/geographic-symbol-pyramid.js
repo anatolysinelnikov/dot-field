@@ -2,8 +2,8 @@ import { geographicPreparedIntensityAt, geographicToSynthetic } from './geograph
 import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
 import {
   DOTS_STRONG_RAIN_FULL_MMH_DEFAULT,
-  dotsStrongRainIntensityToRadius,
-  intensityToRadius
+  dotsStrongRainMmhToRadius,
+  rainMmhToRadius
 } from './precipitation-mapping.js';
 import { geographicHazardRadii } from './hazard-renderer.js';
 
@@ -104,7 +104,7 @@ export function buildCenteredContributions(fine, coarse) {
 export function evaluateDirect(level, frame, reusable, strongFullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT) {
   const state = makeState(level.samples.length, reusable);
   const { rainRadius, strongRadius, stormRadius, hailRadius } = state;
-  const value = { rain: 0, storm: 0, hail: 0 };
+  const value = { rainMmh: 0, storm: 0, hail: 0 };
   const hazard = { stormRadius: 0, hailRadius: 0 };
   const point = { x: 0, y: 0 };
   const { fieldPoints, samples } = level;
@@ -119,8 +119,8 @@ export function evaluateDirect(level, frame, reusable, strongFullMmh = DOTS_STRO
       point.y = directPoint.y;
     }
     geographicPreparedIntensityAt(frame, point, value);
-    rainRadius[index] = intensityToRadius(value.rain, samples[index].spacing, 'rain');
-    strongRadius[index] = dotsStrongRainIntensityToRadius(value.rain, samples[index].spacing, strongFullMmh);
+    rainRadius[index] = rainMmhToRadius(value.rainMmh, samples[index].spacing);
+    strongRadius[index] = dotsStrongRainMmhToRadius(value.rainMmh, samples[index].spacing, strongFullMmh);
     geographicHazardRadii(value, samples[index].spacing, hazard);
     stormRadius[index] = hazard.stormRadius;
     hailRadius[index] = hazard.hailRadius;

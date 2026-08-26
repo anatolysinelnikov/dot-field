@@ -35,17 +35,20 @@ real geographic field snapshot
 The intended provider boundary remains:
 
 ```text
-provider format -> normalization -> temporal/spatial interpolation
+provider format -> validation -> temporal/spatial interpolation
 -> geographic sampling/reconstruction -> rendering
 ```
 
-`real-weather.js` owns CSV parsing, validation, normalization, typed-array
-storage, and the representation-independent bilinear reconstruction from
-geographic source nodes. The snapshot is loaded once before map initialization;
-renderers receive only normalized channels. Rain, storm, and hail are sampled
-independently from the four surrounding source-node values, with ordinary
-bilinear weights and final `[0, 1]` clamping. The RAW midpoint-cell diagnostic
-does not constrain this reconstruction. The legacy synthetic
+`real-weather.js` owns CSV parsing, validation, physical typed-array storage,
+and the representation-independent bilinear reconstruction from geographic
+source nodes. The snapshot is loaded once before map initialization; renderers
+receive physical `rainMmh` values plus normalized storm and hail channels. Rain,
+storm, and hail are sampled independently from the four surrounding source-node
+values, with ordinary bilinear weights. Rain remains physical `mm/h` through
+interpolation, sampling, LOD reduction, and scalar-lattice reconstruction;
+renderer presentation mappings may use the named 50 mm/h visual anchor but do
+not clamp the data field. The RAW midpoint-cell diagnostic does not constrain
+this reconstruction. The legacy synthetic
 `field.js` remains independent of MapLibre, WebGL, and UI but is not on the
 active data path.
 
@@ -107,11 +110,11 @@ The active provider is `data/mrl_z3_t+40min_376x239.csv`, containing 89,864 rows
 on a regular 376 × 239 longitude/latitude grid. `real-weather.js` validates the
 header, dimensions, complete grid, regular axes (within rounded-coordinate
 tolerance), nonnegative mm/h values, and supported thunderstorm/hail codes. It
-stores raw mm/h and phenomenon codes plus normalized rain, storm, and hail
-channels in typed arrays and bilinearly reconstructs the normalized channels
-between geographic source nodes. Rain normalization is the fixed physical
-scale `clamp(mmh / 50, 0, 1)`, with shared visual anchors at 0.05, 0.10,
-0.30, 1.00, 2.50, 10.0, and 50.0 mm/h. Thunderstorm codes 0/10/11/12 map to
+stores raw `mmh` and exposes the same physical values as `rainMmh`; storm and
+hail remain normalized phenomenon channels. All three channels are bilinearly
+reconstructed between geographic source nodes, with no 50 mm/h rain clamp. The
+renderer mappings use visual anchors at 0.05, 0.10, 0.30, 1.00, 2.50, 10.0,
+and 50.0 mm/h; 50 mm/h is presentation scale only. Thunderstorm codes 0/10/11/12 map to
 0/0.2660123/0.4818750/0.6977377; hail codes 0/16/17/18 map to
 0/0.2776807/0.4897500/0.7018193.
 
@@ -134,7 +137,7 @@ blue, and draws raw thunderstorm/hail codes as solid magenta/yellow inset
 markers. These RAW cell boundaries are diagnostic, not assumed meteorological
 boundaries. Values between source nodes use the shared bilinear reconstruction;
 RAW does not constrain Dots, Squares, Blur, or Areas. RAW never calls the
-normalized bilinear sampler, Mercator LOD, L14 scalar lattice, reconstruction,
+shared bilinear sampler, Mercator LOD, L14 scalar lattice, reconstruction,
 smoothing, aggregation, or renderer mappings. The layer stores only nonzero
 drawing geometry for performance; zero cells remain inspectable through the
 provider's direct regular-grid cell lookup.
