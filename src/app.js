@@ -10,6 +10,7 @@ import {
 } from './engine/geographic-lod.js';
 import { DEFAULT_DOTS_STRONG_FULL_MMH, GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
+import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
 import { GeographicScalarLayer } from './engine/geographic-scalar-layer.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 
@@ -129,8 +130,9 @@ const state = {
   renderMode: 'raw',
   dotsStrongFullMmh: DEFAULT_DOTS_STRONG_FULL_MMH
 };
-const weatherLayer = new GeographicDotsLayer();
-const squaresLayer = new GeographicSquaresLayer();
+const geographicWeatherPyramid = new GeographicWeatherPyramid();
+const weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid);
+const squaresLayer = new GeographicSquaresLayer(geographicWeatherPyramid);
 const scalarLayer = new GeographicScalarLayer();
 const rawLayer = new RawWeatherLayer(rawWeatherField);
 const geographicLayers = [rawLayer, scalarLayer, squaresLayer, weatherLayer];

@@ -5,13 +5,13 @@ import {
   DOTS_STRONG_RAIN_FULL_MMH_MAX,
   DOTS_STRONG_RAIN_FULL_MMH_MIN,
   dotsStrongRainMmhToRadius,
-  rainMmhToRadius
+  rainMmhToRadiusFraction
 } from './precipitation-mapping.js';
-import {
-  GeographicSymbolPyramid,
-  REFERENCE_GRID_LEVEL,
-  STORM_INNER_RATIO
-} from './geographic-symbol-pyramid.js';
+import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH, WEATHER_REFERENCE_LEVEL } from './geographic-weather-pyramid.js';
+import { geographicHazardRadiusForSeverity } from './hazard-renderer.js';
+
+const REFERENCE_GRID_LEVEL = WEATHER_REFERENCE_LEVEL;
+export const STORM_INNER_RATIO = 0.38;
 
 const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1], storm: [1, 0, 1, 1], hail: [1, 0.831, 0, 1] };
 const INSTANCE_STRIDE = 8;
@@ -47,6 +47,67 @@ export const DEFAULT_DOTS_STRONG_FULL_MMH = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT;
 
 export function areaLinearRadius(startRadius, endRadius, progress) {
   return Math.sqrt(startRadius * startRadius + (endRadius * endRadius - startRadius * startRadius) * progress);
+}
+
+function coverageIndex(threshold) {
+  const index = RAIN_COVERAGE_THRESHOLDS_MMH.indexOf(threshold);
+  if (index < 0) throw new Error(`Missing shared rain coverage threshold ${threshold}.`);
+  return index;
+}
+
+const RAIN_COVERAGE_INDEX = coverageIndex(0.05);
+const STRONG_COVERAGE_INDEX = coverageIndex(2.5);
+
+function positiveMean(weightedSeverity, coverageWeight) {
+  return coverageWeight > 0 ? weightedSeverity / coverageWeight : 0;
+}
+
+function summaryCoverage(summary, weight, index) {
+  const total = summary.totalWeight[index];
+  return total > 0 ? weight / total : 0;
+}
+
+function makeMappedState(length, reusable) {
+  if (reusable?.rainRadius?.length === length) return reusable;
+  return {
+    rainRadius: new Float32Array(length),
+    strongRadius: new Float32Array(length),
+    stormRadius: new Float32Array(length),
+    hailRadius: new Float32Array(length)
+  };
+}
+
+// Pure presentation mapping: physical summary values never feed a coarser LOD.
+export function mapDotsWeatherSummary(summary, strongFullMmh = DOTS_STRONG_RAIN_FULL_MMH_DEFAULT, reusable = null) {
+  const state = makeMappedState(summary.samples.length, reusable);
+  for (let index = 0; index < summary.samples.length; index++) {
+    const sample = summary.samples[index];
+    const total = summary.totalWeight[index];
+    const rainCoverageWeight = summary.rainCoverageWeight[RAIN_COVERAGE_INDEX][index];
+    const rainCoverage = summaryCoverage(summary, rainCoverageWeight, index);
+    const wetMeanMmh = positiveMean(summary.rainWeightedSumMmh[index], rainCoverageWeight);
+    const strongCoverage = summaryCoverage(summary, summary.rainCoverageWeight[STRONG_COVERAGE_INDEX][index], index);
+    state.rainRadius[index] = sample.spacing * Math.sqrt(rainCoverage) * rainMmhToRadiusFraction(wetMeanMmh);
+    state.strongRadius[index] = sample.spacing * Math.sqrt(strongCoverage)
+      * dotsStrongRainMmhToRadius(summary.rainMaxMmh[index], 1, strongFullMmh);
+
+    const hailCoverageWeight = summary.hailCoverageWeight[index];
+    const hailCoverage = summaryCoverage(summary, hailCoverageWeight, index);
+    const hailMean = positiveMean(summary.hailWeightedSeverity[index], hailCoverageWeight);
+    const hailPresent = total > 0 && summary.hailMaxSeverity[index] > 0;
+    state.hailRadius[index] = hailPresent
+      ? Math.sqrt(hailCoverage) * geographicHazardRadiusForSeverity('hail', hailMean, sample.spacing)
+      : 0;
+
+    const stormCoverageWeight = summary.stormCoverageWeight[index];
+    const stormCoverage = summaryCoverage(summary, stormCoverageWeight, index);
+    const stormMean = positiveMean(summary.stormWeightedSeverity[index], stormCoverageWeight);
+    // Hail remains the presentation winner, while both physical summaries stay intact.
+    state.stormRadius[index] = !hailPresent && total > 0 && summary.stormMaxSeverity[index] > 0
+      ? Math.sqrt(stormCoverage) * geographicHazardRadiusForSeverity('storm', stormMean, sample.spacing)
+      : 0;
+  }
+  return state;
 }
 
 class InstanceWriter {
@@ -207,7 +268,7 @@ function isHierarchicalTransition(fromLevel, toLevel) {
 }
 
 export class GeographicDotsLayer {
-  constructor() {
+  constructor(weatherPyramid = new GeographicWeatherPyramid()) {
     this.id = 'geographic-weather-dots';
     this.type = 'custom';
     this.renderingMode = '3d';
@@ -216,7 +277,8 @@ export class GeographicDotsLayer {
     this.instanceWriters = { rain: new InstanceWriter(), strong: new InstanceWriter(), storm: new InstanceWriter(), hail: new InstanceWriter() };
     this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.bufferCapacity = { rain: 0, strong: 0, storm: 0, hail: 0 };
-    this.pyramid = new GeographicSymbolPyramid();
+    this.weatherPyramid = weatherPyramid;
+    this.topology = weatherPyramid.topology;
     this.samples = [];
     this.transition = null;
     this.transitionProgress = 1;
@@ -249,7 +311,10 @@ export class GeographicDotsLayer {
 
   evaluateKeyframe(index, reusableStates = null) {
     const time = index / TEMPORAL_FRAME_COUNT;
-    return this.pyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time), reusableStates, this.strongFullMmh);
+    const summaries = this.weatherPyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time), reusableStates?.summaries);
+    const mapped = new Array(REFERENCE_GRID_LEVEL + 1);
+    for (const level of this.activeLevels()) mapped[level] = mapDotsWeatherSummary(summaries[level], this.strongFullMmh, reusableStates?.mapped?.[level]);
+    return { summaries, mapped };
   }
 
   rebuildTemporal(time) {
@@ -327,9 +392,9 @@ export class GeographicDotsLayer {
     const { frames0, frames1 } = this.temporal;
     if (!this.transition) {
       const level = this.samples[0].level;
-      const anchors = this.pyramid.levels.get(level).canonicalAnchors;
+      const anchors = this.topology.levels.get(level).canonicalAnchors;
       for (const type of WEATHER_TYPES) {
-        this.setInstances(type, buildSameLevelTemporalInstances(frames0[level], frames1[level], anchors, RADIUS_KEYS[type], this.instanceWriters[type]));
+        this.setInstances(type, buildSameLevelTemporalInstances(frames0.mapped[level], frames1.mapped[level], anchors, RADIUS_KEYS[type], this.instanceWriters[type]));
       }
     } else {
       const fromLevel = this.transition.fromSamples[0].level;
@@ -338,32 +403,32 @@ export class GeographicDotsLayer {
       const refining = toLevel > fromLevel;
       const coarseLevel = refining ? fromLevel : toLevel;
       const fineLevel = refining ? toLevel : fromLevel;
-      const pairs = hierarchical ? null : this.pyramid.directPairsFor(Math.min(fromLevel, toLevel), Math.max(fromLevel, toLevel));
+      const pairs = hierarchical ? null : this.topology.directPairsFor(Math.min(fromLevel, toLevel), Math.max(fromLevel, toLevel));
       const fromIsLower = fromLevel < toLevel;
-      const coarseAnchors = this.pyramid.levels.get(coarseLevel).canonicalAnchors;
-      const fineAnchors = this.pyramid.levels.get(fineLevel).canonicalAnchors;
-      const fromAnchors = this.pyramid.levels.get(fromLevel).canonicalAnchors;
-      const toAnchors = this.pyramid.levels.get(toLevel).canonicalAnchors;
+      const coarseAnchors = this.topology.levels.get(coarseLevel).canonicalAnchors;
+      const fineAnchors = this.topology.levels.get(fineLevel).canonicalAnchors;
+      const fromAnchors = this.topology.levels.get(fromLevel).canonicalAnchors;
+      const toAnchors = this.topology.levels.get(toLevel).canonicalAnchors;
 
       for (const type of WEATHER_TYPES) {
         const data = hierarchical
           ? buildHierarchicalTemporalInstances(
-            frames0[coarseLevel],
-            frames0[fineLevel],
-            frames1[coarseLevel],
-            frames1[fineLevel],
+            frames0.mapped[coarseLevel],
+            frames0.mapped[fineLevel],
+            frames1.mapped[coarseLevel],
+            frames1.mapped[fineLevel],
             coarseAnchors,
             fineAnchors,
-            this.pyramid.parents.get(fineLevel).childIndices,
+            this.topology.transitionParentsFor(fineLevel).childIndices,
             RADIUS_KEYS[type],
             refining,
             this.instanceWriters[type]
           )
           : buildDirectTemporalInstances(
-            frames0[fromLevel],
-            frames0[toLevel],
-            frames1[fromLevel],
-            frames1[toLevel],
+            frames0.mapped[fromLevel],
+            frames0.mapped[toLevel],
+            frames1.mapped[fromLevel],
+            frames1.mapped[toLevel],
             fromAnchors,
             toAnchors,
             pairs,

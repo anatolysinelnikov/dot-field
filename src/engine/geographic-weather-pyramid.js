@@ -1,9 +1,9 @@
 import { geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
 import {
   MAX_DISPLAY_GRID_LEVEL,
-  MAX_GRID_LEVEL,
   MIN_GRID_LEVEL,
-  selectMercatorGridSamples
+  MAX_GRID_LEVEL,
+  GeographicLodTopology
 } from './geographic-lod.js';
 
 export const WEATHER_REFERENCE_LEVEL = MAX_DISPLAY_GRID_LEVEL;
@@ -160,17 +160,10 @@ export function aggregateWeatherSummary(parentLevel, childSummary, contributions
 }
 
 export class GeographicWeatherPyramid {
-  constructor(summaryArrayType = Float32Array) {
+  constructor(summaryArrayType = Float32Array, topology = new GeographicLodTopology()) {
     this.summaryArrayType = summaryArrayType;
-    this.levels = new Map();
-    for (let level = MIN_GRID_LEVEL; level <= MAX_DISPLAY_GRID_LEVEL; level++) {
-      const selection = selectMercatorGridSamples(level);
-      this.levels.set(level, {
-        level,
-        samples: selection.samples,
-        samplesById: new Map(selection.samples.map((sample, index) => [sample.id, index]))
-      });
-    }
+    this.topology = topology;
+    this.levels = topology.levels;
 
     this.contributions = new Map();
     for (let level = MIN_GRID_LEVEL + 1; level <= MAX_DISPLAY_GRID_LEVEL; level++) {

@@ -7,6 +7,10 @@ import {
 } from '../src/engine/geographic-weather-pyramid.js';
 import { prepareGeographicFieldFrame, setActiveWeatherField } from '../src/engine/geography.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
+import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
+import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
+import { DOTS_STRONG_RAIN_FULL_MMH_DEFAULT, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
+import { geographicHazardRadii } from '../src/engine/hazard-renderer.js';
 
 const LEVELS = [10, 11, 12, 13, 14];
 const CHANNELS = [
@@ -357,6 +361,71 @@ for (const level of LEVELS) {
 }
 console.log(`summary schema: ${bytesPerSample} bytes/sample, ${totalSummaryBytes} bytes (${(totalSummaryBytes / 1024 / 1024).toFixed(3)} MiB) per state, ${(totalSummaryBytes * 2 / 1024 / 1024).toFixed(3)} MiB for two states`);
 console.log(`centered contribution entries: ${centeredEntries}, ${centeredMappingBytes} topology mapping bytes (${(centeredMappingBytes / 1024 / 1024).toFixed(3)} MiB)`);
+
+// Phase 4 renderer mappings consume physical summaries only; no WebGL is needed.
+const sharedDots = new GeographicDotsLayer(pyramid);
+const sharedSquares = new GeographicSquaresLayer(pyramid);
+check(sharedDots.weatherPyramid === pyramid && sharedSquares.weatherPyramid === pyramid, 'Dots and Squares share one GeographicWeatherPyramid instance');
+
+function mapFixture(summary) {
+  summary.samples = summary.samples.map(() => ({ spacing: 0.01 }));
+  return { dots: mapDotsWeatherSummary(summary), squares: mapSquaresWeatherSummary(summary) };
+}
+
+let dotsL14Error = 0;
+let squaresL14Error = 0;
+let hazardL14Error = 0;
+const directDots = mapDotsWeatherSummary(float32Summaries[14]);
+const directSquares = mapSquaresWeatherSummary(float32Summaries[14]);
+for (let index = 0; index < float32Summaries[14].samples.length; index++) {
+  const sample = float32Summaries[14].samples[index];
+  const value = frame.sample(sample.lngLat[0], sample.lngLat[1]);
+  dotsL14Error = Math.max(dotsL14Error,
+    Math.abs(directDots.rainRadius[index] - Math.fround(rainMmhToRadius(Math.fround(value.rainMmh), sample.spacing))),
+    Math.abs(directDots.strongRadius[index] - Math.fround(dotsStrongRainMmhToRadius(Math.fround(value.rainMmh), sample.spacing, DOTS_STRONG_RAIN_FULL_MMH_DEFAULT))));
+  const directHazard = { stormRadius: 0, hailRadius: 0 };
+  geographicHazardRadii({ storm: Math.fround(value.storm), hail: Math.fround(value.hail) }, sample.spacing, directHazard);
+  hazardL14Error = Math.max(hazardL14Error,
+    Math.abs(directDots.stormRadius[index] - Math.fround(directHazard.stormRadius)),
+    Math.abs(directDots.hailRadius[index] - Math.fround(directHazard.hailRadius)));
+  squaresL14Error = Math.max(squaresL14Error,
+    Math.abs(directSquares.rainWetMeanMmh[index] - Math.fround(value.rainMmh)),
+    Math.abs(directSquares.rainCoverage[index] - (value.rainMmh >= 0.05 ? 1 : 0)),
+    Math.abs(directSquares.stormMeanSeverity[index] - Math.fround(value.storm)),
+    Math.abs(directSquares.stormCoverage[index] - (value.storm > 0 ? 1 : 0)),
+    Math.abs(directSquares.hailMeanSeverity[index] - Math.fround(value.hail)),
+    Math.abs(directSquares.hailCoverage[index] - (value.hail > 0 ? 1 : 0)));
+}
+console.log(`Phase 4 L14 errors: Dots rain/strong=${dotsL14Error}, Dots hazards=${hazardL14Error}, Squares inputs=${squaresL14Error}`);
+// Weather summaries are Float32. These bounds cover the final Float32 glyph
+// state and the largest observed physical rain value's Float32 ULP.
+check(dotsL14Error <= 1e-5, 'Dots L14 rain/strong mapping equivalence');
+check(hazardL14Error <= 5e-5, 'Dots L14 hazard mapping equivalence');
+check(squaresL14Error <= 0.1, 'Squares L14 mapping equivalence');
+
+const mappingUniform = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([5, 5, 5, 5]).summary, fourToOne, null, Float64Array));
+const mappingLocalized = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([0, 0, 0, 20]).summary, fourToOne, null, Float64Array));
+console.log(`Phase 4 uniform: dots=${mappingUniform.dots.rainRadius[0]}, square wet=${mappingUniform.squares.rainWetMeanMmh[0]}, coverage=${mappingUniform.squares.rainCoverage[0]}`);
+console.log(`Phase 4 localized: dots=${mappingLocalized.dots.rainRadius[0]}, strong=${mappingLocalized.dots.strongRadius[0]}, square wet=${mappingLocalized.squares.rainWetMeanMmh[0]}, coverage=${mappingLocalized.squares.rainCoverage[0]}`);
+check(mappingUniform.dots.rainRadius[0] !== mappingLocalized.dots.rainRadius[0], 'Dots distinguish uniform and localized rain');
+check(mappingUniform.squares.rainCoverage[0] === 1 && mappingLocalized.squares.rainCoverage[0] === 0.25, 'Squares retain uniform/localized coverage distinction');
+check(mappingUniform.squares.rainWetMeanMmh[0] === 5 && mappingLocalized.squares.rainWetMeanMmh[0] === 20, 'Squares retain wet-area intensity distinction');
+check(mappingLocalized.dots.strongRadius[0] > 0, 'localized strong rain remains present');
+
+const mappingHazard = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([0, 0, 0, 0], [0, 0, 0, stormSeverity], [0, 0, 0, 0.61]).summary, fourToOne, null, Float64Array));
+console.log(`Phase 4 localized hazards: dots storm=${mappingHazard.dots.stormRadius[0]}, hail=${mappingHazard.dots.hailRadius[0]}, square stormCoverage=${mappingHazard.squares.stormCoverage[0]}, hailCoverage=${mappingHazard.squares.hailCoverage[0]}`);
+check(mappingHazard.dots.hailRadius[0] > 0 && mappingHazard.dots.stormRadius[0] === 0, 'localized hail retains Dots priority');
+check(mappingHazard.squares.stormCoverage[0] > 0 && mappingHazard.squares.hailCoverage[0] > 0, 'localized hazards remain in Squares summaries');
+
+const mappingHigh = mapFixture(aggregateWeatherSummary(fixtureParent, directFixture([80, 120]).summary, {
+  offsets: new Uint32Array([0, 1, 2]), parentIndices: new Uint32Array([0, 0]), weights: new Float64Array([0.5, 0.5])
+}, null, Float64Array));
+check(mappingHigh.dots.strongRadius[0] > 0 && mappingHigh.squares.rainWetMeanMmh[0] === 100, 'renderer mapping preserves physical high-rain inputs');
+
+const dotsSource = fs.readFileSync(new URL('../src/engine/geographic-dots-layer.js', import.meta.url), 'utf8');
+const squaresSource = fs.readFileSync(new URL('../src/engine/geographic-squares-layer.js', import.meta.url), 'utf8');
+check(!dotsSource.includes('GeographicSymbolPyramid') && !dotsSource.includes('reduceState('), 'Dots has no renderer-owned weather reduction');
+check(!squaresSource.includes('GeographicSquarePyramid') && !squaresSource.includes('stormMax *'), 'Squares has no renderer-owned weather reduction');
 
 console.log(failures ? `VERIFICATION FAILED: ${failures}` : 'VERIFICATION PASSED');
 if (failures) process.exitCode = 1;
