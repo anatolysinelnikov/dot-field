@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert one NetCDF weather timestep to Dot Field's normalized CSV.
+"""Convert NetCDF weather data to Dot Field's normalized CSV or binary sequence.
 
 This is an offline conversion tool. It intentionally does not share code with
 the browser runtime and does not write anything outside the generated-data
@@ -38,6 +38,16 @@ CSV_COLUMNS = ("lon", "lat", "mmh", "thunderstorm", "hail")
 REGULAR_SPACING_TOLERANCE = 2e-5
 FLOAT_FORMAT = ".9g"
 COORDINATE_FORMAT = ".17g"
+SEQUENCE_SCHEMA_VERSION = "dot-field-netcdf-sequence-v1"
+SEQUENCE_HALO_CELLS = 1
+# Snapshot of the checked-in WEATHER_SUPPORT in src/engine/geography.js.
+CURRENT_WEATHER_SUPPORT = {
+    "west": 39.93113,
+    "east": 50.12886,
+    "south": 41.57035,
+    "north": 45.12740,
+}
+DEFAULT_AVAILABILITY_PATH = Path("data/availability/available_region_latest.json")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -54,6 +64,17 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/generated"),
         help="directory for generated CSV and JSON (default: data/generated)",
+    )
+    result.add_argument(
+        "--sequence",
+        action="store_true",
+        help="export all source timesteps as rain.f32 plus metadata.json",
+    )
+    result.add_argument(
+        "--availability",
+        type=Path,
+        default=DEFAULT_AVAILABILITY_PATH,
+        help="diagnostic observation-coverage GeoJSON for --sequence",
     )
     result.add_argument(
         "--assume-units",
@@ -312,8 +333,422 @@ def write_csv(
                 )
 
 
-def main() -> int:
-    args = parser().parse_args()
+def resolve_precipitation_units(precipitation: Any, assume_units: str | None) -> tuple[str | None, str, float, str]:
+    source_units = attr(precipitation, "units")
+    if source_units is None:
+        if assume_units is None:
+            raise SystemExit(
+                "source variable intensity has no units metadata; refusing to "
+                "label values as mm/h. Re-run with an explicit assumption, "
+                "for example --assume-units mm/h, after verifying the source semantics."
+            )
+        effective_units = assume_units
+        unit_basis = f"explicit command-line assumption: {assume_units}"
+    else:
+        if assume_units is not None:
+            raise SystemExit("--assume-units may only be used when source units metadata is absent")
+        effective_units = str(source_units)
+        unit_basis = "source units metadata"
+    factor, conversion = unit_factor_to_mmh(effective_units)
+    return (str(source_units) if source_units is not None else None, unit_basis, factor, conversion)
+
+
+def decode_times(time_variable: Any, time_values: np.ndarray) -> list[str]:
+    timestamp_units = attr(time_variable, "units")
+    if timestamp_units is None:
+        raise ValueError("time variable has no units metadata; timestamp semantics are unavailable")
+    calendar = attr(time_variable, "calendar") or "standard"
+    timestamps = num2date(
+        time_values,
+        units=timestamp_units,
+        calendar=calendar,
+        only_use_cftime_datetimes=False,
+    )
+    return [decoded_timestamp(item) for item in timestamps]
+
+
+def source_grid_crop(longitudes: np.ndarray, latitudes: np.ndarray) -> dict[str, Any]:
+    support = CURRENT_WEATHER_SUPPORT
+    support_x0 = int(np.searchsorted(longitudes, support["west"], side="right") - 1)
+    support_x1 = int(np.searchsorted(longitudes, support["east"], side="left"))
+    support_y0 = int(np.searchsorted(latitudes, support["south"], side="right") - 1)
+    support_y1 = int(np.searchsorted(latitudes, support["north"], side="left"))
+    support_node_x0 = int(np.searchsorted(longitudes, support["west"], side="left"))
+    support_node_x1 = int(np.searchsorted(longitudes, support["east"], side="right") - 1)
+    support_node_y0 = int(np.searchsorted(latitudes, support["south"], side="left"))
+    support_node_y1 = int(np.searchsorted(latitudes, support["north"], side="right") - 1)
+    x0 = support_x0 - SEQUENCE_HALO_CELLS
+    x1 = support_x1 + SEQUENCE_HALO_CELLS
+    y0 = support_y0 - SEQUENCE_HALO_CELLS
+    y1 = support_y1 + SEQUENCE_HALO_CELLS
+    if min(x0, y0) < 0 or x1 >= longitudes.size or y1 >= latitudes.size:
+        raise ValueError("current WEATHER_SUPPORT plus halo lies outside the source grid")
+    width = x1 - x0 + 1
+    height = y1 - y0 + 1
+    return {
+        "x_start": x0,
+        "x_end": x1,
+        "y_start": y0,
+        "y_end": y1,
+        "support_x_start": support_x0,
+        "support_x_end": support_x1,
+        "support_y_start": support_y0,
+        "support_y_end": support_y1,
+        "support_node_x_start": support_node_x0,
+        "support_node_x_end": support_node_x1,
+        "support_node_y_start": support_node_y0,
+        "support_node_y_end": support_node_y1,
+        "width": width,
+        "height": height,
+        "node_count": width * height,
+        "longitude_start": float(longitudes[x0]),
+        "longitude_end": float(longitudes[x1]),
+        "latitude_start": float(latitudes[y0]),
+        "latitude_end": float(latitudes[y1]),
+        "longitude_spacing": float(np.mean(np.diff(longitudes))),
+        "latitude_spacing": float(np.mean(np.diff(latitudes))),
+    }
+
+
+def load_observation_polygons(path: Path) -> tuple[list[list[list[float]]], dict[str, Any]]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    geometry = document.get("geometry")
+    if document.get("type") != "Feature" or not isinstance(geometry, dict):
+        raise ValueError("availability GeoJSON must have a Feature root with geometry")
+    if geometry.get("type") != "GeometryCollection":
+        raise ValueError("availability GeoJSON geometry must be a GeometryCollection")
+    polygons = []
+    for item in geometry.get("geometries", []):
+        if item.get("type") != "Polygon" or len(item.get("coordinates", [])) != 1:
+            raise ValueError("availability GeoJSON must contain single-ring Polygon geometries")
+        ring = item["coordinates"][0]
+        if len(ring) < 4 or ring[0] != ring[-1]:
+            raise ValueError("availability polygon rings must be closed")
+        polygons.append(ring)
+    if not polygons:
+        raise ValueError("availability GeoJSON contains no polygons")
+    points = [point for polygon in polygons for point in polygon]
+    properties = document.get("properties") or {}
+    return polygons, {
+        "source_filename": path.name,
+        "root_type": document.get("type"),
+        "geometry_type": geometry.get("type"),
+        "polygon_count": len(polygons),
+        "radar_id_count": len(properties.get("radar_ids", [])),
+        "bounds": {
+            "west": min(point[0] for point in points),
+            "east": max(point[0] for point in points),
+            "south": min(point[1] for point in points),
+            "north": max(point[1] for point in points),
+        },
+        "timestamp_present": "timestamp" in properties,
+        "run_identifier_present": any(
+            key in properties for key in ("run_id", "run_identifier", "run")
+        ),
+        "temporal_compatibility": "unverified; source artifact has no timestamp or run metadata",
+        "applied_as_rain_mask": False,
+    }
+
+
+def points_in_polygon_union(longitudes: np.ndarray, latitudes: np.ndarray, polygons: list[list[list[float]]]) -> np.ndarray:
+    xs, ys = np.meshgrid(longitudes, latitudes)
+    result = np.zeros(xs.shape, dtype=bool)
+    for polygon in polygons:
+        coordinates = np.asarray(polygon, dtype=np.float64)
+        px = coordinates[:, 0]
+        py = coordinates[:, 1]
+        candidate = (
+            (xs >= px.min() - 1e-8)
+            & (xs <= px.max() + 1e-8)
+            & (ys >= py.min() - 1e-8)
+            & (ys <= py.max() + 1e-8)
+        )
+        if not candidate.any():
+            continue
+        x = xs[candidate]
+        y = ys[candidate]
+        inside = np.zeros(x.shape, dtype=bool)
+        for index in range(len(coordinates) - 1):
+            x1, y1 = coordinates[index]
+            x2, y2 = coordinates[index + 1]
+            on_edge = (
+                np.abs((x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)) <= 1e-8
+            ) & (
+                x >= min(x1, x2) - 1e-8
+            ) & (
+                x <= max(x1, x2) + 1e-8
+            ) & (
+                y >= min(y1, y2) - 1e-8
+            ) & (
+                y <= max(y1, y2) + 1e-8
+            )
+            crosses = (y1 > y) != (y2 > y)
+            edge_x = (x2 - x1) * (y - y1) / (y2 - y1) + x1 if y2 != y1 else np.full_like(x, np.inf)
+            inside ^= crosses & (x <= edge_x)
+            inside |= on_edge
+        result[candidate] |= inside
+    return result
+
+
+def sequence_frame_statistics(
+    values: np.ndarray,
+    longitudes: np.ndarray,
+    latitudes: np.ndarray,
+) -> dict[str, Any]:
+    stats = source_stats(values)
+    nonzero = values > 0
+    y, x = np.nonzero(nonzero)
+    stats["non_zero_bounds"] = (
+        {
+            "west": float(longitudes[x].min()),
+            "east": float(longitudes[x].max()),
+            "south": float(latitudes[y].min()),
+            "north": float(latitudes[y].max()),
+        }
+        if len(x)
+        else None
+    )
+    return stats
+
+
+def sequence_metadata(
+    source: Path,
+    dataset: Any,
+    precipitation: Any,
+    time_variable: Any,
+    timestamps: list[str],
+    crop: dict[str, Any],
+    frame_statistics: list[dict[str, Any]],
+    union_nonzero: np.ndarray,
+    crop_longitudes: np.ndarray,
+    crop_latitudes: np.ndarray,
+    original_units: str | None,
+    unit_basis: str,
+    conversion: str,
+    observation: dict[str, Any],
+    support_available_nodes: int,
+    support_node_count: int,
+    crop_available_nodes: int,
+    first_frame_coverage: dict[str, Any],
+    per_frame_coverage: list[dict[str, Any]],
+) -> dict[str, Any]:
+    union_y, union_x = np.nonzero(union_nonzero)
+    element_count = len(timestamps) * crop["node_count"]
+    union_bounds = {
+        "west": float(crop_longitudes[union_x].min()),
+        "east": float(crop_longitudes[union_x].max()),
+        "south": float(crop_latitudes[union_y].min()),
+        "north": float(crop_latitudes[union_y].max()),
+    } if len(union_x) else None
+    return {
+        "schema_version": SEQUENCE_SCHEMA_VERSION,
+        "source": {
+            "filename": source.name,
+            "format": {
+                "data_model": dataset.data_model,
+                "disk_format": dataset.disk_format,
+                "file_format": dataset.file_format,
+            },
+            "dimensions": {name: len(dimension) for name, dimension in dataset.dimensions.items()},
+            "precipitation_variable": precipitation.name,
+            "precipitation_dimensions": list(precipitation.dimensions),
+            "precipitation_dtype": str(precipitation.dtype),
+            "original_units": original_units,
+            "normalized_units": "mm/h",
+            "unit_basis": unit_basis,
+            "unit_conversion": conversion,
+        },
+        "time": {
+            "variable": time_variable.name,
+            "timestamps": timestamps,
+            "count": len(timestamps),
+            "interval_minutes": 10,
+            "units": attr(time_variable, "units"),
+            "calendar": attr(time_variable, "calendar") or "standard",
+            "timezone": "unspecified in source metadata",
+            "sequence_start": timestamps[0],
+            "sequence_end": timestamps[-1],
+        },
+        "spatial_grid": {
+            "width": crop["width"],
+            "height": crop["height"],
+            "longitude_start": crop["longitude_start"],
+            "latitude_start": crop["latitude_start"],
+            "longitude_spacing": crop["longitude_spacing"],
+            "latitude_spacing": crop["latitude_spacing"],
+            "longitude_order": "west_to_east",
+            "latitude_order": "south_to_north",
+            "source_crop_indices": {
+                "x_start": crop["x_start"],
+                "x_end": crop["x_end"],
+                "y_start": crop["y_start"],
+                "y_end": crop["y_end"],
+            },
+            "support_enclosing_indices": {
+                "x_start": crop["support_x_start"],
+                "x_end": crop["support_x_end"],
+                "y_start": crop["support_y_start"],
+                "y_end": crop["support_y_end"],
+            },
+            "support_node_indices": {
+                "x_start": crop["support_node_x_start"],
+                "x_end": crop["support_node_x_end"],
+                "y_start": crop["support_node_y_start"],
+                "y_end": crop["support_node_y_end"],
+            },
+            "crop_bounds": {
+                "west": crop["longitude_start"],
+                "east": crop["longitude_end"],
+                "south": crop["latitude_start"],
+                "north": crop["latitude_end"],
+            },
+            "current_weather_support": CURRENT_WEATHER_SUPPORT,
+            "halo_source_grid_cells": SEQUENCE_HALO_CELLS,
+        },
+        "binary": {
+            "filename": "rain.f32",
+            "dtype": "Float32",
+            "byte_order": "little-endian",
+            "logical_dimensions": ["time", "latitude", "longitude"],
+            "shape": [len(timestamps), crop["height"], crop["width"]],
+            "element_count": element_count,
+            "byte_count": element_count * 4,
+        },
+        "rain": {
+            "available": True,
+            "union_nonzero_bounds": union_bounds,
+            "union_distinct_nonzero_nodes": int(union_nonzero.sum()),
+            "per_frame_statistics": frame_statistics,
+        },
+        "channels": {
+            "rain": True,
+            "storm": False,
+            "hail": False,
+        },
+        "observation_coverage_diagnostic": {
+            **observation,
+            "current_support_node_count": support_node_count,
+            "current_support_available_nodes": support_available_nodes,
+            "current_support_available_percent": 100 * support_available_nodes / support_node_count,
+            "crop_available_nodes": crop_available_nodes,
+            "first_frame_nonzero": first_frame_coverage,
+            "per_frame_nonzero_coverage": per_frame_coverage,
+            "interpretation": "observation footprint only; forecast/nowcast rain outside it remains valid source data",
+        },
+    }
+
+
+def convert_sequence(args: argparse.Namespace) -> int:
+    source = args.source.resolve()
+    availability_path = args.availability.resolve()
+    if not source.is_file():
+        raise SystemExit(f"source file does not exist: {source}")
+    if not availability_path.is_file():
+        raise SystemExit(f"availability file does not exist: {availability_path}")
+
+    polygons, observation = load_observation_polygons(availability_path)
+    with Dataset(source, "r") as dataset:
+        dataset.set_auto_mask(True)
+        time_variable, longitude_variable, latitude_variable, precipitation = validate_source_contract(dataset)
+        original_units, unit_basis, factor, conversion = resolve_precipitation_units(precipitation, args.assume_units)
+        time_values = np.asarray(time_variable[:])
+        timestamps = decode_times(time_variable, time_values)
+        if len(timestamps) != 19:
+            raise ValueError(f"sequence export requires 19 timesteps, received {len(timestamps)}")
+        if not np.all(np.diff(time_values.astype(np.float64)) == 10):
+            raise ValueError("sequence export requires uniformly spaced 10-minute timesteps")
+        longitudes = np.asarray(longitude_variable[:], dtype=np.float64)
+        latitudes = np.asarray(latitude_variable[:], dtype=np.float64)
+        longitude_spacing, _ = coordinate_spacing(longitudes, "longitude")
+        latitude_spacing, _ = coordinate_spacing(latitudes, "latitude")
+        crop = source_grid_crop(longitudes, latitudes)
+        crop["longitude_spacing"] = longitude_spacing
+        crop["latitude_spacing"] = latitude_spacing
+        crop_longitudes = longitudes[crop["x_start"]:crop["x_end"] + 1]
+        crop_latitudes = latitudes[crop["y_start"]:crop["y_end"] + 1]
+        crop_availability = points_in_polygon_union(crop_longitudes, crop_latitudes, polygons)
+        support_longitudes = longitudes[crop["support_node_x_start"]:crop["support_node_x_end"] + 1]
+        support_latitudes = latitudes[crop["support_node_y_start"]:crop["support_node_y_end"] + 1]
+        support_availability = points_in_polygon_union(support_longitudes, support_latitudes, polygons)
+        sequence = np.empty((len(timestamps), crop["height"], crop["width"]), dtype=np.float32)
+        frame_statistics = []
+        per_frame_coverage = []
+        union_nonzero = np.zeros((crop["height"], crop["width"]), dtype=bool)
+        for time_index, timestamp in enumerate(timestamps):
+            masked_values = np.ma.asarray(
+                precipitation[time_index, crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1]
+            )
+            values = np.asarray(masked_values.filled(np.nan), dtype=np.float64)
+            raw_stats = source_stats(values)
+            if raw_stats["missing_cells"]:
+                raise SystemExit(
+                    f"timestep {time_index} contains {raw_stats['missing_cells']} missing cells; "
+                    "rain.f32 cannot preserve missing values as a separate state"
+                )
+            if raw_stats["negative_cells"]:
+                raise SystemExit(f"timestep {time_index} contains negative precipitation cells")
+            normalized = values * factor
+            sequence[time_index] = normalized.astype("<f4")
+            frame_statistics.append(sequence_frame_statistics(normalized, crop_longitudes, crop_latitudes))
+            nonzero = normalized > 0
+            union_nonzero |= nonzero
+            nonzero_y, nonzero_x = np.nonzero(nonzero)
+            inside = crop_availability[nonzero_y, nonzero_x]
+            per_frame_coverage.append({
+                "timestamp": timestamp,
+                "non_zero_nodes": int(nonzero.sum()),
+                "inside_observation": int(inside.sum()),
+                "outside_observation": int((~inside).sum()),
+            })
+
+        output_dir = args.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        rain_path = output_dir / "rain.f32"
+        metadata_path = output_dir / "metadata.json"
+        np.asarray(sequence, dtype="<f4").tofile(rain_path)
+        metadata = sequence_metadata(
+            source,
+            dataset,
+            precipitation,
+            time_variable,
+            timestamps,
+            crop,
+            frame_statistics,
+            union_nonzero,
+            crop_longitudes,
+            crop_latitudes,
+            original_units,
+            unit_basis,
+            conversion,
+            observation,
+            int(support_availability.sum()),
+            int(support_availability.size),
+            int(crop_availability.sum()),
+            per_frame_coverage[0],
+            per_frame_coverage,
+        )
+        with metadata_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+
+    print(f"wrote {rain_path} ({metadata['binary']['byte_count']} bytes)")
+    print(f"wrote {metadata_path}")
+    print(
+        f"sequence {timestamps[0]}..{timestamps[-1]}: "
+        f"crop={crop['width']}x{crop['height']} "
+        f"union_nonzero_nodes={metadata['rain']['union_distinct_nonzero_nodes']}"
+    )
+    print(
+        "observation diagnostic: "
+        f"support_available={metadata['observation_coverage_diagnostic']['current_support_available_percent']:.6f}% "
+        f"first_frame_outside={per_frame_coverage[0]['outside_observation']} "
+        f"last_frame_outside={per_frame_coverage[-1]['outside_observation']} "
+        "(not used as a rain mask)"
+    )
+    return 0
+
+
+def convert_csv(args: argparse.Namespace) -> int:
     source = args.source.resolve()
     if not source.is_file():
         raise SystemExit(f"source file does not exist: {source}")
@@ -326,38 +761,13 @@ def main() -> int:
             raise SystemExit(
                 f"time index {args.time_index} is outside 0..{time_values.size - 1}"
             )
-        source_units = attr(precipitation, "units")
-        if source_units is None:
-            if args.assume_units is None:
-                raise SystemExit(
-                    "source variable intensity has no units metadata; refusing to "
-                    "label values as mm/h. Re-run with an explicit assumption, "
-                    "for example --assume-units mm/h, after verifying the source semantics."
-                )
-            effective_units = args.assume_units
-            unit_basis = f"explicit command-line assumption: {args.assume_units}"
-        else:
-            if args.assume_units is not None:
-                raise SystemExit("--assume-units may only be used when source units metadata is absent")
-            effective_units = str(source_units)
-            unit_basis = "source units metadata"
-        factor, conversion = unit_factor_to_mmh(effective_units)
+        source_units, unit_basis, factor, conversion = resolve_precipitation_units(precipitation, args.assume_units)
 
         longitudes = np.asarray(longitude_variable[:], dtype=np.float64)
         latitudes = np.asarray(latitude_variable[:], dtype=np.float64)
         longitude_spacing, longitude_error = coordinate_spacing(longitudes, "longitude")
         latitude_spacing, latitude_error = coordinate_spacing(latitudes, "latitude")
-        timestamp_units = attr(time_variable, "units")
-        if timestamp_units is None:
-            raise ValueError("time variable has no units metadata; timestamp semantics are unavailable")
-        calendar = attr(time_variable, "calendar") or "standard"
-        timestamps = num2date(
-            time_values,
-            units=timestamp_units,
-            calendar=calendar,
-            only_use_cftime_datetimes=False,
-        )
-        timestamp_values = [decoded_timestamp(item) for item in timestamps]
+        timestamp_values = decode_times(time_variable, time_values)
         timestamp = timestamp_values[args.time_index]
         masked_values = np.ma.asarray(precipitation[args.time_index, :, :])
         values = np.asarray(masked_values.filled(np.nan), dtype=np.float64)
@@ -405,7 +815,7 @@ def main() -> int:
             longitude_error,
             latitude_error,
             stats,
-            str(source_units) if source_units is not None else None,
+            source_units,
             "mm/h",
             factor,
             conversion,
@@ -423,6 +833,11 @@ def main() -> int:
         f"non-zero={stats['non_zero_cells']}"
     )
     return 0
+
+
+def main() -> int:
+    args = parser().parse_args()
+    return convert_sequence(args) if args.sequence else convert_csv(args)
 
 
 if __name__ == "__main__":
