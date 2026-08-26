@@ -230,6 +230,15 @@ independently; neither interpolates a lower discrete summary.
 Only the active discrete renderer retains temporal summary/mapping buffers;
 switching away releases that renderer's temporal state while retaining the
 shared topology and reusable GPU capacities.
+Within an active Dots or Squares renderer, temporal state is owned per LOD
+level: a stable renderer retains the current level's frame 0/frame 1 summary
+and mapped state, while a transition retains those states for both `fromLevel`
+and `toLevel`. Starting an adjacent transition preserves the prepared source
+and evaluates/maps only a missing destination level. Completion promotes the
+prepared destination state without reevaluating it; reversal swaps transition
+ownership and reuses both level states. When the temporal frame advances, each
+active level promotes its previous next frame and prepares only its missing
+future frame.
 
 ## Dots — `src/engine/geographic-dots-layer.js`
 
@@ -258,6 +267,11 @@ The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
 transitions use deterministic parent/child topology below/equal to L13 and
 direct-pair refinement for L13↔L14 and L14↔L15.
+Dots retain the stable same-level temporal/mapped state for a source LOD while
+a transition builds the required pair representation; promoting a destination
+therefore only performs the unavoidable same-level instance pass. Reversals
+reuse physical and mapped states and rebuild only the direction-specific pair
+instance representation.
 Rain glyph radii use the shared monotonic physical anchor transfer in squared
 radius/visual area; the light-blue base saturates at 0.86 spacing near 10 mm/h,
 while the nested Dots-only strong-blue overlay starts visually at 1.6 mm/h and
@@ -280,7 +294,11 @@ deterministic parent and child cell sets during the existing 0.2 s transition;
 no new grid is created and no camera-dependent identity is introduced. Rain square visibility and
 light-to-strong blue color use the same physical rain transfer anchors as Dots;
 rain values above 3 mm/h therefore remain distinguishable through the
-progressive strong-color transfer.
+progressive strong-color transfer. Squares assign each active LOD to one of
+two reusable instance groups. A transition builds and uploads only its new
+destination group; completion promotes that group as stable, and reversal
+swaps group ownership without repacking or reuploading unchanged data.
+Temporal updates dirty only groups whose mapped frame data changed.
 
 ## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`
 

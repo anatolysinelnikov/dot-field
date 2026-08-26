@@ -101,7 +101,8 @@ export class GeographicSquaresLayer {
     this.instanceData = [new Float32Array(), new Float32Array()];
     this.instanceCounts = [0, 0];
     this.instanceBufferCapacity = [0, 0];
-    this.instancesDirty = true;
+    this.instanceDirty = [true, true];
+    this.stableGroup = 0;
     this.programs = new Map();
   }
 
@@ -118,7 +119,15 @@ export class GeographicSquaresLayer {
     for (const buffer of [this.vertexBuffer, ...(this.instanceBuffers || [])]) if (buffer) gl.deleteBuffer(buffer);
   }
 
-  setActive(active) { this.active = active; if (!active) this.temporal = null; this.map?.triggerRepaint(); }
+  setActive(active) {
+    this.active = active;
+    if (!active) {
+      this.temporal = null;
+      this.instanceDirty[0] = false;
+      this.instanceDirty[1] = false;
+    }
+    this.map?.triggerRepaint();
+  }
 
   activeLevels() {
     if (this.transition) return [this.transition.fromSamples[0].level, this.transition.toSamples[0].level];
@@ -128,24 +137,82 @@ export class GeographicSquaresLayer {
   rebuildTemporal(time) {
     const frame = geographicTemporalFrameAt(time);
     const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    const levels = this.activeLevels();
     this.temporal = {
       index: frame.index, nextIndex,
-      frames0: this.evaluateKeyframe(frame.index),
-      frames1: this.evaluateKeyframe(nextIndex)
+      levels: new Map(levels.map((level) => [level, {
+        frames0: this.evaluateKeyframe(level, frame.index),
+        frames1: this.evaluateKeyframe(level, nextIndex)
+      }]))
     };
     this.temporalProgress = frame.progress;
     this.rebuildInstances();
   }
 
-  setSamples(samples, time) { this.samples = samples; this.transition = null; if (this.active) this.rebuildTemporal(time); else this.temporal = null; }
-  setTransition(fromSamples, toSamples, time, progress = 0) { this.samples = toSamples; this.transition = { fromSamples, toSamples }; this.transitionProgress = progress; if (this.active) this.rebuildTemporal(time); else this.temporal = null; }
+  setSamples(samples, time) {
+    const level = samples.length ? samples[0].level : null;
+    if (this.active && this.transition && level === this.transition.toSamples[0].level) {
+      const promoted = this.temporal?.levels.get(level);
+      if (promoted) {
+        const previousGroup = this.transition.fromGroup;
+        this.samples = samples;
+        this.stableGroup = this.transition.toGroup;
+        this.transition = null;
+        this.temporal.levels = new Map([[level, promoted]]);
+        this.temporalProgress = geographicTemporalFrameAt(time).progress;
+        this.instanceDirty[previousGroup] = false;
+        this.map?.triggerRepaint();
+        return;
+      }
+    }
+    this.samples = samples;
+    this.transition = null;
+    if (this.active) this.rebuildTemporal(time);
+    else this.temporal = null;
+  }
+
+  setTransition(fromSamples, toSamples, time, progress = 0) {
+    const fromLevel = fromSamples[0].level;
+    const toLevel = toSamples[0].level;
+    const previousTransition = this.transition;
+    const reversing = previousTransition
+      && previousTransition.fromSamples[0].level === toLevel
+      && previousTransition.toSamples[0].level === fromLevel;
+    this.samples = toSamples;
+    if (reversing) {
+      this.transition = {
+        fromSamples,
+        toSamples,
+        fromGroup: previousTransition.toGroup,
+        toGroup: previousTransition.fromGroup
+      };
+      this.transitionProgress = progress;
+      this.map?.triggerRepaint();
+      return;
+    }
+    this.transition = { fromSamples, toSamples, fromGroup: this.stableGroup, toGroup: 1 - this.stableGroup };
+    this.transitionProgress = progress;
+    if (!this.active) {
+      this.temporal = null;
+      return;
+    }
+    const frame = geographicTemporalFrameAt(time);
+    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    if (!this.temporal || this.temporal.index !== frame.index || this.temporal.nextIndex !== nextIndex) {
+      this.rebuildTemporal(time);
+      return;
+    }
+    if (!this.temporal.levels.has(fromLevel)) this.temporal.levels.set(fromLevel, { frames0: this.evaluateKeyframe(fromLevel, frame.index), frames1: this.evaluateKeyframe(fromLevel, nextIndex) });
+    if (!this.temporal.levels.has(toLevel)) this.temporal.levels.set(toLevel, { frames0: this.evaluateKeyframe(toLevel, frame.index), frames1: this.evaluateKeyframe(toLevel, nextIndex) });
+    this.rebuildInstances(new Set([toLevel]));
+  }
   setTransitionProgress(progress) { this.transitionProgress = progress; if (this.active) this.map?.triggerRepaint(); }
 
-  evaluateKeyframe(index, reusable = null) {
-    const summaries = this.weatherPyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(index / TEMPORAL_FRAME_COUNT), reusable?.summaries);
+  evaluateKeyframe(level, index, reusable = null) {
+    const summaries = this.weatherPyramid.evaluate([level], prepareGeographicFieldFrame(index / TEMPORAL_FRAME_COUNT), reusable?.summaries);
     const mapped = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
-    for (const level of this.activeLevels()) mapped[level] = mapSquaresWeatherSummary(summaries[level], reusable?.mapped?.[level]);
-    return { summaries, mapped };
+    mapped[level] = mapSquaresWeatherSummary(summaries[level], reusable?.mapped?.[level]);
+    return { index, summaries, mapped };
   }
 
   buildGroup(group, level, state0, state1) {
@@ -166,14 +233,17 @@ export class GeographicSquaresLayer {
     this.instanceCounts[group] = samples.length;
   }
 
-  rebuildInstances() {
+  rebuildInstances(changedLevels = null) {
     if (!this.temporal || !this.samples.length) return;
-    const levels = this.transition ? [this.transition.fromSamples[0].level, this.transition.toSamples[0].level] : [this.samples[0].level];
-    for (let index = 0; index < levels.length; index++) {
-      this.buildGroup(index, levels[index], this.temporal.frames0.mapped[levels[index]], this.temporal.frames1.mapped[levels[index]]);
+    const groups = this.transition
+      ? [[this.transition.fromGroup, this.transition.fromSamples[0].level], [this.transition.toGroup, this.transition.toSamples[0].level]]
+      : [[this.stableGroup, this.samples[0].level]];
+    for (const [group, level] of groups) {
+      if (changedLevels && !changedLevels.has(level)) continue;
+      const temporalState = this.temporal.levels.get(level);
+      this.buildGroup(group, level, temporalState.frames0.mapped[level], temporalState.frames1.mapped[level]);
+      this.instanceDirty[group] = true;
     }
-    if (levels.length === 1) this.instanceCounts[1] = 0;
-    this.instancesDirty = true;
     this.map?.triggerRepaint();
   }
 
@@ -182,10 +252,12 @@ export class GeographicSquaresLayer {
     const frame = geographicTemporalFrameAt(time);
     if (!this.temporal || frame.index !== this.temporal.index) {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
-        const reusable = this.temporal.frames0;
         this.temporal.index = frame.index; this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
-        this.temporal.frames0 = this.temporal.frames1;
-        this.temporal.frames1 = this.evaluateKeyframe(this.temporal.nextIndex, reusable);
+        for (const [level, temporalState] of this.temporal.levels) {
+          const reusable = temporalState.frames0;
+          temporalState.frames0 = temporalState.frames1;
+          temporalState.frames1 = this.evaluateKeyframe(level, this.temporal.nextIndex, reusable);
+        }
         this.rebuildInstances();
       } else this.rebuildTemporal(time);
     }
@@ -205,7 +277,9 @@ export class GeographicSquaresLayer {
     gl.useProgram(program);
     setGeographicProjection(gl, { matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix, tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition }, projection);
     gl.uniform1f(locations.u_temporalProgress, this.temporalProgress);
-    const level = this.transition ? (group === 0 ? this.transition.fromSamples[0].level : this.transition.toSamples[0].level) : this.samples[0].level;
+    const level = this.transition
+      ? (group === this.transition.fromGroup ? this.transition.fromSamples[0].level : this.transition.toSamples[0].level)
+      : this.samples[0].level;
     gl.uniform1f(locations.u_spacing, 1 / 2 ** level);
     gl.uniform1f(locations.u_opacity, opacity);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
@@ -226,24 +300,30 @@ export class GeographicSquaresLayer {
     for (const location of [locations.a_center, locations.a_values0, locations.a_hazards0, locations.a_values1, locations.a_hazards1]) gl.vertexAttribDivisor(location, 0);
   }
 
+  uploadBuffers(gl) {
+    if (!this.instanceBuffers) return;
+    for (let index = 0; index < 2; index++) {
+      if (!this.instanceDirty[index]) continue;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[index]);
+      const byteLength = this.instanceCounts[index] * INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
+      if (byteLength > this.instanceBufferCapacity[index]) {
+        gl.bufferData(gl.ARRAY_BUFFER, byteLength, gl.DYNAMIC_DRAW);
+        this.instanceBufferCapacity[index] = byteLength;
+      }
+      if (byteLength) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData[index].subarray(0, this.instanceCounts[index] * INSTANCE_STRIDE));
+      this.instanceDirty[index] = false;
+    }
+  }
+
   render(gl, args) {
     if (!this.active || !this.temporal) return;
-    if (this.instancesDirty) {
-      for (let index = 0; index < 2; index++) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[index]);
-        const byteLength = this.instanceCounts[index] * INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
-        if (byteLength > this.instanceBufferCapacity[index]) {
-          gl.bufferData(gl.ARRAY_BUFFER, byteLength, gl.DYNAMIC_DRAW);
-          this.instanceBufferCapacity[index] = byteLength;
-        }
-        if (byteLength) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData[index].subarray(0, this.instanceCounts[index] * INSTANCE_STRIDE));
-      }
-      this.instancesDirty = false;
-    }
+    this.uploadBuffers(gl);
     const entry = this.programFor(gl, args.shaderData);
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.enable(gl.DEPTH_TEST); gl.depthMask(false); gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -1);
-    if (this.transition) { this.renderGroup(gl, entry, args.defaultProjectionData, 0, 1 - this.transitionProgress); this.renderGroup(gl, entry, args.defaultProjectionData, 1, this.transitionProgress); }
-    else this.renderGroup(gl, entry, args.defaultProjectionData, 0, 1);
+    if (this.transition) {
+      this.renderGroup(gl, entry, args.defaultProjectionData, this.transition.fromGroup, 1 - this.transitionProgress);
+      this.renderGroup(gl, entry, args.defaultProjectionData, this.transition.toGroup, this.transitionProgress);
+    } else this.renderGroup(gl, entry, args.defaultProjectionData, this.stableGroup, 1);
     gl.disable(gl.POLYGON_OFFSET_FILL); gl.depthMask(true);
   }
 }

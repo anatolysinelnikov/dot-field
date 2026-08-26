@@ -322,28 +322,47 @@ export class GeographicDotsLayer {
     return this.samples.length ? [this.samples[0].level] : [];
   }
 
-  evaluateKeyframe(index, reusableStates = null) {
+  evaluateKeyframe(level, index, reusableState = null) {
     const time = index / TEMPORAL_FRAME_COUNT;
-    const summaries = this.weatherPyramid.evaluate(this.activeLevels(), prepareGeographicFieldFrame(time), reusableStates?.summaries);
+    const summaries = this.weatherPyramid.evaluate([level], prepareGeographicFieldFrame(time), reusableState?.summaries);
     const mapped = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
-    for (const level of this.activeLevels()) mapped[level] = mapDotsWeatherSummary(summaries[level], reusableStates?.mapped?.[level]);
-    return { summaries, mapped };
+    mapped[level] = mapDotsWeatherSummary(summaries[level], reusableState?.mapped?.[level]);
+    return { index, summaries, mapped };
+  }
+
+  createLevelTemporalState(level, index, nextIndex) {
+    return {
+      frames0: this.evaluateKeyframe(level, index),
+      frames1: this.evaluateKeyframe(level, nextIndex)
+    };
   }
 
   rebuildTemporal(time) {
     const frame = geographicTemporalFrameAt(time);
     const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    const levels = this.activeLevels();
     this.temporal = {
       index: frame.index,
       nextIndex,
-      frames0: this.evaluateKeyframe(frame.index),
-      frames1: this.evaluateKeyframe(nextIndex)
+      levels: new Map(levels.map((level) => [level, this.createLevelTemporalState(level, frame.index, nextIndex)]))
     };
     this.temporalProgress = frame.progress;
     this.rebuildInstances();
   }
 
   setSamples(samples, time) {
+    const level = samples.length ? samples[0].level : null;
+    if (this.active && this.transition && level === this.transition.toSamples[0].level) {
+      const promoted = this.temporal?.levels.get(level);
+      if (promoted) {
+        this.samples = samples;
+        this.transition = null;
+        this.temporal.levels = new Map([[level, promoted]]);
+        this.temporalProgress = geographicTemporalFrameAt(time).progress;
+        this.rebuildInstances();
+        return;
+      }
+    }
     this.samples = samples;
     this.transition = null;
     if (this.active) this.rebuildTemporal(time);
@@ -352,16 +371,42 @@ export class GeographicDotsLayer {
 
   setActive(active) {
     this.active = active;
-    if (!active) this.temporal = null;
+    if (!active) {
+      this.temporal = null;
+      this.buffersDirty = false;
+    }
     this.map?.triggerRepaint();
   }
 
   setTransition(fromSamples, toSamples, time, progress = 0) {
+    const fromLevel = fromSamples[0].level;
+    const toLevel = toSamples[0].level;
     this.samples = toSamples;
+    const previousTransition = this.transition;
+    const reversing = previousTransition
+      && previousTransition.fromSamples[0].level === toLevel
+      && previousTransition.toSamples[0].level === fromLevel;
+    if (reversing) {
+      this.transition = { fromSamples, toSamples };
+      this.transitionProgress = progress;
+      this.rebuildInstances();
+      return;
+    }
     this.transition = { fromSamples, toSamples };
     this.transitionProgress = progress;
-    if (this.active) this.rebuildTemporal(time);
-    else this.temporal = null;
+    if (!this.active) {
+      this.temporal = null;
+      return;
+    }
+    const frame = geographicTemporalFrameAt(time);
+    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+    if (!this.temporal || this.temporal.index !== frame.index || this.temporal.nextIndex !== nextIndex) {
+      this.rebuildTemporal(time);
+      return;
+    }
+    if (!this.temporal.levels.has(fromLevel)) this.temporal.levels.set(fromLevel, this.createLevelTemporalState(fromLevel, frame.index, nextIndex));
+    if (!this.temporal.levels.has(toLevel)) this.temporal.levels.set(toLevel, this.createLevelTemporalState(toLevel, frame.index, nextIndex));
+    this.rebuildInstances();
   }
 
   setTransitionProgress(progress) {
@@ -376,9 +421,11 @@ export class GeographicDotsLayer {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
         this.temporal.index = frame.index;
         this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
-        const reusableStates = this.temporal.frames0;
-        this.temporal.frames0 = this.temporal.frames1;
-        this.temporal.frames1 = this.evaluateKeyframe(this.temporal.nextIndex, reusableStates);
+        for (const [level, temporalState] of this.temporal.levels) {
+          const reusableState = temporalState.frames0;
+          temporalState.frames0 = temporalState.frames1;
+          temporalState.frames1 = this.evaluateKeyframe(level, this.temporal.nextIndex, reusableState);
+        }
         this.temporalProgress = frame.progress;
         this.rebuildInstances();
       } else {
@@ -396,9 +443,10 @@ export class GeographicDotsLayer {
   }
 
   rebuildInstances() {
-    const { frames0, frames1 } = this.temporal;
+    if (!this.active || !this.temporal || !this.samples.length) return;
     if (!this.transition) {
       const level = this.samples[0].level;
+      const { frames0, frames1 } = this.temporal.levels.get(level);
       const anchors = this.topology.levels.get(level).canonicalAnchors;
       for (const type of WEATHER_TYPES) {
         this.setInstances(type, buildSameLevelTemporalInstances(frames0.mapped[level], frames1.mapped[level], anchors, RADIUS_KEYS[type], this.instanceWriters[type]));
@@ -406,6 +454,8 @@ export class GeographicDotsLayer {
     } else {
       const fromLevel = this.transition.fromSamples[0].level;
       const toLevel = this.transition.toSamples[0].level;
+      const fromTemporal = this.temporal.levels.get(fromLevel);
+      const toTemporal = this.temporal.levels.get(toLevel);
       const hierarchical = isHierarchicalTransition(fromLevel, toLevel);
       const refining = toLevel > fromLevel;
       const coarseLevel = refining ? fromLevel : toLevel;
@@ -420,10 +470,10 @@ export class GeographicDotsLayer {
       for (const type of WEATHER_TYPES) {
         const data = hierarchical
           ? buildHierarchicalTemporalInstances(
-            frames0.mapped[coarseLevel],
-            frames0.mapped[fineLevel],
-            frames1.mapped[coarseLevel],
-            frames1.mapped[fineLevel],
+            this.temporal.levels.get(coarseLevel).frames0.mapped[coarseLevel],
+            this.temporal.levels.get(fineLevel).frames0.mapped[fineLevel],
+            this.temporal.levels.get(coarseLevel).frames1.mapped[coarseLevel],
+            this.temporal.levels.get(fineLevel).frames1.mapped[fineLevel],
             coarseAnchors,
             fineAnchors,
             this.topology.transitionParentsFor(fineLevel).childIndices,
@@ -432,10 +482,10 @@ export class GeographicDotsLayer {
             this.instanceWriters[type]
           )
           : buildDirectTemporalInstances(
-            frames0.mapped[fromLevel],
-            frames0.mapped[toLevel],
-            frames1.mapped[fromLevel],
-            frames1.mapped[toLevel],
+            fromTemporal.frames0.mapped[fromLevel],
+            toTemporal.frames0.mapped[toLevel],
+            fromTemporal.frames1.mapped[fromLevel],
+            toTemporal.frames1.mapped[toLevel],
             fromAnchors,
             toAnchors,
             pairs,
