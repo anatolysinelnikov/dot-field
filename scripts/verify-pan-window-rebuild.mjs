@@ -67,7 +67,6 @@ function installDenseGeometryFallback(pyramid) {
     geometry.potentialActiveIndices = Uint32Array.from(activeIndices);
     geometry.potentialWeatherMask = mask;
     geometry.spatialRainCache = new Map();
-    geometry.temporalRainMmh = new Float64Array(activeIndices.length);
     pyramid.samplingGeometries.set(level, geometry);
     return geometry;
   };

@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { setActiveWeatherField } from '../src/engine/geography.js';
+import { geographicPrepareTemporalSampling, setActiveWeatherField } from '../src/engine/geography.js';
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
 import {
   aggregateWeatherSummary,
@@ -74,6 +74,28 @@ function maxDifference(left, right) {
   return { maximum, mismatches };
 }
 
+function materializedTemporalReference(frame, geometry) {
+  const activeIndices = geometry.potentialActiveIndices;
+  const rain0 = frame.preparedSourceFrame(geometry, frame.frame0);
+  const rain1 = frame.preparedSourceFrame(geometry, frame.frame1);
+  const values = new Float64Array(activeIndices.length);
+  for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
+    values[activeIndex] = rain0[activeIndex] + (rain1[activeIndex] - rain0[activeIndex]) * frame.progress;
+  }
+  return values;
+}
+
+function comparePreparedTemporal(frame, geometry) {
+  const temporal = geographicPrepareTemporalSampling(frame, geometry);
+  if (!temporal) throw new Error('real sequence did not expose prepared temporal sampling.');
+  const expected = materializedTemporalReference(frame, geometry);
+  for (let activeIndex = 0; activeIndex < expected.length; activeIndex++) {
+    if (temporal(activeIndex) !== expected[activeIndex]) {
+      throw new Error(`prepared temporal value differs at active index ${activeIndex}.`);
+    }
+  }
+}
+
 function compareSummary(level, optimized, dense) {
   const differences = [];
   const compare = (name, left, right) => differences.push([name, maxDifference(left, right)]);
@@ -101,6 +123,16 @@ function compareSummary(level, optimized, dense) {
 const exactSourceFrameTimes = Array.from({ length: time.count }, (_, index) => index / (time.count - 1));
 const interpolatedTimes = [0.123, 0.347, 0.5, 0.777];
 const normalizedTimes = [...exactSourceFrameTimes, ...interpolatedTimes];
+const temporalBoundaryTimes = [
+  ...exactSourceFrameTimes,
+  ...Array.from({ length: time.count - 1 }, (_, index) => (index + 0.25) / (time.count - 1)),
+  ...Array.from({ length: time.count - 1 }, (_, index) => (index + 0.75) / (time.count - 1)),
+  ...interpolatedTimes
+];
+for (const normalizedTime of [...temporalBoundaryTimes, ...temporalBoundaryTimes].reverse()) {
+  comparePreparedTemporal(weather.prepareFrame(normalizedTime), optimizedGeometry);
+}
+if (optimizedGeometry.temporalRainMmh) throw new Error('normal prepared weather evaluation retained temporal rain scratch.');
 let totalComparisons = 0;
 for (const normalizedTime of normalizedTimes) {
   const frame = weather.prepareFrame(normalizedTime);
@@ -112,6 +144,16 @@ for (const normalizedTime of normalizedTimes) {
   }
   console.log(`time=${normalizedTime} sourceFrames=${frame.frame0}/${frame.frame1} progress=${frame.progress}`);
 }
+
+const compatibilityBatch = weather.prepareFrame(0.347).samplePreparedBatch(optimizedGeometry);
+const compatibilityReference = materializedTemporalReference(weather.prepareFrame(0.347), optimizedGeometry);
+if (!compatibilityBatch.every((value, index) => value === compatibilityReference[index])) {
+  throw new Error('lazy compatibility temporal batch differs from the prepared temporal capability.');
+}
+if (compatibilityBatch.byteLength !== optimizedGeometry.potentialActiveIndices.length * Float64Array.BYTES_PER_ELEMENT) {
+  throw new Error('lazy compatibility temporal batch has unexpected storage.');
+}
+delete optimizedGeometry.temporalRainMmh;
 
 for (const normalizedTime of [...exactSourceFrameTimes].reverse()) {
   const frame = weather.prepareFrame(normalizedTime);

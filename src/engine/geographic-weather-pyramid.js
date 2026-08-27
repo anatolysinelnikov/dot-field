@@ -1,6 +1,7 @@
 import {
   geographicPreparedIntensityAtGeometry,
   geographicPreparedIntensityAtGeometryBatch,
+  geographicPrepareTemporalSampling,
   geographicPreparedIntensityAtXY,
   prepareGeographicSamplingGeometry
 } from './geography.js';
@@ -489,14 +490,22 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
   }
   summary.potentialActiveIndices = activeIndices;
   summary.potentialActiveIndicesInitialized = true;
-  const batchRain = samplingGeometry && activeIndices && typeof frame.samplePreparedBatch === 'function'
+  const temporalRain = samplingGeometry && activeIndices
+    && frame?.supportsRainOnlyPreparedTemporalSampling === true
+    ? geographicPrepareTemporalSampling(frame, samplingGeometry)
+    : null;
+  const batchRain = !temporalRain && samplingGeometry && activeIndices && typeof frame.samplePreparedBatch === 'function'
     ? geographicPreparedIntensityAtGeometryBatch(frame, samplingGeometry)
     : null;
   const value = { rainMmh: 0, storm: 0, hail: 0 };
   const count = activeIndices ? activeIndices.length : levelData.count;
   for (let activeIndex = 0; activeIndex < count; activeIndex++) {
     const index = activeIndices ? activeIndices[activeIndex] : activeIndex;
-    if (batchRain) {
+    if (temporalRain) {
+      value.rainMmh = temporalRain(activeIndex);
+      value.storm = 0;
+      value.hail = 0;
+    } else if (batchRain) {
       value.rainMmh = batchRain[activeIndex];
       value.storm = 0;
       value.hail = 0;
@@ -602,20 +611,21 @@ export function aggregateWeatherSummary(parentLevel, childSummary, contributions
 // aggregateWeatherSummary(...L12), without retaining the intermediate L13
 // summary object.
 export function evaluateFusedRainAggregateSummary(parentLevel, frame, samplingGeometry, contributions, reusable = null, ArrayType = Float32Array, totalWeight = null) {
-  if (frame?.supportsRainOnlyPreparedBatch !== true || typeof frame.samplePreparedBatch !== 'function') {
-    throw new Error('Fused rain aggregation requires an explicit rain-only prepared batch capability.');
-  }
   const activeChildren = samplingGeometry?.potentialActiveIndices;
   if (!activeChildren) throw new Error('Fused rain aggregation requires prepared potential-active indices.');
+  if (frame?.supportsRainOnlyPreparedTemporalSampling !== true) {
+    throw new Error('Fused rain aggregation requires an explicit rain-only prepared temporal capability.');
+  }
+  const temporalRain = geographicPrepareTemporalSampling(frame, samplingGeometry);
+  if (!temporalRain) throw new Error('Fused rain aggregation requires prepared temporal sampling.');
   const summary = createWeatherSummary(parentLevel, reusable, ArrayType, totalWeight);
   const childSummary = { potentialActiveIndices: activeChildren };
   const activeIndices = activeIndicesForAggregate(summary, childSummary, contributions);
   zeroWeatherFields(summary, activeIndices);
-  const rainValues = geographicPreparedIntensityAtGeometryBatch(frame, samplingGeometry);
   const storedRain = ArrayType === Float32Array ? Math.fround : (value) => value;
   for (let activeChild = 0; activeChild < activeChildren.length; activeChild++) {
     const childIndex = activeChildren[activeChild];
-    const rainMmh = rainValues[activeChild];
+    const rainMmh = temporalRain(activeChild);
     const rainForSummary = storedRain(rainMmh);
     if (contributions.kind !== 'separable-centered') {
       const start = contributions.offsets[childIndex];
@@ -750,8 +760,8 @@ export class GeographicWeatherPyramid {
       for (let level = minimumAggregateLevel; level <= WEATHER_REFERENCE_LEVEL; level++) this.levelDataFor(level);
       const samplingGeometry = this.prepareSamplingGeometry(WEATHER_REFERENCE_LEVEL, frame);
       const useFusedRainPath = uniqueRequested.every((level) => level < WEATHER_REFERENCE_LEVEL)
-        && frame?.supportsRainOnlyPreparedBatch === true
-        && typeof frame.samplePreparedBatch === 'function'
+        && frame?.supportsRainOnlyPreparedTemporalSampling === true
+        && typeof frame.prepareTemporalSampling === 'function'
         && samplingGeometry?.potentialActiveIndices
         && this.centeredRelations.has(WEATHER_REFERENCE_LEVEL);
       let summary;

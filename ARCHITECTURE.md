@@ -371,16 +371,28 @@ Aggregation therefore skips guaranteed-dry child statistics but preserves every
 dry child in the cached denominators and retains the same summary API and
 representation-independent physical semantics.
 
-For the explicit rain-only prepared batch capability used by the current local
-sequence, a coarse-only request for L10, L11, or L12 fuses the prepared L13
-rain values directly into the L12 summary through the same centered L13→L12
-compact L13→L12 centered relation. This path does not materialize an L13 summary object; it
-retains the cached L12 total weights, tests coverage thresholds against the
-unrounded physical values, and applies the existing Float32 L13 storage
-boundary before weighted sums and maxima are accumulated. L12→L11→L10 then
-uses the existing recursive aggregation. Requests that include L13, direct
-L14/L15 engine requests, and providers without this explicit rain-only capability
-retain the direct-summary fallback, including storm and hail channels.
+The sequence geometry owns the bounded four-entry spatial source-frame LRU, but
+it does not retain a normal-runtime temporal rain array. A provider frame
+exposes a prepared temporal sampling capability through `geography.js`; the
+current sequence implementation captures its two prepared Float64 spatial
+source arrays and performs the existing linear interpolation when a summary
+consumer requests each active value. The capability is provider-owned so a
+future deterministic motion/advection-aware reconstruction can replace linear
+interpolation without changing the pyramid or renderers. `samplePreparedBatch()`
+remains a lazy compatibility/diagnostic path and allocates its temporal scratch
+only when explicitly called.
+
+For the explicit rain-only prepared temporal capability used by the current
+local sequence, a coarse-only request for L10, L11, or L12 fuses temporally
+reconstructed L13 rain values directly into the L12 summary through the same
+centered L13→L12 compact relation. This path does not materialize an L13
+summary object or a full temporal rain array; it retains the cached L12 total
+weights, tests coverage thresholds against the unrounded physical values, and
+applies the existing Float32 L13 storage boundary before weighted sums and
+maxima are accumulated. L12→L11→L10 then uses the existing recursive
+aggregation. Requests that include L13, direct L14/L15 engine requests, and
+providers without this explicit rain-only capability retain the direct-summary
+fallback, including storm and hail channels.
 
 ```text
 provider source grid

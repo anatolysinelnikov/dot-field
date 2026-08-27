@@ -232,7 +232,6 @@ export class RealWeatherField {
     geometry.potentialActiveIndices = Uint32Array.from(activeIndices);
     geometry.potentialWeatherMask = this.potentialWeatherMask;
     geometry.spatialRainCache = new Map();
-    geometry.temporalRainMmh = new Float64Array(geometry.potentialActiveIndices.length);
   }
 
   setSamplingGeometryMetadata(geometry) {
@@ -304,7 +303,7 @@ export class RealWeatherSequenceFrame {
     this.progress = progress;
     // This explicit capability is limited to the current rain-only sequence;
     // generic fields must continue through the full channel-aware path.
-    this.supportsRainOnlyPreparedBatch = true;
+    this.supportsRainOnlyPreparedTemporalSampling = true;
   }
 
   isSamplingGeometryCompatible(geometry) {
@@ -325,6 +324,10 @@ export class RealWeatherSequenceFrame {
 
   samplePreparedBatch(geometry) {
     return this.sequence.samplePreparedFrameBatch(this, geometry);
+  }
+
+  prepareTemporalSampling(geometry) {
+    return this.sequence.prepareTemporalSampling(this, geometry);
   }
 
   preparedSourceFrame(geometry, frameIndex) {
@@ -468,15 +471,23 @@ export class RealWeatherSequence extends RealWeatherField {
     return values;
   }
 
+  prepareTemporalSampling(frame, geometry) {
+    const rain0 = this.preparedSourceFrame(geometry, frame.frame0);
+    const rain1 = this.preparedSourceFrame(geometry, frame.frame1);
+    const progress = frame.progress;
+    // Keep temporal reconstruction provider-owned. The returned callable is
+    // one evaluation-scoped capability, not a per-sample allocation.
+    return (activeIndex) => rain0[activeIndex] + (rain1[activeIndex] - rain0[activeIndex]) * progress;
+  }
+
   samplePreparedFrameBatch(frame, geometry) {
     const activeIndices = geometry.potentialActiveIndices || new Uint32Array(0);
     if (!geometry.temporalRainMmh || geometry.temporalRainMmh.length !== activeIndices.length) {
       geometry.temporalRainMmh = new Float64Array(activeIndices.length);
     }
-    const rain0 = this.preparedSourceFrame(geometry, frame.frame0);
-    const rain1 = this.preparedSourceFrame(geometry, frame.frame1);
+    const temporalRain = this.prepareTemporalSampling(frame, geometry);
     for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
-      geometry.temporalRainMmh[activeIndex] = rain0[activeIndex] + (rain1[activeIndex] - rain0[activeIndex]) * frame.progress;
+      geometry.temporalRainMmh[activeIndex] = temporalRain(activeIndex);
     }
     return geometry.temporalRainMmh;
   }

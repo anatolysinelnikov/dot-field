@@ -83,6 +83,12 @@ export function geographicPreparedIntensityAtGeometryBatch(frame, geometry) {
   return frame.samplePreparedBatch(geometry);
 }
 
+export function geographicPrepareTemporalSampling(frame, geometry) {
+  return typeof frame?.prepareTemporalSampling === 'function'
+    ? frame.prepareTemporalSampling(geometry)
+    : null;
+}
+
 export function geographicPreparedIntensityAtXY(frame, longitude, latitude, output) {
   return frame.sample(longitude, latitude, output);
 }

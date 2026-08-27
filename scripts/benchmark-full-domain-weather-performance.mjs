@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { performance } from 'node:perf_hooks';
-import { geographicPreparedIntensityAtGeometry, setActiveWeatherField } from '../src/engine/geography.js';
+import { geographicPreparedIntensityAtGeometry, geographicPrepareTemporalSampling, setActiveWeatherField } from '../src/engine/geography.js';
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
 import {
   aggregateWeatherSummary,
@@ -102,7 +102,7 @@ function benchmarkSpatialCachePattern(geometry, name, positions) {
       for (const frameIndex of requiredFrames) {
         if (!geometry.spatialRainCache.has(frameIndex)) misses++;
       }
-      frame.samplePreparedBatch(geometry);
+      geographicPrepareTemporalSampling(frame, geometry);
       maxEntries = Math.max(maxEntries, geometry.spatialRainCache.size);
       maxBytes = Math.max(maxBytes, spatialCacheBytes(geometry));
     }
@@ -438,15 +438,21 @@ const providerBoundaryMs = measureWithClearedCache(directProbeGeometry, () => {
   directProbeFrame.preparedSourceFrame(directProbeGeometry, directProbeFrame.frame1);
   evaluateProbe(directProbeBoundaryFrame);
 });
+const normalTemporalScratchBytes = directProbeGeometry.temporalRainMmh?.byteLength || 0;
+const compatibilityBatchMs = measureWithClearedCache(directProbeGeometry, () => {
+  directProbeFrame.samplePreparedBatch(directProbeGeometry);
+});
+const compatibilityBatchScratchBytes = directProbeGeometry.temporalRainMmh?.byteLength || 0;
+delete directProbeGeometry.temporalRainMmh;
 directProbeGeometry.spatialRainCache.clear();
 for (let frameIndex = 0; frameIndex < weather.frameCount; frameIndex++) {
   const frame = weather.prepareFrame(frameIndex / (weather.frameCount - 1));
-  frame.samplePreparedBatch(directProbeGeometry);
+  geographicPrepareTemporalSampling(frame, directProbeGeometry);
 }
 const cacheBytesPerFrame = directProbeGeometry.potentialActiveIndices.length * Float64Array.BYTES_PER_ELEMENT;
-console.log(`direct L13 cache probe: active=${directProbeGeometry.potentialActiveIndices.length}; sparse uncached=${sparseUncachedDirectMs.toFixed(3)}ms; source-pair cache build=${sourcePairCacheBuildMs.toFixed(3)}ms; cold direct=${coldDirectMs.toFixed(3)}ms; steady cached direct=${steadyDirectMs.toFixed(3)}ms; one-new-frame boundary=${providerBoundaryMs.toFixed(3)}ms`);
+console.log(`direct L13 prepared temporal probe: active=${directProbeGeometry.potentialActiveIndices.length}; sparse uncached=${sparseUncachedDirectMs.toFixed(3)}ms; spatial source-pair acquisition=${sourcePairCacheBuildMs.toFixed(3)}ms; compatibility batch materialization=${compatibilityBatchMs.toFixed(3)}ms; cold direct summary=${coldDirectMs.toFixed(3)}ms; steady direct summary=${steadyDirectMs.toFixed(3)}ms; one-new-frame boundary=${providerBoundaryMs.toFixed(3)}ms`);
 console.log(`direct L13 cache memory: per-source-frame=${mib(cacheBytesPerFrame)}; representative pair=${mib(cacheBytesPerFrame * 2)}; retained=${mib(spatialCacheBytes(directProbeGeometry))} (${directProbeGeometry.spatialRainCache.size} cached frames); unbounded-reference-all-${weather.frameCount}=${mib(cacheBytesPerFrame * weather.frameCount)}`);
-console.log(`direct L13 non-cache memory: provider-binary=${mib(rainFramesMmh.byteLength)}; prepared-geometry-base=${mib(weather.samplingGeometryBytes(directProbeGeometry))}; temporal-rain-scratch=${mib(directProbeGeometry.temporalRainMmh.byteLength)}`);
+console.log(`direct L13 memory: provider-binary=${mib(rainFramesMmh.byteLength)}; prepared-geometry-base=${mib(weather.samplingGeometryBytes(directProbeGeometry))}; normal-production-temporal-scratch=${mib(normalTemporalScratchBytes)}; lazy-compatibility-batch-scratch=${mib(compatibilityBatchScratchBytes)}`);
 const forwardPositions = [...Array.from({ length: weather.frameCount - 1 }, (_, index) => index + 0.25), weather.frameCount - 1];
 const reversePositions = [...Array.from({ length: weather.frameCount - 1 }, (_, index) => weather.frameCount - 1.25 - index), 0];
 const adjacentScrubPositions = [0.25, 1.25, 0.25, 1.25, 2.25, 1.25, 2.25, 3.25, 2.25, 3.25, 4.25, 3.25, 4.25, 5.25, 4.25, 5.25, 6.25, 5.25, 6.25, 7.25];
