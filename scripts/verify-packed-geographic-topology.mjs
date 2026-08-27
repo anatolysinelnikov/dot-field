@@ -6,7 +6,9 @@ import {
   canonicalWindowFromMercatorBounds,
   lngLatToMercator,
   mercatorToLngLat,
-  normalizeCanonicalWindow
+  normalizeCanonicalWindow,
+  mercatorXForIndex,
+  mercatorYForIndex
 } from '../src/engine/geographic-lod.js';
 import { buildCenteredContributions } from '../src/engine/geographic-weather-pyramid.js';
 
@@ -51,6 +53,15 @@ function oldSelect(level, canonicalWindow) {
 
 function oldIndexMap(samples) {
   return new Map(samples.map((sample, index) => [sample.id, index]));
+}
+
+function oldAnchors(samples) {
+  const anchors = new Float64Array(samples.length * 2);
+  for (let index = 0; index < samples.length; index++) {
+    anchors[index * 2] = samples[index].mercator[0];
+    anchors[index * 2 + 1] = samples[index].mercator[1];
+  }
+  return anchors;
 }
 
 function oldParents(fine, coarse) {
@@ -127,19 +138,22 @@ function verifyWindow(rawWindow, name) {
   for (const level of LEVELS) {
     const packed = topology.levelDataFor(level);
     const samples = legacy.get(level);
+    const referenceAnchors = oldAnchors(samples);
     check(packed.count === samples.length, `${name} L${level} count=${packed.count}`);
+    check(!('canonicalAnchors' in packed), `${name} L${level} descriptor retains no dense canonical anchors`);
     let coordinateError = 0;
     for (let index = 0; index < samples.length; index++) {
       const sample = samples[index];
       const coordinates = canonicalCoordinatesForIndex(packed, index);
-      const anchorIndex = index * 2;
+      const mercatorX = mercatorXForIndex(packed, index);
+      const mercatorY = mercatorYForIndex(packed, index);
       coordinateError = Math.max(
         coordinateError,
         Math.abs(coordinates.canonicalX - sample.canonicalX),
         Math.abs(coordinates.canonicalY - sample.canonicalY),
-        Math.abs(packed.canonicalAnchors[anchorIndex] - sample.mercator[0]),
-        Math.abs(packed.canonicalAnchors[anchorIndex + 1] - sample.mercator[1]),
-        ...mercatorToLngLat(packed.canonicalAnchors[anchorIndex], packed.canonicalAnchors[anchorIndex + 1]).map((value, i) => Math.abs(value - sample.lngLat[i]))
+        Math.abs(mercatorX - referenceAnchors[index * 2]),
+        Math.abs(mercatorY - referenceAnchors[index * 2 + 1]),
+        ...mercatorToLngLat(mercatorX, mercatorY).map((value, i) => Math.abs(value - sample.lngLat[i]))
       );
     }
     check(coordinateError === 0, `${name} L${level} row-major canonical/Mercator/lngLat traversal max error=${coordinateError}`);

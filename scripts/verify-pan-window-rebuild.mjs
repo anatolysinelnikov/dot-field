@@ -7,6 +7,8 @@ import {
   MAX_GRID_LEVEL,
   MIN_GRID_LEVEL,
   lngLatToMercator,
+  mercatorXForIndex,
+  mercatorYForIndex,
   normalizeCanonicalWindow,
   lodRangeForStableLevel
 } from '../src/engine/geographic-lod.js';
@@ -46,9 +48,8 @@ function installDenseGeometryFallback(pyramid) {
     const longitudes = new Float64Array(levelData.count);
     const latitudes = new Float64Array(levelData.count);
     for (let index = 0; index < levelData.count; index++) {
-      const anchorIndex = index * 2;
-      longitudes[index] = levelData.canonicalAnchors[anchorIndex] * 360 - 180;
-      latitudes[index] = Math.atan(Math.sinh(Math.PI * (1 - 2 * levelData.canonicalAnchors[anchorIndex + 1]))) * 180 / Math.PI;
+      longitudes[index] = mercatorXForIndex(levelData, index) * 360 - 180;
+      latitudes[index] = Math.atan(Math.sinh(Math.PI * (1 - 2 * mercatorYForIndex(levelData, index)))) * 180 / Math.PI;
     }
     const mask = weather.potentialWeatherMask;
     weather.potentialWeatherMask = null;
@@ -93,10 +94,17 @@ function compareTopology(oldTopology, optimizedTopology, name) {
     const optimizedLevel = optimizedTopology.levels.get(level);
     check(Boolean(oldLevel) === Boolean(optimizedLevel), `${name} L${level} materialization matches`);
     if (!oldLevel || !optimizedLevel) continue;
+    let positionError = 0;
+    const count = Math.min(oldLevel.count, optimizedLevel.count);
+    for (let index = 0; index < count; index++) {
+      positionError = Math.max(positionError,
+        Math.abs(mercatorXForIndex(oldLevel, index) - mercatorXForIndex(optimizedLevel, index)),
+        Math.abs(mercatorYForIndex(oldLevel, index) - mercatorYForIndex(optimizedLevel, index)));
+    }
     check(oldLevel.count === optimizedLevel.count
       && oldLevel.minI === optimizedLevel.minI && oldLevel.maxI === optimizedLevel.maxI
       && oldLevel.minJ === optimizedLevel.minJ && oldLevel.maxJ === optimizedLevel.maxJ
-      && sameArray(oldLevel.canonicalAnchors, optimizedLevel.canonicalAnchors), `${name} L${level} packed positions and identities match exactly`);
+      && positionError === 0, `${name} L${level} packed positions and identities match exactly`);
   }
 }
 

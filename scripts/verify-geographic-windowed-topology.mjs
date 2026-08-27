@@ -11,6 +11,8 @@ import {
   canonicalIndexForCoordinates,
   lodRangeForStableLevel,
   lngLatToMercator,
+  mercatorXForIndex,
+  mercatorYForIndex,
   normalizeLodRange
 } from '../src/engine/geographic-lod.js';
 import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
@@ -21,7 +23,6 @@ const LEVELS = [10, 11, 12, 13, 14, 15];
 const ACTIVE_STABLE_LEVELS = [10, 11, 12, 13, 14];
 const L10_STEP = 2 ** (MAX_GRID_LEVEL - MIN_GRID_LEVEL);
 const SUMMARY_BYTES_PER_SAMPLE = (3 + 7 + 6) * Float64Array.BYTES_PER_ELEMENT;
-const ANCHOR_BYTES_PER_SAMPLE = 2 * Float64Array.BYTES_PER_ELEMENT;
 const TOLERANCE = 1e-12;
 let failures = 0;
 
@@ -58,8 +59,7 @@ function selectionDigest(topology) {
     const levelData = topology.levelDataFor(level);
     return Array.from({ length: levelData.count }, (_, index) => {
       const { canonicalX, canonicalY } = canonicalCoordinatesForIndex(levelData, index);
-      const anchorIndex = index * 2;
-      return [level, `${canonicalX}:${canonicalY}`, canonicalX, canonicalY, levelData.canonicalAnchors[anchorIndex], levelData.canonicalAnchors[anchorIndex + 1]];
+      return [level, `${canonicalX}:${canonicalY}`, canonicalX, canonicalY, mercatorXForIndex(levelData, index), mercatorYForIndex(levelData, index)];
     });
   });
 }
@@ -75,14 +75,12 @@ function verifyIdentity(A, B) {
       const otherIndex = canonicalIndexForCoordinates(b, canonicalX, canonicalY);
       if (otherIndex < 0) continue;
       overlap++;
-      const anchorIndex = index * 2;
-      const otherAnchorIndex = otherIndex * 2;
       error = Math.max(
         error,
         Math.abs(canonicalX - (b.minI + otherIndex % b.width) * b.identityScale),
         Math.abs(canonicalY - (b.minJ + Math.floor(otherIndex / b.width)) * b.identityScale),
-        Math.abs(a.canonicalAnchors[anchorIndex] - b.canonicalAnchors[otherAnchorIndex]),
-        Math.abs(a.canonicalAnchors[anchorIndex + 1] - b.canonicalAnchors[otherAnchorIndex + 1])
+        Math.abs(mercatorXForIndex(a, index) - mercatorXForIndex(b, otherIndex)),
+        Math.abs(mercatorYForIndex(a, index) - mercatorYForIndex(b, otherIndex))
       );
     }
     console.log(`L${level} overlapping canonical samples=${overlap}, identity error=${error}`);
@@ -133,9 +131,20 @@ function summaryError(left, right) {
 }
 
 function summaryAt(summary, index) {
+  const column = index % summary.levelData.width;
+  const row = Math.floor(index / summary.levelData.width);
   return {
     level: summary.level,
-    levelData: { ...summary.levelData, count: 1, width: 1, height: 1, canonicalAnchors: summary.levelData.canonicalAnchors.slice(index * 2, index * 2 + 2) },
+    levelData: {
+      ...summary.levelData,
+      minI: summary.levelData.minI + column,
+      maxI: summary.levelData.minI + column,
+      minJ: summary.levelData.minJ + row,
+      maxJ: summary.levelData.minJ + row,
+      count: 1,
+      width: 1,
+      height: 1
+    },
     totalWeight: summary.totalWeight.subarray(index, index + 1),
     rainWeightedSumMmh: summary.rainWeightedSumMmh.subarray(index, index + 1),
     rainMaxMmh: summary.rainMaxMmh.subarray(index, index + 1),
@@ -240,7 +249,14 @@ function verifyRangeRoundTrip(window, firstRange, middleRange, name) {
   for (let level = firstRange.minLevel; level <= firstRange.maxLevel; level++) {
     const originalLevelData = original.levelDataFor(level);
     const finalLevelData = final.levelDataFor(level);
-    check(originalLevelData.count === finalLevelData.count && maxError(originalLevelData.canonicalAnchors, finalLevelData.canonicalAnchors) === 0, `${name} L${level} returns exactly after range round-trip`);
+    let positionError = 0;
+    const count = Math.min(originalLevelData.count, finalLevelData.count);
+    for (let index = 0; index < count; index++) {
+      positionError = Math.max(positionError,
+        Math.abs(mercatorXForIndex(originalLevelData, index) - mercatorXForIndex(finalLevelData, index)),
+        Math.abs(mercatorYForIndex(originalLevelData, index) - mercatorYForIndex(finalLevelData, index)));
+    }
+    check(originalLevelData.count === finalLevelData.count && positionError === 0, `${name} L${level} returns exactly after range round-trip`);
   }
   check(middle.levels.size === middleRange.maxLevel - middleRange.minLevel + 1, `${name} intermediate range is contiguous and bounded`);
 }
@@ -280,16 +296,16 @@ check(oldRangeTemporal.dots !== dots.temporal && oldRangeTemporal.squares !== sq
 
 const fixedWindowTopology = new GeographicLodTopology(topologyB.canonicalWindow, fullRange);
 const fixedCount = sumCounts(fixedWindowTopology);
-const summaryAndAnchorBytes = (topology) => sumCounts(topology) * (SUMMARY_BYTES_PER_SAMPLE + ANCHOR_BYTES_PER_SAMPLE);
-console.log('topology counts and typed summary+anchor memory:');
+const summaryBytes = (topology) => sumCounts(topology) * SUMMARY_BYTES_PER_SAMPLE;
+console.log('topology counts and typed summary memory (dense descriptor positions removed):');
 for (const [name, topology] of [['all-level same-window', fullPyramid.topology], ['initial/large', topologyA], ['tighter L13', topologyB], ['L14', topologyC], ['L15', new GeographicLodTopology({ minX: windows[1].minX + L10_STEP, maxX: windows[1].maxX - L10_STEP, minY: windows[1].minY + L10_STEP, maxY: windows[1].maxY - L10_STEP }, { minLevel: 14, maxLevel: 15 })]]) {
   const counts = LEVELS.map((level) => topology.levels.has(level) ? topology.levelDataFor(level).count : '—');
-  const bytes = summaryAndAnchorBytes(topology);
+  const bytes = summaryBytes(topology);
   console.log(`${name}: ${counts.map((count, index) => `L${LEVELS[index]}=${count}`).join(', ')}; approx=${(bytes / 1024 / 1024).toFixed(3)} MiB`);
 }
 const windowedTopology = new GeographicLodTopology(topologyB.canonicalWindow, lodRangeForStableLevel(13));
 const windowedCounts = sumCounts(windowedTopology);
-console.log(`same-window L13 active topology reduction: ${(100 * (1 - windowedCounts / fixedCount)).toFixed(2)}%; fixed/windowed typed summary+anchor bytes=${(summaryAndAnchorBytes(fixedWindowTopology) / 1024 / 1024).toFixed(3)}/${(summaryAndAnchorBytes(windowedTopology) / 1024 / 1024).toFixed(3)} MiB`);
+console.log(`same-window L13 active topology reduction: ${(100 * (1 - windowedCounts / fixedCount)).toFixed(2)}%; fixed/windowed typed summary bytes=${(summaryBytes(fixedWindowTopology) / 1024 / 1024).toFixed(3)}/${(summaryBytes(windowedTopology) / 1024 / 1024).toFixed(3)} MiB`);
 check(windowedCounts < fixedCount, 'windowed topology materializes fewer canonical samples than fixed support');
 
 console.log(failures ? `VERIFICATION FAILED: ${failures}` : 'VERIFICATION PASSED');

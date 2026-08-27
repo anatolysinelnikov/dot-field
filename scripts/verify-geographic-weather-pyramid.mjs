@@ -6,7 +6,7 @@ import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geogra
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { DOTS_STRONG_RAIN_FULL_MMH, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadii } from '../src/engine/hazard-renderer.js';
-import { canonicalCoordinatesForIndex, canonicalIndexForCoordinates, canonicalWindowFromMercatorBounds, GeographicLodTopology, MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MAX_LOGICAL_SAMPLING_ZOOM, MIN_GRID_LEVEL, mercatorToLngLat, lngLatToMercator, mercatorXToLongitude, mercatorYToLatitude, lodRangeForStableLevel, zoomToMercatorGridLevel } from '../src/engine/geographic-lod.js';
+import { canonicalCoordinatesForIndex, canonicalIndexForCoordinates, canonicalWindowFromMercatorBounds, GeographicLodTopology, MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MAX_LOGICAL_SAMPLING_ZOOM, MIN_GRID_LEVEL, mercatorToLngLat, lngLatToMercator, mercatorXForIndex, mercatorXToLongitude, mercatorYForIndex, mercatorYToLatitude, lodRangeForStableLevel, zoomToMercatorGridLevel } from '../src/engine/geographic-lod.js';
 import { SCALAR_GRID_LEVEL } from '../src/engine/geographic-scalar-lattice.js';
 
 const LEVELS = [10, 11, 12, 13, 14, 15];
@@ -23,7 +23,7 @@ function rainMean(summary, index) { return summary.totalWeight[index] ? summary.
 function coverageIndex(threshold) { return RAIN_COVERAGE_THRESHOLDS_MMH.indexOf(threshold); }
 
 function directFixture(level, rainValues, stormValues = [], hailValues = [], ArrayType = Float64Array) {
-  const levelData = { level, count: rainValues.length, spacing: 0.01, canonicalAnchors: new Float64Array(rainValues.length * 2) };
+  const levelData = { level, count: rainValues.length, spacing: 0.01 };
   const summary = createWeatherSummary(levelData, null, ArrayType);
   for (let index = 0; index < rainValues.length; index++) {
     const rainMmh = rainValues[index]; const storm = stormValues[index] || 0; const hail = hailValues[index] || 0;
@@ -112,7 +112,7 @@ console.log(`aggregate contribution support error: ${centeredWeightError}; entri
 for (const level of DIRECT_LEVELS) {
   const summary = summaries[level]; const compact = float32Summaries[level]; let directError = 0; let compactError = 0; let highRain = 0;
   for (let index = 0; index < summary.levelData.count; index++) {
-    const anchorIndex = index * 2; const value = frame.sample(mercatorXToLongitude(summary.levelData.canonicalAnchors[anchorIndex]), mercatorYToLatitude(summary.levelData.canonicalAnchors[anchorIndex + 1]));
+    const value = frame.sample(mercatorXToLongitude(mercatorXForIndex(summary.levelData, index)), mercatorYToLatitude(mercatorYForIndex(summary.levelData, index)));
     directError = max(directError, Math.abs(rainMean(summary, index) - value.rainMmh)); directError = max(directError, Math.abs(summary.rainMaxMmh[index] - value.rainMmh)); directError = max(directError, Math.abs(summary.stormWeightedSeverity[index] - value.storm)); directError = max(directError, Math.abs(summary.hailWeightedSeverity[index] - value.hail));
     compactError = max(compactError, Math.abs(compact.rainWeightedSumMmh[index] - value.rainMmh)); compactError = max(compactError, Math.abs(compact.stormWeightedSeverity[index] - value.storm)); compactError = max(compactError, Math.abs(compact.hailWeightedSeverity[index] - value.hail)); highRain = Math.max(highRain, value.rainMmh);
   }
@@ -123,7 +123,7 @@ function inheritedIdentityCheck(lowerLevel, higherLevel) {
   const lower = summaries[lowerLevel]; const higher = summaries[higherLevel]; let missing = 0; let positionError = 0; let valueError = 0;
   for (let index = 0; index < lower.levelData.count; index++) {
     const { canonicalX, canonicalY } = canonicalCoordinatesForIndex(lower.levelData, index); const higherIndex = canonicalIndexForCoordinates(higher.levelData, canonicalX, canonicalY); if (higherIndex < 0) { missing++; continue; }
-    positionError = max(positionError, Math.abs(lower.levelData.canonicalAnchors[index * 2] - higher.levelData.canonicalAnchors[higherIndex * 2])); positionError = max(positionError, Math.abs(lower.levelData.canonicalAnchors[index * 2 + 1] - higher.levelData.canonicalAnchors[higherIndex * 2 + 1]));
+    positionError = max(positionError, Math.abs(mercatorXForIndex(lower.levelData, index) - mercatorXForIndex(higher.levelData, higherIndex))); positionError = max(positionError, Math.abs(mercatorYForIndex(lower.levelData, index) - mercatorYForIndex(higher.levelData, higherIndex)));
     valueError = max(valueError, Math.abs(lower.rainWeightedSumMmh[index] - higher.rainWeightedSumMmh[higherIndex])); valueError = max(valueError, Math.abs(lower.stormWeightedSeverity[index] - higher.stormWeightedSeverity[higherIndex])); valueError = max(valueError, Math.abs(lower.hailWeightedSeverity[index] - higher.hailWeightedSeverity[higherIndex]));
   }
   console.log(`L${lowerLevel}->L${higherLevel} inherited identity: missing=${missing}, position=${positionError}, value=${valueError}`); check(missing === 0 && positionError === 0 && valueError <= FLOAT64_TOLERANCE, `L${lowerLevel}->L${higherLevel} exact inherited identity`);
@@ -134,7 +134,7 @@ function directRefinementCheck(lowerLevel, higherLevel) {
   const lower = summaries[lowerLevel]; const higher = summaries[higherLevel]; let directError = 0; let interpolationDifference = 0; let newPoints = 0;
   for (let index = 0; index < higher.levelData.count; index++) {
     const { canonicalX, canonicalY } = canonicalCoordinatesForIndex(higher.levelData, index); if (canonicalIndexForCoordinates(lower.levelData, canonicalX, canonicalY) >= 0) continue; newPoints++;
-    const anchorIndex = index * 2; const value = frame.sample(mercatorXToLongitude(higher.levelData.canonicalAnchors[anchorIndex]), mercatorYToLatitude(higher.levelData.canonicalAnchors[anchorIndex + 1])); directError = max(directError, Math.abs(higher.rainWeightedSumMmh[index] - value.rainMmh));
+    const value = frame.sample(mercatorXToLongitude(mercatorXForIndex(higher.levelData, index)), mercatorYToLatitude(mercatorYForIndex(higher.levelData, index))); directError = max(directError, Math.abs(higher.rainWeightedSumMmh[index] - value.rainMmh));
     const parentStep = 2 ** (MAX_GRID_LEVEL - lowerLevel); const parentX = Math.floor(canonicalX / parentStep) * parentStep; const parentY = Math.floor(canonicalY / parentStep) * parentStep;
     const xFraction = (canonicalX - parentX) / parentStep; const yFraction = (canonicalY - parentY) / parentStep;
     const indices = [canonicalIndexForCoordinates(lower.levelData, parentX, parentY), canonicalIndexForCoordinates(lower.levelData, parentX + parentStep, parentY), canonicalIndexForCoordinates(lower.levelData, parentX, parentY + parentStep), canonicalIndexForCoordinates(lower.levelData, parentX + parentStep, parentY + parentStep)];
@@ -158,7 +158,7 @@ const composedL11 = aggregateWeatherSummary(pyramid.levels.get(11), summaries[13
 let recursiveError = maxSummaryDifference(composedL11, summaries[11]); console.log(`L13->L12->L11 recursive/composed error=${recursiveError}`); check(recursiveError <= FLOAT64_TOLERANCE, 'aggregate recursive/composed equivalence');
 
 const fourToOne = { offsets: new Uint32Array([0, 1, 2, 3, 4]), parentIndices: new Uint32Array([0, 0, 0, 0]), weights: new Float64Array([0.25, 0.25, 0.25, 0.25]) };
-const fixtureParent = { level: 12, count: 1, spacing: 0.01, canonicalAnchors: new Float64Array(2) };
+const fixtureParent = { level: 12, count: 1, spacing: 0.01 };
 const uniform = aggregateWeatherSummary(fixtureParent, directFixture(13, [5, 5, 5, 5]), fourToOne, null, Float64Array);
 const localized = aggregateWeatherSummary(fixtureParent, directFixture(13, [0, 0, 0, 20]), fourToOne, null, Float64Array);
 console.log(`aggregate fixtures: uniform mean=${rainMean(uniform, 0)} max=${uniform.rainMaxMmh[0]}, localized mean=${rainMean(localized, 0)} max=${localized.rainMaxMmh[0]} coverage@2.5=${localized.rainCoverageWeight[coverageIndex(2.5)][0]}`);
@@ -178,7 +178,7 @@ for (const level of DIRECT_LEVELS) {
 for (const level of DIRECT_LEVELS) {
   const dots = mapDotsWeatherSummary(float32Summaries[level]); const squares = mapSquaresWeatherSummary(float32Summaries[level]); let dotsError = 0; let hazardError = 0; let squaresError = 0;
   for (let index = 0; index < float32Summaries[level].levelData.count; index++) {
-    const spacing = float32Summaries[level].levelData.spacing; const anchorIndex = index * 2; const value = frame.sample(mercatorXToLongitude(float32Summaries[level].levelData.canonicalAnchors[anchorIndex]), mercatorYToLatitude(float32Summaries[level].levelData.canonicalAnchors[anchorIndex + 1]));
+    const spacing = float32Summaries[level].levelData.spacing; const value = frame.sample(mercatorXToLongitude(mercatorXForIndex(float32Summaries[level].levelData, index)), mercatorYToLatitude(mercatorYForIndex(float32Summaries[level].levelData, index)));
     dotsError = max(dotsError, Math.abs(dots.rainRadius[index] - Math.fround(rainMmhToRadius(Math.fround(value.rainMmh), spacing)))); dotsError = max(dotsError, Math.abs(dots.strongRadius[index] - Math.fround(dotsStrongRainMmhToRadius(Math.fround(value.rainMmh), spacing))));
     const expectedHazards = geographicHazardRadii({ storm: Math.fround(value.storm), hail: Math.fround(value.hail) }, spacing, {}); hazardError = max(hazardError, Math.abs(dots.stormRadius[index] - Math.fround(expectedHazards.stormRadius))); hazardError = max(hazardError, Math.abs(dots.hailRadius[index] - Math.fround(expectedHazards.hailRadius)));
     squaresError = max(squaresError, Math.abs(squares.rainWetMeanMmh[index] - Math.fround(value.rainMmh))); squaresError = max(squaresError, Math.abs(squares.stormMeanSeverity[index] - Math.fround(value.storm))); squaresError = max(squaresError, Math.abs(squares.hailMeanSeverity[index] - Math.fround(value.hail)));
@@ -187,18 +187,18 @@ for (const level of DIRECT_LEVELS) {
 }
 
 for (const [lower, higher, hierarchical] of [[12, 13, true], [13, 14, false], [14, 15, false]]) {
-  const pairs = pyramid.topology.directPairsFor(lower, higher); let inheritedPositionError = 0; let inheritedPairs = 0; let introducedPairs = 0; const lowAnchors = pyramid.topology.levels.get(lower).canonicalAnchors; const highAnchors = pyramid.topology.levels.get(higher).canonicalAnchors;
-  for (let index = 0; index < pairs.length; index += 2) { const low = pairs[index]; const high = pairs[index + 1]; if (low >= 0 && high >= 0) { inheritedPairs++; inheritedPositionError = max(inheritedPositionError, Math.abs(lowAnchors[low * 2] - highAnchors[high * 2])); inheritedPositionError = max(inheritedPositionError, Math.abs(lowAnchors[low * 2 + 1] - highAnchors[high * 2 + 1])); } else introducedPairs++; }
+  const pairs = pyramid.topology.directPairsFor(lower, higher); let inheritedPositionError = 0; let inheritedPairs = 0; let introducedPairs = 0; const lowLevelData = pyramid.topology.levels.get(lower); const highLevelData = pyramid.topology.levels.get(higher);
+  for (let index = 0; index < pairs.length; index += 2) { const low = pairs[index]; const high = pairs[index + 1]; if (low >= 0 && high >= 0) { inheritedPairs++; inheritedPositionError = max(inheritedPositionError, Math.abs(mercatorXForIndex(lowLevelData, low) - mercatorXForIndex(highLevelData, high))); inheritedPositionError = max(inheritedPositionError, Math.abs(mercatorYForIndex(lowLevelData, low) - mercatorYForIndex(highLevelData, high))); } else introducedPairs++; }
   console.log(`transition L${lower}<->L${higher}: ${hierarchical ? 'hierarchical' : 'direct pairs'}, inherited=${inheritedPairs}, introduced=${introducedPairs}, inherited position error=${inheritedPositionError}`); check(inheritedPositionError === 0 && (hierarchical ? pyramid.topology.transitionParentsFor(higher) : introducedPairs > 0), `L${lower}<->L${higher} transition topology`);
 }
 
 console.log(`scalar isolation: L${SCALAR_GRID_LEVEL} implementation retained but allocation skipped because Blur/Areas are inactive for the full-domain sequence`);
 
-const summaryBytesPerSample = pyramid.summaryMemoryBytesPerSample(); let topologyAnchorBytes = 0;
-for (const level of LEVELS) { const count = pyramid.levelDataFor(level).count; topologyAnchorBytes += pyramid.topology.levels.get(level).canonicalAnchors.byteLength; console.log(`L${level}: ${count} samples; shared summary=${(count * summaryBytesPerSample / 1024 / 1024).toFixed(3)} MiB`); }
+const summaryBytesPerSample = pyramid.summaryMemoryBytesPerSample();
+for (const level of LEVELS) { const count = pyramid.levelDataFor(level).count; console.log(`L${level}: ${count} samples; shared summary=${(count * summaryBytesPerSample / 1024 / 1024).toFixed(3)} MiB`); }
 const count14 = pyramid.levelDataFor(14).count; const count15 = pyramid.levelDataFor(15).count; const mib = (bytes) => `${(bytes / 1024 / 1024).toFixed(3)} MiB`;
 console.log(`L15 stable memory: one shared summary=${mib(count15 * summaryBytesPerSample)}, two temporal summaries=${mib(count15 * summaryBytesPerSample * 2)}, Dots mapped states=${mib(count15 * 4 * 4 * 2)}, Squares mapped states=${mib(count15 * 8 * 4 * 2)}, Squares CPU instances=${mib(count15 * 18 * 4)}, Squares GPU instance buffer=${mib(count15 * 18 * 4)}`);
-console.log(`L14<->L15 transition memory: two temporal summaries=${mib((count14 + count15) * summaryBytesPerSample * 2)}, Dots mapped states=${mib((count14 + count15) * 4 * 4 * 2)}, Squares mapped states=${mib((count14 + count15) * 8 * 4 * 2)}, Squares CPU/GPU instances each=${mib((count14 + count15) * 18 * 4)}, shared typed topology anchors=${mib(topologyAnchorBytes)}, centered aggregate topology=${mib(centeredMappingBytes)}`);
+console.log(`L14<->L15 transition memory: two temporal summaries=${mib((count14 + count15) * summaryBytesPerSample * 2)}, Dots mapped states=${mib((count14 + count15) * 4 * 4 * 2)}, Squares mapped states=${mib((count14 + count15) * 8 * 4 * 2)}, Squares CPU/GPU instances each=${mib((count14 + count15) * 18 * 4)}, dense topology positions=0 MiB, centered aggregate topology=${mib(centeredMappingBytes)}`);
 
 const dotsSource = fs.readFileSync(new URL('../src/engine/geographic-dots-layer.js', import.meta.url), 'utf8'); const appSource = fs.readFileSync(new URL('../src/app.js', import.meta.url), 'utf8'); const htmlSource = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 check(!dotsSource.includes('setStrongFullMmh') && !appSource.includes('dotsStrong') && !htmlSource.includes('dotsStrong'), 'Dots strong-rain tuning UI and mutable state are removed'); check(DOTS_STRONG_RAIN_FULL_MMH === 35, 'Dots strong-rain full saturation is fixed at 35 mm/h');

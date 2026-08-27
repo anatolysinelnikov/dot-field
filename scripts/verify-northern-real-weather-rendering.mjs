@@ -3,7 +3,7 @@ import { RealWeatherSequence } from '../src/engine/real-weather.js';
 import { setActiveWeatherField, prepareGeographicFieldFrame } from '../src/engine/geography.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
-import { canonicalCoordinatesForIndex, GeographicLodTopology, canonicalWindowFromMercatorBounds, lngLatToMercator, mercatorToLngLat } from '../src/engine/geographic-lod.js';
+import { canonicalCoordinatesForIndex, GeographicLodTopology, canonicalWindowFromMercatorBounds, lngLatToMercator, mercatorToLngLat, mercatorXForIndex, mercatorYForIndex } from '../src/engine/geographic-lod.js';
 import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH } from '../src/engine/geographic-weather-pyramid.js';
 
 const root = new URL('../data/generated/202608262200/', import.meta.url);
@@ -49,8 +49,7 @@ const topology = new GeographicLodTopology(canonicalWindow, { minLevel: 12, maxL
 const pyramid = new GeographicWeatherPyramid(Float64Array, topology);
 const summary = pyramid.evaluate([13], frame)[13];
 const nearest = Array.from({ length: summary.levelData.count }, (_, index) => index).reduce((best, index) => {
-  const anchorIndex = index * 2;
-  const distance = Math.hypot(summary.levelData.canonicalAnchors[anchorIndex] - targetX, summary.levelData.canonicalAnchors[anchorIndex + 1] - targetY);
+  const distance = Math.hypot(mercatorXForIndex(summary.levelData, index) - targetX, mercatorYForIndex(summary.levelData, index) - targetY);
   return !best || distance < best.distance ? { index, distance } : best;
 }, null);
 const nearestCoordinates = canonicalCoordinatesForIndex(summary.levelData, nearest.index);
@@ -94,7 +93,7 @@ assert(Math.abs(direct.rainMmh - sourceValue) <= 1e-6, 'direct sequence sampling
 assert(Math.abs(prepared.rainMmh - direct.rainMmh) <= 1e-12, 'prepared sequence sampling matches direct sampling');
 assert(targetX >= visibleBounds.minX && targetX <= visibleBounds.maxX && targetY >= visibleBounds.minY && targetY <= visibleBounds.maxY, 'northern source lies inside the recorded visible Mercator bounds');
 assert(targetX * 2 ** 15 >= canonicalWindow.minX && targetX * 2 ** 15 <= canonicalWindow.maxX && targetY * 2 ** 15 >= canonicalWindow.minY && targetY * 2 ** 15 <= canonicalWindow.maxY, 'northern source lies inside the recorded active canonical window');
-const nearestLngLat = mercatorToLngLat(summary.levelData.canonicalAnchors[nearest.index * 2], summary.levelData.canonicalAnchors[nearest.index * 2 + 1]);
+const nearestLngLat = mercatorToLngLat(mercatorXForIndex(summary.levelData, nearest.index), mercatorYForIndex(summary.levelData, nearest.index));
 assert(summary.level === 13 && summary.rainWeightedSumMmh[nearest.index] > 5 && summary.rainMaxMmh[nearest.index] > 5, `nearest L13 sample ${nearestCoordinates.canonicalX}:${nearestCoordinates.canonicalY} reconstructs strong rain`);
 assert(localCounts.positive > 0 && localCounts.atLeast005 > 0 && localCounts.atLeast1 > 0 && localCounts.atLeast25 > 0 && localCounts.atLeast5 > 0, `L13 local neighborhood retains rain thresholds ${JSON.stringify(localCounts)}`);
 assert(dotsRainInstances > 0 && dotsStrongInstances > 0, `Dots maps and retains northern rain (${dotsRainInstances}) and strong rain (${dotsStrongInstances}) instances`);

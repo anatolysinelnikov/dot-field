@@ -9,6 +9,8 @@ import {
   MAX_GRID_LEVEL,
   MIN_GRID_LEVEL,
   lngLatToMercator,
+  mercatorXForIndex,
+  mercatorYForIndex,
   normalizeCanonicalWindow,
   lodRangeForStableLevel
 } from '../src/engine/geographic-lod.js';
@@ -95,9 +97,8 @@ function installDenseGeometryFallback(pyramid) {
     const longitudes = new Float64Array(levelData.count);
     const latitudes = new Float64Array(levelData.count);
     for (let index = 0; index < levelData.count; index++) {
-      const anchorIndex = index * 2;
-      longitudes[index] = levelData.canonicalAnchors[anchorIndex] * 360 - 180;
-      const mercatorY = levelData.canonicalAnchors[anchorIndex + 1];
+      longitudes[index] = mercatorXForIndex(levelData, index) * 360 - 180;
+      const mercatorY = mercatorYForIndex(levelData, index);
       latitudes[index] = Math.atan(Math.sinh(Math.PI * (1 - 2 * mercatorY))) * 180 / Math.PI;
     }
     // Reproduce the pre-optimization provider path: dense coordinates, one

@@ -179,7 +179,6 @@ function legacyTopologyBytes(topology) {
 
 function packedTopologyBytes(topology) {
   let bytes = 0;
-  for (const levelData of topology.levels.values()) bytes += levelData.canonicalAnchors.byteLength;
   for (const parents of topology.transitionParents.values()) bytes += parents.childOffsets.byteLength + parents.childIndices.byteLength + parents.parentIndexByChild.byteLength;
   for (const pairs of topology.directPairs.values()) bytes += pairs.byteLength;
   return bytes;
@@ -217,6 +216,17 @@ function measureHeap(builder, repetitions = 3) {
 function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)];
+}
+
+function measureTiming(builder, repetitions = 5) {
+  const values = [];
+  for (let repetition = 0; repetition < repetitions; repetition++) {
+    const started = performance.now();
+    const value = builder();
+    values.push(performance.now() - started);
+    void value;
+  }
+  return { medianMs: median(values), runsMs: values };
 }
 
 function prepareOldGeometry(levelData) {
@@ -277,6 +287,10 @@ function oldReplacementMetrics(window) {
 function runCase(name, window, range, fullSupport) {
   const packed = new GeographicLodTopology(window, range);
   const legacy = oldBuildTopology(window, range);
+  const constructionTiming = {
+    legacy: fullSupport ? null : measureTiming(() => oldBuildTopology(window, range)),
+    packed: measureTiming(() => new GeographicLodTopology(window, range))
+  };
   const packedPyramid = new GeographicWeatherPyramid(Float32Array, packed);
   const oldReference = legacy.levels.get(range.maxLevel);
   const packedReference = packed.levelDataFor(range.maxLevel);
@@ -302,7 +316,8 @@ function runCase(name, window, range, fullSupport) {
     fullSupport,
     range,
     counts: Object.fromEntries([...packed.levels].map(([level, data]) => [`L${level}`, data.count])),
-    completeConstructionMs: { legacy: legacy.totalMs, packed: packed.constructionTimings.totalMs },
+    completeConstructionMs: { legacy: constructionTiming.legacy?.medianMs ?? null, packed: constructionTiming.packed.medianMs },
+    constructionTimingRunsMs: constructionTiming,
     perLevelGridMs: { legacy: legacy.levelTimes, packed: packed.constructionTimings.levels },
     transitionParentsMs: { legacy: legacy.transitionParentsMs, packed: packed.constructionTimings.transitionParentsMs },
     directPairsMs: { legacy: legacy.directPairsMs, packed: packed.constructionTimings.directPairsMs },
@@ -348,6 +363,7 @@ function runFullSupportCase(label, range) {
   }
   if (typeof global.gc === 'function') global.gc();
   const packedHeap = measureHeap(() => new GeographicLodTopology(supportWindow, range), 2);
+  const packedConstructionTiming = measureTiming(() => new GeographicLodTopology(supportWindow, range));
   const packed = new GeographicLodTopology(supportWindow, range);
   if (!legacyMetrics) {
     const counts = Object.fromEntries([...packed.levels].map(([level, data]) => [`L${level}`, data.count]));
@@ -375,7 +391,8 @@ function runFullSupportCase(label, range) {
     fullSupport: true,
     range,
     counts: legacyMetrics.counts,
-    completeConstructionMs: { legacy: legacyMetrics.completeConstructionMs, packed: packed.constructionTimings.totalMs },
+    completeConstructionMs: { legacy: legacyMetrics.completeConstructionMs, packed: packedConstructionTiming.medianMs },
+    constructionTimingRunsMs: { legacy: null, packed: packedConstructionTiming },
     perLevelGridMs: { legacy: legacyMetrics.perLevelGridMs, packed: packed.constructionTimings.levels },
     transitionParentsMs: { legacy: legacyMetrics.transitionParentsMs, packed: packed.constructionTimings.transitionParentsMs },
     directPairsMs: { legacy: legacyMetrics.directPairsMs, packed: packed.constructionTimings.directPairsMs },

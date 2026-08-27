@@ -1,7 +1,7 @@
 import { prepareGeographicFieldFrame } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH } from './geographic-weather-pyramid.js';
-import { canonicalWindowsEqual, MAX_GRID_LEVEL } from './geographic-lod.js';
+import { canonicalWindowsEqual, MAX_GRID_LEVEL, mercatorXForIndex, mercatorYForIndex } from './geographic-lod.js';
 import { RAIN_VISIBILITY_SHADER, STRONG_RAIN_SHADER } from './precipitation-mapping.js';
 
 const INSTANCE_STRIDE = 18;
@@ -355,8 +355,7 @@ export class GeographicSquaresLayer {
     if (result.length < length) result = new Float32Array(Math.max(length, result.length * 2, INSTANCE_STRIDE * 256));
     for (let position = 0, offset = 0; position < count; position++, offset += INSTANCE_STRIDE) {
       const index = activeIndices ? activeIndices[position] : position;
-      const anchorIndex = index * 2;
-      result[offset] = levelData.canonicalAnchors[anchorIndex]; result[offset + 1] = levelData.canonicalAnchors[anchorIndex + 1];
+      result[offset] = mercatorXForIndex(levelData, index); result[offset + 1] = mercatorYForIndex(levelData, index);
       result[offset + 2] = state0.rainWetMeanMmh[index]; result[offset + 3] = state0.rainCoverage[index];
       result[offset + 4] = state0.stormCoverage[index]; result[offset + 5] = state0.stormMeanSeverity[index]; result[offset + 6] = state0.stormMaxSeverity[index];
       result[offset + 7] = state0.hailCoverage[index]; result[offset + 8] = state0.hailMeanSeverity[index]; result[offset + 9] = state0.hailMaxSeverity[index];

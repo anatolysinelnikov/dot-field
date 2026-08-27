@@ -155,8 +155,7 @@ export function lodRangesEqual(left, right) {
 
 // Level descriptors are immutable outputs of selectMercatorGridLevel(). A
 // descriptor can be retained across a range-only replacement when every value
-// that determines its packed row-major identity is unchanged. The anchor
-// array itself is then the proof of the exact same spatial object; do not use
+// that determines its packed row-major identity is unchanged. Do not use
 // array lengths alone as a compatibility test in renderer lifecycle code.
 export function levelDataCompatibleForReuse(levelData, level, canonicalWindow) {
   if (!levelData || levelData.level !== level || !canonicalWindowsEqual(levelData.canonicalWindow, canonicalWindow)) return false;
@@ -173,8 +172,7 @@ export function levelDataCompatibleForReuse(levelData, level, canonicalWindow) {
     && levelData.minI === minI && levelData.maxI === maxI
     && levelData.minJ === minJ && levelData.maxJ === maxJ
     && levelData.width === width && levelData.height === height
-    && levelData.count === width * height
-    && levelData.canonicalAnchors?.length === levelData.count * 2;
+    && levelData.count === width * height;
 }
 
 export function lodRangeForStableLevel(level) {
@@ -228,13 +226,6 @@ export function selectMercatorGridLevel(level, canonicalWindow = canonicalSuppor
   const width = Math.max(0, maxI - minI + 1);
   const height = Math.max(0, maxJ - minJ + 1);
   const count = width * height;
-  const canonicalAnchors = new Float64Array(count * 2);
-  for (let index = 0; index < count; index++) {
-    const i = minI + index % width;
-    const j = minJ + Math.floor(index / width);
-    canonicalAnchors[index * 2] = i * step;
-    canonicalAnchors[index * 2 + 1] = j * step;
-  }
   return Object.freeze({
     level: boundedLevel,
     spacing: step,
@@ -247,8 +238,7 @@ export function selectMercatorGridLevel(level, canonicalWindow = canonicalSuppor
     width,
     height,
     count,
-    canonicalWindow: window,
-    canonicalAnchors
+    canonicalWindow: window
   });
 }
 
@@ -268,6 +258,14 @@ export function canonicalXForIndex(levelData, index) {
 
 export function canonicalYForIndex(levelData, index) {
   return (levelData.minJ + Math.floor(index / levelData.width)) * levelData.identityScale;
+}
+
+export function mercatorXForIndex(levelData, index) {
+  return (levelData.minI + index % levelData.width) * levelData.spacing;
+}
+
+export function mercatorYForIndex(levelData, index) {
+  return (levelData.minJ + Math.floor(index / levelData.width)) * levelData.spacing;
 }
 
 export function canonicalIndexForCoordinates(levelData, canonicalX, canonicalY) {

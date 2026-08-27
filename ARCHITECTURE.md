@@ -270,11 +270,13 @@ Web-Mercator coordinates. A sample identity is its integer L15 canonical
 coordinate pair, so inherited vertices retain identity through LOD refinement.
 `selectMercatorGridLevel()` is the canonical spatial authority. Each selected
 level is a compact descriptor (`level`, `spacing`, `identityScale`, integer
-`minI/maxI/minJ/maxJ`, `width`, `height`, `count`, and the canonical window)
-plus one row-major `Float64Array` of Mercator anchors. Sample identity and
-indexing are implicit arithmetic conversions between `(index)`, `(i,j)`, and
-the global L15 canonical coordinate pair; no per-sample JS objects, geographic
-coordinate arrays, or string IDs are retained.
+`minI/maxI/minJ/maxJ`, `width`, `height`, `count`, and the canonical window).
+Sample identity and indexing are implicit arithmetic conversions between
+`(index)`, `(i,j)`, and the global L15 canonical coordinate pair. Mercator X/Y
+positions are derived from `(minI + column) * spacing` and
+`(minJ + row) * spacing` when consumed; no dense per-sample position array,
+per-sample JS objects, geographic coordinate arrays, or string IDs are retained
+by level descriptors.
 The camera never reseats the grid. Canonical identity resolution remains L15,
 while the current maximum displayed Dots/Squares level is L14. L15 is
 intentionally disabled from the active application path for now; the engine
@@ -320,8 +322,8 @@ levels, provider sampling geometry, source-frame caches, temporal summaries,
 mapped arrays, and instances are discarded before the new window is evaluated.
 For a range-only replacement at the same canonical window, the topology reuses
 the exact immutable packed `levelData` objects for overlapping levels when
-level, window, integer bounds, dimensions, spacing, count, and canonical-anchor
-storage all match. It likewise reuses transition-parent and direct-pair arrays
+level, window, integer bounds, dimensions, spacing, and count all match. It
+likewise reuses transition-parent and direct-pair arrays
 when both endpoint objects are retained. Removed levels become unreachable;
 new levels are constructed normally.
 
@@ -455,8 +457,10 @@ retains the peak, coverage scales glyph area, and hail wins only when its mapped
 glyph is visible. Direct L13/L14/L15 hazards retain the existing
 `geographicHazardRadii()` mapping.
 
-`GeographicLodTopology` in `geographic-lod.js` owns canonical anchors and the
-deterministic one-parent child ownership used only for Dots geometric morphing.
+`GeographicLodTopology` in `geographic-lod.js` owns compact canonical grid
+descriptors and the deterministic one-parent child ownership used only for
+Dots geometric morphing. Mercator positions for instance construction are
+derived arithmetically from each descriptor and sample index.
 That mapping is deliberately separate from the centered multi-parent weather
 contribution topology. Parent ownership is packed as CSR
 `childOffsets/childIndices` plus `parentIndexByChild`, preserving parent-major

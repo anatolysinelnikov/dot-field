@@ -11,6 +11,8 @@ import {
   canonicalIndexForCoordinates,
   canonicalXForIndex,
   canonicalYForIndex,
+  mercatorXForIndex,
+  mercatorYForIndex,
   mercatorXToLongitude,
   mercatorYToLatitude,
   canonicalWindowsEqual,
@@ -410,9 +412,8 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
       value.hail = 0;
     } else if (samplingGeometry) geographicPreparedIntensityAtGeometry(frame, samplingGeometry, index, value);
     else {
-      const anchorIndex = index * 2;
-      const longitude = mercatorXToLongitude(levelData.canonicalAnchors[anchorIndex]);
-      const latitude = mercatorYToLatitude(levelData.canonicalAnchors[anchorIndex + 1]);
+      const longitude = mercatorXToLongitude(mercatorXForIndex(levelData, index));
+      const latitude = mercatorYToLatitude(mercatorYForIndex(levelData, index));
       geographicPreparedIntensityAtXY(frame, longitude, latitude, value);
     }
     const rainMmh = value.rainMmh;

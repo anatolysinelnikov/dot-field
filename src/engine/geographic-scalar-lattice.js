@@ -1,6 +1,6 @@
 import { AREA_PRECIPITATION_BANDS, RAIN_PRESENTATION_MAX_MMH } from './config.js';
 import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographicToSynthetic } from './geography.js';
-import { mercatorXToLongitude, mercatorYToLatitude, selectMercatorGridLevel } from './geographic-lod.js';
+import { mercatorXForIndex, mercatorXToLongitude, mercatorYForIndex, mercatorYToLatitude, selectMercatorGridLevel } from './geographic-lod.js';
 
 // Blur and Areas share one L14 lattice.  Unlike the display LOD, this grid is
 // never selected from the camera: its vertices, cells, and identities persist
@@ -121,16 +121,20 @@ export class GeographicScalarLattice {
     this.spacing = levelData.spacing;
     this.width = levelData.width;
     this.height = levelData.height;
-    this.origin = new Float32Array(levelData.canonicalAnchors.subarray(0, 2));
+    this.origin = new Float32Array(2);
+    this.origin[0] = mercatorXForIndex(levelData, 0);
+    this.origin[1] = mercatorYForIndex(levelData, 0);
     this.positions = new Float32Array(this.length * 2);
     this.fieldPoints = new Float32Array(this.length * 2);
     for (let index = 0; index < this.length; index++) {
       const anchorIndex = index * 2;
-      this.positions[anchorIndex] = levelData.canonicalAnchors[anchorIndex];
-      this.positions[anchorIndex + 1] = levelData.canonicalAnchors[anchorIndex + 1];
+      const mercatorX = mercatorXForIndex(levelData, index);
+      const mercatorY = mercatorYForIndex(levelData, index);
+      this.positions[anchorIndex] = mercatorX;
+      this.positions[anchorIndex + 1] = mercatorY;
       const point = geographicToSynthetic(
-        mercatorXToLongitude(levelData.canonicalAnchors[anchorIndex]),
-        mercatorYToLatitude(levelData.canonicalAnchors[anchorIndex + 1])
+        mercatorXToLongitude(mercatorX),
+        mercatorYToLatitude(mercatorY)
       );
       this.fieldPoints[index * 2] = point.x;
       this.fieldPoints[index * 2 + 1] = point.y;

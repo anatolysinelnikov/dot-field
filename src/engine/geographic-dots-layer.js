@@ -6,7 +6,7 @@ import {
   rainMmhToRadiusFraction
 } from './precipitation-mapping.js';
 import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH, WEATHER_REFERENCE_LEVEL } from './geographic-weather-pyramid.js';
-import { canonicalWindowsEqual, MAX_GRID_LEVEL } from './geographic-lod.js';
+import { canonicalWindowsEqual, MAX_GRID_LEVEL, mercatorXForIndex, mercatorYForIndex } from './geographic-lod.js';
 import { geographicHazardRadii, geographicHazardRadiusForSeverity } from './hazard-renderer.js';
 
 const REFERENCE_GRID_LEVEL = WEATHER_REFERENCE_LEVEL;
@@ -221,7 +221,7 @@ function hasTemporalRadius(radius0, radius1, radius2 = 0, radius3 = 0) {
   return radius0 > 0 || radius1 > 0 || radius2 > 0 || radius3 > 0;
 }
 
-function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, coarseAnchors, fineAnchors, transitionParents, radiusKey, refining, writer) {
+function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, coarseLevelData, fineLevelData, transitionParents, radiusKey, refining, writer) {
   writer.reset();
   const activeParents = sharedPotentialActiveIndices(coarseTime0, coarseTime1);
   const parentCount = activeParents ? activeParents.length : coarseTime0[radiusKey].length;
@@ -229,10 +229,11 @@ function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1,
     const parentIndex = activeParents ? activeParents[parentPosition] : parentPosition;
     const parentRadius0 = coarseTime0[radiusKey][parentIndex];
     const parentRadius1 = coarseTime1[radiusKey][parentIndex];
-    const parentAnchorIndex = parentIndex * 2;
+    const parentX = mercatorXForIndex(coarseLevelData, parentIndex);
+    const parentY = mercatorYForIndex(coarseLevelData, parentIndex);
     if (hasTemporalRadius(parentRadius0, parentRadius1)) {
-      if (refining) writer.push(coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], parentRadius0, parentRadius1, 0, 0);
-      else writer.push(coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], 0, 0, parentRadius0, parentRadius1);
+      if (refining) writer.push(parentX, parentY, parentX, parentY, parentRadius0, parentRadius1, 0, 0);
+      else writer.push(parentX, parentY, parentX, parentY, 0, 0, parentRadius0, parentRadius1);
     }
 
     const childStart = transitionParents.childOffsets[parentIndex];
@@ -242,15 +243,16 @@ function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1,
       const childRadius0 = fineTime0[radiusKey][childIndex];
       const childRadius1 = fineTime1[radiusKey][childIndex];
       if (!hasTemporalRadius(childRadius0, childRadius1)) continue;
-      const childAnchorIndex = childIndex * 2;
-      if (refining) writer.push(coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], fineAnchors[childAnchorIndex], fineAnchors[childAnchorIndex + 1], 0, 0, childRadius0, childRadius1);
-      else writer.push(fineAnchors[childAnchorIndex], fineAnchors[childAnchorIndex + 1], coarseAnchors[parentAnchorIndex], coarseAnchors[parentAnchorIndex + 1], childRadius0, childRadius1, 0, 0);
+      const childX = mercatorXForIndex(fineLevelData, childIndex);
+      const childY = mercatorYForIndex(fineLevelData, childIndex);
+      if (refining) writer.push(parentX, parentY, childX, childY, 0, 0, childRadius0, childRadius1);
+      else writer.push(childX, childY, parentX, parentY, childRadius0, childRadius1, 0, 0);
     }
   }
   return writer.finish();
 }
 
-function buildSameLevelTemporalInstances(time0, time1, anchors, radiusKey, writer) {
+function buildSameLevelTemporalInstances(time0, time1, levelData, radiusKey, writer) {
   writer.reset();
   const radii0 = time0[radiusKey];
   const radii1 = time1[radiusKey];
@@ -261,13 +263,14 @@ function buildSameLevelTemporalInstances(time0, time1, anchors, radiusKey, write
     const radius0 = radii0[index];
     const radius1 = radii1[index];
     if (!hasTemporalRadius(radius0, radius1)) continue;
-    const anchorIndex = index * 2;
-    writer.push(anchors[anchorIndex], anchors[anchorIndex + 1], anchors[anchorIndex], anchors[anchorIndex + 1], radius0, radius1, radius0, radius1);
+    const x = mercatorXForIndex(levelData, index);
+    const y = mercatorYForIndex(levelData, index);
+    writer.push(x, y, x, y, radius0, radius1, radius0, radius1);
   }
   return writer.finish();
 }
 
-function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, fromAnchors, toAnchors, pairs, fromIsLower, radiusKey, writer) {
+function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, fromLevelData, toLevelData, pairs, fromIsLower, radiusKey, writer) {
   writer.reset();
   const fromRadii0 = fromTime0[radiusKey];
   const toRadii0 = toTime0[radiusKey];
@@ -283,11 +286,11 @@ function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, fr
     const toRadius0 = toIndex < 0 ? 0 : toRadii0[toIndex];
     const toRadius1 = toIndex < 0 ? 0 : toRadii1[toIndex];
     if (!hasTemporalRadius(fromRadius0, fromRadius1, toRadius0, toRadius1)) continue;
-    const startAnchors = fromIndex < 0 ? toAnchors : fromAnchors;
-    const startAnchorIndex = (fromIndex < 0 ? toIndex : fromIndex) * 2;
-    const endAnchors = toIndex < 0 ? fromAnchors : toAnchors;
-    const endAnchorIndex = (toIndex < 0 ? fromIndex : toIndex) * 2;
-    writer.push(startAnchors[startAnchorIndex], startAnchors[startAnchorIndex + 1], endAnchors[endAnchorIndex], endAnchors[endAnchorIndex + 1], fromRadius0, fromRadius1, toRadius0, toRadius1);
+    const startLevelData = fromIndex < 0 ? toLevelData : fromLevelData;
+    const startIndex = fromIndex < 0 ? toIndex : fromIndex;
+    const endLevelData = toIndex < 0 ? fromLevelData : toLevelData;
+    const endIndex = toIndex < 0 ? fromIndex : toIndex;
+    writer.push(mercatorXForIndex(startLevelData, startIndex), mercatorYForIndex(startLevelData, startIndex), mercatorXForIndex(endLevelData, endIndex), mercatorYForIndex(endLevelData, endIndex), fromRadius0, fromRadius1, toRadius0, toRadius1);
   }
   return writer.finish();
 }
@@ -588,9 +591,9 @@ export class GeographicDotsLayer {
     if (!this.transition) {
       const level = this.levelData.level;
       const { frames0, frames1 } = this.temporal.levels.get(level);
-      const anchors = this.topology.levels.get(level).canonicalAnchors;
+      const levelData = this.topology.levels.get(level);
       for (const type of WEATHER_TYPES) {
-        this.setInstances(type, buildSameLevelTemporalInstances(frames0.mapped[level], frames1.mapped[level], anchors, RADIUS_KEYS[type], this.instanceWriters[type]));
+        this.setInstances(type, buildSameLevelTemporalInstances(frames0.mapped[level], frames1.mapped[level], levelData, RADIUS_KEYS[type], this.instanceWriters[type]));
       }
     } else {
       const fromLevel = this.transition.fromLevelData.level;
@@ -603,10 +606,10 @@ export class GeographicDotsLayer {
       const fineLevel = refining ? toLevel : fromLevel;
       const pairs = hierarchical ? null : this.topology.directPairsFor(Math.min(fromLevel, toLevel), Math.max(fromLevel, toLevel));
       const fromIsLower = fromLevel < toLevel;
-      const coarseAnchors = this.topology.levels.get(coarseLevel).canonicalAnchors;
-      const fineAnchors = this.topology.levels.get(fineLevel).canonicalAnchors;
-      const fromAnchors = this.topology.levels.get(fromLevel).canonicalAnchors;
-      const toAnchors = this.topology.levels.get(toLevel).canonicalAnchors;
+      const coarseLevelData = this.topology.levels.get(coarseLevel);
+      const fineLevelData = this.topology.levels.get(fineLevel);
+      const fromLevelData = this.topology.levels.get(fromLevel);
+      const toLevelData = this.topology.levels.get(toLevel);
 
       for (const type of WEATHER_TYPES) {
         const data = hierarchical
@@ -615,8 +618,8 @@ export class GeographicDotsLayer {
             this.temporal.levels.get(fineLevel).frames0.mapped[fineLevel],
             this.temporal.levels.get(coarseLevel).frames1.mapped[coarseLevel],
             this.temporal.levels.get(fineLevel).frames1.mapped[fineLevel],
-            coarseAnchors,
-            fineAnchors,
+            coarseLevelData,
+            fineLevelData,
             this.topology.transitionParentsFor(fineLevel),
             RADIUS_KEYS[type],
             refining,
@@ -627,8 +630,8 @@ export class GeographicDotsLayer {
             toTemporal.frames0.mapped[toLevel],
             fromTemporal.frames1.mapped[fromLevel],
             toTemporal.frames1.mapped[toLevel],
-            fromAnchors,
-            toAnchors,
+            fromLevelData,
+            toLevelData,
             pairs,
             fromIsLower,
             RADIUS_KEYS[type],

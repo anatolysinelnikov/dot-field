@@ -55,10 +55,10 @@ export function prepareGeographicSamplingGeometry(frame, levelData, reusable = n
     const longitudes = new Float64Array(levelData.width);
     const latitudes = new Float64Array(levelData.height);
     for (let column = 0; column < levelData.width; column++) {
-      longitudes[column] = mercatorXToLongitude(levelData.canonicalAnchors[column * 2]);
+      longitudes[column] = mercatorXToLongitude((levelData.minI + column) * levelData.spacing);
     }
     for (let row = 0; row < levelData.height; row++) {
-      latitudes[row] = mercatorYToLatitude(levelData.canonicalAnchors[row * levelData.width * 2 + 1]);
+      latitudes[row] = mercatorYToLatitude((levelData.minJ + row) * levelData.spacing);
     }
     return frame.prepareRectangularSamplingGeometry(longitudes, latitudes, levelData.width, levelData.height, reusable);
   }
@@ -67,9 +67,10 @@ export function prepareGeographicSamplingGeometry(frame, levelData, reusable = n
   const longitudes = new Float64Array(levelData.count);
   const latitudes = new Float64Array(levelData.count);
   for (let index = 0; index < levelData.count; index++) {
-    const anchorIndex = index * 2;
-    longitudes[index] = mercatorXToLongitude(levelData.canonicalAnchors[anchorIndex]);
-    latitudes[index] = mercatorYToLatitude(levelData.canonicalAnchors[anchorIndex + 1]);
+    const column = index % levelData.width;
+    const row = Math.floor(index / levelData.width);
+    longitudes[index] = mercatorXToLongitude((levelData.minI + column) * levelData.spacing);
+    latitudes[index] = mercatorYToLatitude((levelData.minJ + row) * levelData.spacing);
   }
   return frame.prepareSamplingGeometry(longitudes, latitudes, reusable);
 }
