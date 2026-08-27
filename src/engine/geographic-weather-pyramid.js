@@ -1,5 +1,6 @@
 import {
   geographicPreparedIntensityAtGeometry,
+  geographicPreparedIntensityAtGeometryBatch,
   geographicPreparedIntensityAtXY,
   prepareGeographicSamplingGeometry
 } from './geography.js';
@@ -181,14 +182,24 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
   const summary = createWeatherSummary(levelData, reusable, ArrayType, totalWeight);
   initializeDirectTotalWeight(summary);
   const activeIndices = samplingGeometry?.potentialActiveIndices ?? null;
+  const previousActiveIndices = summary.potentialActiveIndices;
+  if (activeIndices && previousActiveIndices !== activeIndices) {
+    zeroWeatherFields(summary, previousActiveIndices || null);
+  }
   summary.potentialActiveIndices = activeIndices;
   summary.potentialActiveIndicesInitialized = true;
-  zeroWeatherFields(summary, activeIndices);
+  const batchRain = samplingGeometry && activeIndices && typeof frame.samplePreparedBatch === 'function'
+    ? geographicPreparedIntensityAtGeometryBatch(frame, samplingGeometry)
+    : null;
   const value = { rainMmh: 0, storm: 0, hail: 0 };
   const count = activeIndices ? activeIndices.length : levelData.samples.length;
   for (let activeIndex = 0; activeIndex < count; activeIndex++) {
     const index = activeIndices ? activeIndices[activeIndex] : activeIndex;
-    if (samplingGeometry) geographicPreparedIntensityAtGeometry(frame, samplingGeometry, index, value);
+    if (batchRain) {
+      value.rainMmh = batchRain[activeIndex];
+      value.storm = 0;
+      value.hail = 0;
+    } else if (samplingGeometry) geographicPreparedIntensityAtGeometry(frame, samplingGeometry, index, value);
     else geographicPreparedIntensityAtXY(frame, levelData.samples[index].lngLat[0], levelData.samples[index].lngLat[1], value);
     const rainMmh = value.rainMmh;
     const storm = value.storm;

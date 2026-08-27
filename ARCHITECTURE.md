@@ -182,11 +182,14 @@ count, positive regular axis spacing, mm/h normalized units, rain availability,
 and absent storm/hail channels; the fetched binary byte length must match
 exactly. Geographic axes are constructed deterministically from metadata.
 `RealWeatherSequence` keeps
-the existing bilinear spatial sampler and presents value-free temporal frames
-that linearly blend source frames; prepared geometry remains a `Uint32Array`
+the existing bilinear spatial sampler and presents temporal frames that
+linearly blend source frames; prepared geometry remains a `Uint32Array`
 source-cell index plus two `Float64Array` interpolation fractions (20
-bytes/sample), reusable across all 19 frames because it stores no weather
-values. The single-point sampler remains the semantic reference path.
+bytes/sample), reusable across all 19 frames. Sequence geometry lazily owns
+Float64 spatial rain arrays aligned with its potentially-active canonical
+indices, one array per provider frame requested by playback. These arrays are
+computation caches rather than a new weather representation; the single-point
+sampler remains the semantic reference path.
 
 `geography.js` is the renderer-facing adapter. It loads and activates the
 sequence before map initialization and converts the shared point interface to
@@ -264,9 +267,11 @@ effective direct/aggregate boundary. L13, L14, and L15 independently evaluate
 their own canonical geographic coordinates through the bilinearly reconstructed
 physical field. The pyramid lazily owns one reusable provider sampling geometry
 for each direct canonical level, so source-cell lookup is not repeated for each
-weather frame. L13/L14/L15 remain independent direct samples of the
-reconstructed field; the geometry contains no weather values and does not
-couple temporal frames or renderers. L14/L15 add sampling resolution, not
+weather frame. For sequence data, that geometry also owns the lazy sparse
+provider-frame spatial cache described above; it is invalidated with the
+geometry/configuration and is not renderer state. L13/L14/L15 remain
+independent direct samples of the reconstructed field; the cache does not
+couple temporal summaries or renderers. L14/L15 add sampling resolution, not
 meteorological information.
 Only L12 through L10 are recursively aggregated spatial summaries from L13;
 they are never direct field samples or values from an existing renderer pyramid.

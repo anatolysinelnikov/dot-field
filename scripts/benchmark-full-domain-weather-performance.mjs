@@ -50,6 +50,21 @@ const measure = (callback) => {
   return median(values);
 };
 
+const measureWithClearedCache = (geometry, callback) => {
+  for (let run = 0; run < WARMUP; run++) {
+    geometry.spatialRainCache.clear();
+    callback();
+  }
+  const values = [];
+  for (let run = 0; run < REPEATS; run++) {
+    geometry.spatialRainCache.clear();
+    const started = performance.now();
+    callback();
+    values.push(performance.now() - started);
+  }
+  return median(values);
+};
+
 function makeTopology(stableLevel) {
   return new GeographicLodTopology(undefined, lodRangeForStableLevel(stableLevel));
 }
@@ -135,6 +150,45 @@ function legacyEvaluateDirect(levelData, frame, reusable, geometry) {
   return summary;
 }
 
+function sparseUncachedEvaluateDirect(levelData, frame, reusable, geometry, activeIndices) {
+  const summary = createWeatherSummary(levelData, reusable, Float32Array);
+  if (!summary.totalWeightInitialized) {
+    summary.totalWeight.fill(1);
+    summary.totalWeightInitialized = true;
+  }
+  summary.potentialActiveIndices = activeIndices;
+  summary.potentialActiveIndicesInitialized = true;
+  for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
+    const index = activeIndices[activeIndex];
+    summary.rainWeightedSumMmh[index] = 0;
+    summary.rainMaxMmh[index] = 0;
+    for (const coverage of summary.rainCoverageWeight) coverage[index] = 0;
+    summary.stormCoverageWeight[index] = 0;
+    summary.stormWeightedSeverity[index] = 0;
+    summary.stormMaxSeverity[index] = 0;
+    summary.hailCoverageWeight[index] = 0;
+    summary.hailWeightedSeverity[index] = 0;
+    summary.hailMaxSeverity[index] = 0;
+  }
+  const value = { rainMmh: 0, storm: 0, hail: 0 };
+  for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
+    const index = activeIndices[activeIndex];
+    geographicPreparedIntensityAtGeometry(frame, geometry, index, value);
+    summary.rainWeightedSumMmh[index] = value.rainMmh;
+    summary.rainMaxMmh[index] = value.rainMmh;
+    for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
+      summary.rainCoverageWeight[thresholdIndex][index] = value.rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0;
+    }
+    summary.stormCoverageWeight[index] = value.storm > 0 ? 1 : 0;
+    summary.stormWeightedSeverity[index] = value.storm;
+    summary.stormMaxSeverity[index] = value.storm;
+    summary.hailCoverageWeight[index] = value.hail > 0 ? 1 : 0;
+    summary.hailWeightedSeverity[index] = value.hail;
+    summary.hailMaxSeverity[index] = value.hail;
+  }
+  return summary;
+}
+
 function legacyAggregate(parentLevel, childSummary, contributions, reusable) {
   const summary = createWeatherSummary(parentLevel, reusable, Float32Array);
   zeroLegacySummary(summary);
@@ -174,11 +228,38 @@ function legacyChain(pyramid, frame, level, geometry, reusable = null) {
   return summaries;
 }
 
+function sparseUncachedChain(pyramid, frame, level, geometry, activeIndices, reusable = null) {
+  let summary = sparseUncachedEvaluateDirect(pyramid.levels.get(13), frame, reusable?.[13] || null, geometry, activeIndices);
+  const summaries = { 13: summary };
+  for (let childLevel = 12; childLevel >= level; childLevel--) {
+    summary = aggregateWeatherSummary(
+      pyramid.levels.get(childLevel),
+      summary,
+      pyramid.contributions.get(childLevel + 1),
+      reusable?.[childLevel] || null,
+      Float32Array,
+      pyramid.totalWeights.get(childLevel)
+    );
+    summaries[childLevel] = summary;
+  }
+  return summaries;
+}
+
 function benchmarkLegacyChain(pyramid, frame, level, geometry) {
   let reusable = null;
   let summaries = null;
   const keyframeMs = measure(() => {
     summaries = legacyChain(pyramid, frame, level, geometry, reusable);
+    reusable = summaries;
+  });
+  return { keyframeMs, summaries };
+}
+
+function benchmarkSparseUncachedChain(pyramid, frame, level, geometry, activeIndices) {
+  let reusable = null;
+  let summaries = null;
+  const keyframeMs = measure(() => {
+    summaries = sparseUncachedChain(pyramid, frame, level, geometry, activeIndices, reusable);
     reusable = summaries;
   });
   return { keyframeMs, summaries };
@@ -218,6 +299,54 @@ console.log('Full-domain weather performance benchmark');
 console.log(`fixture=202608262200 frames=${weather.frameCount} source=${grid.width}x${grid.height} sourceBytes=${mib(rainFramesMmh.byteLength)}`);
 console.log(`warmup=${WARMUP} repeats=${REPEATS} statistic=median; Float32 production summaries`);
 
+const directProbeTopology = makeTopology(10);
+const directProbePyramid = new GeographicWeatherPyramid(Float32Array, directProbeTopology);
+const directProbeFrame = weather.prepareFrame(6.5 / 18);
+const directProbeBoundaryFrame = weather.prepareFrame(7.5 / 18);
+const directProbeGeometry = directProbePyramid.prepareSamplingGeometry(13, directProbeFrame);
+const directProbeUncachedGeometry = denseGeometry(directProbeGeometry);
+const directProbeActiveIndices = directProbeGeometry.potentialActiveIndices;
+const directProbeSummary = { current: null };
+const evaluateProbe = (frame) => {
+  directProbeSummary.current = evaluateDirectWeatherSummary(
+    directProbePyramid.levels.get(13),
+    frame,
+    directProbeSummary.current,
+    Float32Array,
+    directProbeGeometry,
+    directProbePyramid.totalWeights.get(13)
+  );
+};
+const sourcePairCacheBuildMs = measureWithClearedCache(directProbeGeometry, () => {
+  directProbeFrame.preparedSourceFrame(directProbeGeometry, directProbeFrame.frame0);
+  directProbeFrame.preparedSourceFrame(directProbeGeometry, directProbeFrame.frame1);
+});
+const sparseUncachedDirectMs = measure(() => {
+  directProbeSummary.current = sparseUncachedEvaluateDirect(
+    directProbePyramid.levels.get(13),
+    directProbeFrame,
+    directProbeSummary.current,
+    directProbeUncachedGeometry,
+    directProbeActiveIndices
+  );
+});
+const coldDirectMs = measureWithClearedCache(directProbeGeometry, () => evaluateProbe(directProbeFrame));
+directProbeGeometry.spatialRainCache.clear();
+evaluateProbe(directProbeFrame);
+const steadyDirectMs = measure(() => evaluateProbe(directProbeFrame));
+const providerBoundaryMs = measureWithClearedCache(directProbeGeometry, () => {
+  directProbeFrame.preparedSourceFrame(directProbeGeometry, directProbeFrame.frame1);
+  evaluateProbe(directProbeBoundaryFrame);
+});
+directProbeGeometry.spatialRainCache.clear();
+for (let frameIndex = 0; frameIndex < weather.frameCount; frameIndex++) {
+  const frame = weather.prepareFrame(frameIndex / (weather.frameCount - 1));
+  frame.samplePreparedBatch(directProbeGeometry);
+}
+const cacheBytesPerFrame = directProbeGeometry.potentialActiveIndices.length * Float64Array.BYTES_PER_ELEMENT;
+console.log(`direct L13 cache probe: active=${directProbeGeometry.potentialActiveIndices.length}; sparse uncached=${sparseUncachedDirectMs.toFixed(3)}ms; source-pair cache build=${sourcePairCacheBuildMs.toFixed(3)}ms; cold direct=${coldDirectMs.toFixed(3)}ms; steady cached direct=${steadyDirectMs.toFixed(3)}ms; one-new-frame boundary=${providerBoundaryMs.toFixed(3)}ms`);
+console.log(`direct L13 cache memory: per-source-frame=${mib(cacheBytesPerFrame)}; representative pair=${mib(cacheBytesPerFrame * 2)}; all ${weather.frameCount} source frames=${mib(cacheBytesPerFrame * weather.frameCount)} (${directProbeGeometry.spatialRainCache.size} cached frames)`);
+
 for (const stableLevel of LEVELS) {
   const topology = makeTopology(stableLevel);
   const pyramid = new GeographicWeatherPyramid(Float32Array, topology);
@@ -225,6 +354,7 @@ for (const stableLevel of LEVELS) {
   const geometry = pyramid.prepareSamplingGeometry(13, frame);
   const dense = denseGeometry(geometry);
   const optimized = benchmarkChain(pyramid, frame, stableLevel, geometry);
+  const sparseUncached = benchmarkSparseUncachedChain(pyramid, frame, stableLevel, dense, geometry.potentialActiveIndices);
   const legacyPyramid = new GeographicWeatherPyramid(Float32Array, topology);
   const legacyGeometry = denseGeometry(legacyPyramid.prepareSamplingGeometry(13, frame));
   const legacyResult = benchmarkLegacyChain(legacyPyramid, frame, stableLevel, legacyGeometry);
@@ -249,7 +379,7 @@ for (const stableLevel of LEVELS) {
   const activeIndexBytes = Object.values(optimizedSummary).filter(Boolean).reduce((sum, summary) => sum + (summary.potentialActiveIndices?.byteLength || 0), 0);
   console.log(`L${stableLevel}: topology=${[...pyramid.levels.values()].map((levelData) => `L${levelData.level}:${levelData.samples.length}`).join(',')}`);
   console.log(`L${stableLevel}: L13 direct samples dense=${pyramid.samplesFor(13).length} optimized=${activeCount}`);
-  console.log(`L${stableLevel}: L13 direct ms dense=${directDenseMs.toFixed(3)} optimized=${directOptimizedMs.toFixed(3)}; aggregation ms dense=${aggregateDenseMs.toFixed(3)} optimized=${aggregateOptimizedMs.toFixed(3)}; total keyframe ms dense=${legacyResult.keyframeMs.toFixed(3)} optimized=${optimized.keyframeMs.toFixed(3)}`);
+  console.log(`L${stableLevel}: L13 direct ms dense=${directDenseMs.toFixed(3)} sparse-uncached=${sparseUncachedDirectMs.toFixed(3)} optimized=${directOptimizedMs.toFixed(3)}; aggregation ms dense=${aggregateDenseMs.toFixed(3)} optimized=${aggregateOptimizedMs.toFixed(3)}; total keyframe ms dense=${legacyResult.keyframeMs.toFixed(3)} sparse-uncached=${sparseUncached.keyframeMs.toFixed(3)} optimized=${optimized.keyframeMs.toFixed(3)}`);
   console.log(`L${stableLevel}: Dots mapping ms dense=${legacyDotsMappingMs.toFixed(3)} optimized=${dotsMappingMs.toFixed(3)}; instances dense=${legacyDotsInstanceMs.toFixed(3)} optimized=${dotsInstanceMs.toFixed(3)}; Squares mapping ms dense=${legacySquaresMappingMs.toFixed(3)} optimized=${squaresMappingMs.toFixed(3)}; instances dense=${legacySquaresInstanceMs.toFixed(3)} optimized=${squaresInstanceMs.toFixed(3)}`);
   console.log(`L${stableLevel}: reusable summary arrays=${mib(summaryBytes)} active-index list=${mib(activeIndexBytes)} source union mask=${mib(weather.potentialWeatherMask?.byteLength || 0)} Dots/Squares mapped=${mib(pyramid.samplesFor(stableLevel).length * (4 + 8) * Float32Array.BYTES_PER_ELEMENT)}`);
   if (stableLevel === 10) console.log(`L${stableLevel}: dense-vs-optimized sample check=${denseSummary[stableLevel].rainWeightedSumMmh[0] === optimizedSummary[stableLevel].rainWeightedSumMmh[0]}`);

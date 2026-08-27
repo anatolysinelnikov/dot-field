@@ -89,7 +89,9 @@ function compareSummary(level, optimized, dense) {
   }
 }
 
-const normalizedTimes = [0, 1 / 18, 5 / 18, 0.123, 0.347, 0.5, 0.777, 17 / 18, 1];
+const exactSourceFrameTimes = Array.from({ length: time.count }, (_, index) => index / (time.count - 1));
+const interpolatedTimes = [0.123, 0.347, 0.5, 0.777];
+const normalizedTimes = [...exactSourceFrameTimes, ...interpolatedTimes];
 let totalComparisons = 0;
 for (const normalizedTime of normalizedTimes) {
   const frame = weather.prepareFrame(normalizedTime);
@@ -102,7 +104,17 @@ for (const normalizedTime of normalizedTimes) {
   console.log(`time=${normalizedTime} sourceFrames=${frame.frame0}/${frame.frame1} progress=${frame.progress}`);
 }
 
+for (const normalizedTime of [...exactSourceFrameTimes].reverse()) {
+  const frame = weather.prepareFrame(normalizedTime);
+  const optimized = optimizedPyramid.evaluate([10], frame);
+  const dense = denseChain(densePyramid, frame, 10);
+  for (const level of [10, 11, 12, 13]) {
+    compareSummary(level, optimized[level], dense[level]);
+    totalComparisons++;
+  }
+}
+
 const activeCount = optimizedGeometry.potentialActiveIndices.length;
 const zeroCount = optimizedPyramid.samplesFor(13).length - activeCount;
 console.log(`sequence union source mask: ${weather.potentialWeatherMask.reduce((sum, value) => sum + value, 0)} positive source nodes; L13 potentially-active=${activeCount}; guaranteed-dry=${zeroCount}`);
-console.log(`dense/sparse comparisons passed: ${totalComparisons} summaries across ${normalizedTimes.length} exact/interpolated times; all physical and mapped arrays match within 1e-6`);
+console.log(`dense/sparse comparisons passed: ${totalComparisons} summaries across ${exactSourceFrameTimes.length} exact frames plus ${interpolatedTimes.length} interpolated times in forward and reverse order; all physical and mapped arrays match within 1e-6`);

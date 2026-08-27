@@ -46,6 +46,19 @@ function interpolatePrepared(values, baseIndex, x1y0, x0y1, x1y1, longitudeFract
   return clamp(lower + (upper - lower) * latitudeFraction, minimum, maximum);
 }
 
+function sortedIndexOf(values, target) {
+  let low = 0;
+  let high = values.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const value = values[middle];
+    if (value === target) return middle;
+    if (value < target) low = middle + 1;
+    else high = middle - 1;
+  }
+  return -1;
+}
+
 export class RealWeatherField {
   constructor({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rainMmh, storm, hail, sourceRowCount, longitudeSpacing, latitudeSpacing }) {
     this.longitudes = longitudes;
@@ -227,6 +240,14 @@ export class RealWeatherSequenceFrame {
     return this.sequence.samplePreparedFrame(this, geometry, index, output);
   }
 
+  samplePreparedBatch(geometry) {
+    return this.sequence.samplePreparedFrameBatch(this, geometry);
+  }
+
+  preparedSourceFrame(geometry, frameIndex) {
+    return this.sequence.preparedSourceFrame(geometry, frameIndex);
+  }
+
   sample(longitude, latitude, output = {}) {
     return this.sequence.sampleFrame(this, longitude, latitude, output);
   }
@@ -306,6 +327,8 @@ export class RealWeatherSequence extends RealWeatherField {
     }
     geometry.potentialActiveIndices = Uint32Array.from(activeIndices);
     geometry.potentialWeatherMask = this.potentialWeatherMask;
+    geometry.spatialRainCache = new Map();
+    geometry.temporalRainMmh = new Float64Array(geometry.potentialActiveIndices.length);
     return geometry;
   }
 
@@ -332,12 +355,52 @@ export class RealWeatherSequence extends RealWeatherField {
     );
   }
 
+  preparedSourceFrame(geometry, frameIndex) {
+    if (!geometry.spatialRainCache) geometry.spatialRainCache = new Map();
+    const cached = geometry.spatialRainCache.get(frameIndex);
+    if (cached) return cached;
+    const activeIndices = geometry.potentialActiveIndices || new Uint32Array(0);
+    const values = new Float64Array(activeIndices.length);
+    for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
+      const index = activeIndices[activeIndex];
+      const baseIndex = geometry.baseIndex[index];
+      const x1y0 = baseIndex + 1;
+      const x0y1 = baseIndex + geometry.sourceWidth;
+      const x1y1 = x0y1 + 1;
+      values[activeIndex] = this.interpolateRain(frameIndex, baseIndex, x1y0, x0y1, x1y1,
+        geometry.longitudeFraction[index], geometry.latitudeFraction[index]);
+    }
+    geometry.spatialRainCache.set(frameIndex, values);
+    return values;
+  }
+
+  samplePreparedFrameBatch(frame, geometry) {
+    const activeIndices = geometry.potentialActiveIndices || new Uint32Array(0);
+    if (!geometry.temporalRainMmh || geometry.temporalRainMmh.length !== activeIndices.length) {
+      geometry.temporalRainMmh = new Float64Array(activeIndices.length);
+    }
+    const rain0 = this.preparedSourceFrame(geometry, frame.frame0);
+    const rain1 = this.preparedSourceFrame(geometry, frame.frame1);
+    for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
+      geometry.temporalRainMmh[activeIndex] = rain0[activeIndex] + (rain1[activeIndex] - rain0[activeIndex]) * frame.progress;
+    }
+    return geometry.temporalRainMmh;
+  }
+
   samplePreparedFrame(frame, geometry, index, output = {}) {
     output.rainMmh = 0;
     output.storm = 0;
     output.hail = 0;
     const baseIndex = geometry.baseIndex[index];
     if (baseIndex === OUTSIDE_SOURCE_INDEX) return output;
+    if (geometry.potentialActiveIndices) {
+      const activeIndex = sortedIndexOf(geometry.potentialActiveIndices, index);
+      if (activeIndex < 0) return output;
+      const rain0 = this.preparedSourceFrame(geometry, frame.frame0)[activeIndex];
+      const rain1 = this.preparedSourceFrame(geometry, frame.frame1)[activeIndex];
+      output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
+      return output;
+    }
     const x1y0 = baseIndex + 1;
     const x0y1 = baseIndex + geometry.sourceWidth;
     const x1y1 = x0y1 + 1;

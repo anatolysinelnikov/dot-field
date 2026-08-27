@@ -55,6 +55,10 @@ export function geographicPreparedIntensityAtGeometry(frame, geometry, index, ou
   return frame.samplePrepared(geometry, index, output);
 }
 
+export function geographicPreparedIntensityAtGeometryBatch(frame, geometry) {
+  return frame.samplePreparedBatch(geometry);
+}
+
 export function geographicPreparedIntensityAtXY(frame, longitude, latitude, output) {
   return frame.sample(longitude, latitude, output);
 }
