@@ -149,6 +149,30 @@ export function lodRangesEqual(left, right) {
   return Boolean(left && right) && left.minLevel === right.minLevel && left.maxLevel === right.maxLevel;
 }
 
+// Level descriptors are immutable outputs of selectMercatorGridLevel(). A
+// descriptor can be retained across a range-only replacement when every value
+// that determines its packed row-major identity is unchanged. The anchor
+// array itself is then the proof of the exact same spatial object; do not use
+// array lengths alone as a compatibility test in renderer lifecycle code.
+export function levelDataCompatibleForReuse(levelData, level, canonicalWindow) {
+  if (!levelData || levelData.level !== level || !canonicalWindowsEqual(levelData.canonicalWindow, canonicalWindow)) return false;
+  const identityScale = 2 ** (MAX_DISPLAY_GRID_LEVEL - level);
+  const minI = Math.ceil(canonicalWindow.minX / identityScale);
+  const maxI = Math.floor(canonicalWindow.maxX / identityScale);
+  const minJ = Math.ceil(canonicalWindow.minY / identityScale);
+  const maxJ = Math.floor(canonicalWindow.maxY / identityScale);
+  const width = Math.max(0, maxI - minI + 1);
+  const height = Math.max(0, maxJ - minJ + 1);
+  return levelData.spacing === 1 / 2 ** level
+    && levelData.gridSize === 2 ** level
+    && levelData.identityScale === identityScale
+    && levelData.minI === minI && levelData.maxI === maxI
+    && levelData.minJ === minJ && levelData.maxJ === maxJ
+    && levelData.width === width && levelData.height === height
+    && levelData.count === width * height
+    && levelData.canonicalAnchors?.length === levelData.count * 2;
+}
+
 export function lodRangeForStableLevel(level) {
   const stableLevel = Number(level);
   if (!Number.isInteger(stableLevel) || stableLevel < MIN_GRID_LEVEL || stableLevel > MAX_DISPLAY_GRID_LEVEL) {
@@ -299,27 +323,56 @@ function buildDirectPairs(lower, higher) {
 // Canonical positions and one-parent ownership for visual LOD morphs. This is
 // deliberately independent from centered weather-summary contributions.
 export class GeographicLodTopology {
-  constructor(canonicalWindow = canonicalSupport, levelRange) {
+  constructor(canonicalWindow = canonicalSupport, levelRange, reuseFrom = null) {
     const topologyStarted = now();
     this.canonicalWindow = normalizeCanonicalWindow(canonicalWindow);
     this.levelRange = normalizeLodRange(levelRange);
     this.levels = new Map();
-    this.constructionTimings = { levels: [], transitionParentsMs: 0, directPairsMs: 0, totalMs: 0 };
+    const sameWindow = reuseFrom && canonicalWindowsEqual(reuseFrom.canonicalWindow, this.canonicalWindow);
+    this.constructionTimings = {
+      levels: [], levelsCreated: 0, levelsReused: 0,
+      transitionParentsMs: 0, transitionParentsCreated: 0, transitionParentsReused: 0,
+      directPairsMs: 0, directPairsCreated: 0, directPairsReused: 0, totalMs: 0
+    };
     for (let level = this.levelRange.minLevel; level <= this.levelRange.maxLevel; level++) {
       const levelStarted = now();
-      this.levels.set(level, selectMercatorGridLevel(level, this.canonicalWindow));
-      this.constructionTimings.levels.push({ level, ms: now() - levelStarted });
+      const reusable = sameWindow && reuseFrom.levels.get(level);
+      if (levelDataCompatibleForReuse(reusable, level, this.canonicalWindow)) {
+        this.levels.set(level, reusable);
+        this.constructionTimings.levelsReused++;
+        this.constructionTimings.levels.push({ level, ms: now() - levelStarted, reused: true });
+      } else {
+        this.levels.set(level, selectMercatorGridLevel(level, this.canonicalWindow));
+        this.constructionTimings.levelsCreated++;
+        this.constructionTimings.levels.push({ level, ms: now() - levelStarted, reused: false });
+      }
     }
     this.transitionParents = new Map();
     const transitionStarted = now();
     for (let level = this.levelRange.minLevel + 1; level <= this.levelRange.maxLevel; level++) {
-      this.transitionParents.set(level, buildTransitionParents(this.levels.get(level), this.levels.get(level - 1)));
+      const reusable = sameWindow && reuseFrom.transitionParents.get(level);
+      if (reusable && reuseFrom.levels.get(level) === this.levels.get(level)
+        && reuseFrom.levels.get(level - 1) === this.levels.get(level - 1)) {
+        this.transitionParents.set(level, reusable);
+        this.constructionTimings.transitionParentsReused++;
+      } else {
+        this.transitionParents.set(level, buildTransitionParents(this.levels.get(level), this.levels.get(level - 1)));
+        this.constructionTimings.transitionParentsCreated++;
+      }
     }
     this.constructionTimings.transitionParentsMs = now() - transitionStarted;
     this.directPairs = new Map();
     const directPairsStarted = now();
     for (let level = this.levelRange.minLevel + 1; level <= this.levelRange.maxLevel; level++) {
-      this.directPairs.set(level, buildDirectPairs(this.levels.get(level - 1), this.levels.get(level)));
+      const reusable = sameWindow && reuseFrom.directPairs.get(level);
+      if (reusable && reuseFrom.levels.get(level) === this.levels.get(level)
+        && reuseFrom.levels.get(level - 1) === this.levels.get(level - 1)) {
+        this.directPairs.set(level, reusable);
+        this.constructionTimings.directPairsReused++;
+      } else {
+        this.directPairs.set(level, buildDirectPairs(this.levels.get(level - 1), this.levels.get(level)));
+        this.constructionTimings.directPairsCreated++;
+      }
     }
     this.constructionTimings.directPairsMs = now() - directPairsStarted;
     this.constructionTimings.totalMs = now() - topologyStarted;

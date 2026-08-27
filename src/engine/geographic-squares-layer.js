@@ -1,7 +1,7 @@
 import { prepareGeographicFieldFrame } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH } from './geographic-weather-pyramid.js';
-import { MAX_DISPLAY_GRID_LEVEL } from './geographic-lod.js';
+import { canonicalWindowsEqual, MAX_DISPLAY_GRID_LEVEL } from './geographic-lod.js';
 import { RAIN_VISIBILITY_SHADER, STRONG_RAIN_SHADER } from './precipitation-mapping.js';
 
 const INSTANCE_STRIDE = 18;
@@ -13,6 +13,21 @@ function coverageIndex(threshold) {
   return index;
 }
 const RAIN_COVERAGE_INDEX = coverageIndex(0.05);
+const now = () => globalThis.performance?.now?.() ?? Date.now();
+
+function retainedLevelData(previousTopology, nextTopology, levelData) {
+  return Boolean(previousTopology && levelData
+    && canonicalWindowsEqual(previousTopology.canonicalWindow, nextTopology.canonicalWindow)
+    && previousTopology.levels.get(levelData.level) === levelData
+    && nextTopology.levels.get(levelData.level) === levelData);
+}
+
+function retainedTemporalState(previousTopology, nextTopology, level, state) {
+  const levelData = previousTopology?.levels.get(level);
+  return Boolean(state && retainedLevelData(previousTopology, nextTopology, levelData)
+    && state.frames0?.summaries?.[level]?.levelData === levelData
+    && state.frames1?.summaries?.[level]?.levelData === levelData);
+}
 
 function makeMappedState(length, reusable) {
   if (reusable?.rainWetMeanMmh?.length === length) return reusable;
@@ -133,6 +148,7 @@ export class GeographicSquaresLayer {
     this.renderingMode = '3d';
     this.active = false;
     this.weatherPyramid = weatherPyramid;
+    this.topology = weatherPyramid.topology;
     this.levelData = null;
     this.transition = null;
     this.transitionProgress = 1;
@@ -144,6 +160,10 @@ export class GeographicSquaresLayer {
     this.instanceDirty = [true, true];
     this.stableGroup = 0;
     this.programs = new Map();
+    this.lifecycleDiagnostics = {
+      evaluateKeyframeCalls: 0, weatherEvaluationMs: 0, mappingMs: 0,
+      instanceRebuildCalls: 0, instanceRebuildMs: 0, preservedTopologyStates: 0
+    };
   }
 
   onAdd(map, gl) {
@@ -159,16 +179,51 @@ export class GeographicSquaresLayer {
     for (const buffer of [this.vertexBuffer, ...(this.instanceBuffers || [])]) if (buffer) gl.deleteBuffer(buffer);
   }
 
-  setTopology(topology) {
+  setTopology(topology, options = {}) {
     if (this.weatherPyramid.topology !== topology) throw new Error('Squares topology must be the shared weather-pyramid topology.');
-    this.levelData = null;
-    this.transition = null;
-    this.temporal = null;
-    this.temporalProgress = 0;
-    this.instanceData = [new Float32Array(), new Float32Array()];
-    this.instanceCounts = [0, 0];
-    this.instanceBufferCapacity = [0, 0];
-    this.instanceDirty = [true, true];
+    const previousTopology = this.topology;
+    const canPreserve = options.preserveCompatibleState !== false
+      && previousTopology
+      && canonicalWindowsEqual(previousTopology.canonicalWindow, topology.canonicalWindow);
+    const previousLevelData = this.levelData;
+    const previousTemporal = this.temporal;
+    const previousTransition = this.transition;
+    this.topology = topology;
+    if (!canPreserve) {
+      this.levelData = null;
+      this.transition = null;
+      this.temporal = null;
+      this.temporalProgress = 0;
+      this.instanceData = [new Float32Array(), new Float32Array()];
+      this.instanceCounts = [0, 0];
+      this.instanceBufferCapacity = [0, 0];
+      this.instanceDirty = [true, true];
+    } else {
+      const retainedCurrent = retainedLevelData(previousTopology, topology, previousLevelData);
+      this.levelData = retainedCurrent ? previousLevelData : null;
+      this.transition = previousTransition
+        && retainedLevelData(previousTopology, topology, previousTransition.fromLevelData)
+        && retainedLevelData(previousTopology, topology, previousTransition.toLevelData)
+        ? previousTransition : null;
+      const levels = new Map();
+      if (previousTemporal) {
+        for (const [level, state] of previousTemporal.levels) {
+          if (retainedTemporalState(previousTopology, topology, level, state)) levels.set(level, state);
+        }
+      }
+      this.temporal = levels.size ? { ...previousTemporal, levels } : null;
+      if (!this.levelData || !this.temporal) {
+        this.temporalProgress = 0;
+        this.transition = this.temporal && this.transition ? this.transition : null;
+        if (!this.levelData || !this.temporal) {
+          this.instanceData = [new Float32Array(), new Float32Array()];
+          this.instanceCounts = [0, 0];
+          this.instanceBufferCapacity = [0, 0];
+          this.instanceDirty = [true, true];
+        }
+      }
+      if (retainedCurrent || this.temporal) this.lifecycleDiagnostics.preservedTopologyStates++;
+    }
     this.map?.triggerRepaint();
   }
 
@@ -218,6 +273,15 @@ export class GeographicSquaresLayer {
         return;
       }
     }
+    const frame = geographicTemporalFrameAt(time);
+    const retained = this.active && !this.transition && this.levelData === levelData && this.temporal
+      && this.temporal.index === frame.index && this.temporal.nextIndex === frame.nextIndex
+      && retainedTemporalState(this.topology, this.topology, level, this.temporal.levels.get(level));
+    if (retained) {
+      this.temporalProgress = frame.progress;
+      this.map?.triggerRepaint();
+      return;
+    }
     this.levelData = levelData;
     this.transition = null;
     if (this.active) this.rebuildTemporal(time);
@@ -262,9 +326,14 @@ export class GeographicSquaresLayer {
   setTransitionProgress(progress) { this.transitionProgress = progress; if (this.active) this.map?.triggerRepaint(); }
 
   evaluateKeyframe(level, index, reusable = null) {
+    this.lifecycleDiagnostics.evaluateKeyframeCalls++;
+    const weatherStarted = now();
     const summaries = this.weatherPyramid.evaluate([level], prepareGeographicFieldFrame(index / TEMPORAL_FRAME_COUNT), reusable?.summaries);
+    this.lifecycleDiagnostics.weatherEvaluationMs += now() - weatherStarted;
     const mapped = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
+    const mappingStarted = now();
     mapped[level] = mapSquaresWeatherSummary(summaries[level], reusable?.mapped?.[level]);
+    this.lifecycleDiagnostics.mappingMs += now() - mappingStarted;
     return { index, summaries, mapped };
   }
 
@@ -295,6 +364,8 @@ export class GeographicSquaresLayer {
 
   rebuildInstances(changedLevels = null) {
     if (!this.temporal || !this.levelData) return;
+    const started = now();
+    this.lifecycleDiagnostics.instanceRebuildCalls++;
     const groups = this.transition
       ? [[this.transition.fromGroup, this.transition.fromLevelData.level], [this.transition.toGroup, this.transition.toLevelData.level]]
       : [[this.stableGroup, this.levelData.level]];
@@ -304,6 +375,7 @@ export class GeographicSquaresLayer {
       this.buildGroup(group, level, temporalState.frames0.mapped[level], temporalState.frames1.mapped[level]);
       this.instanceDirty[group] = true;
     }
+    this.lifecycleDiagnostics.instanceRebuildMs += now() - started;
     this.map?.triggerRepaint();
   }
 

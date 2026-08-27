@@ -290,18 +290,36 @@ Only L12 through L10 are recursively aggregated spatial summaries from L13;
 they are never direct field samples or values from an existing renderer pyramid.
 
 The shared pyramid can replace its active canonical topology or contiguous LOD
-range when the retained camera window or stable display level changes.
-Replacement drops prepared provider sampling geometry from the old
-configuration and fails clearly if a requested summary level is not
-materialized. Centered contribution plans and geometric `totalWeight` arrays
-use a bounded cache keyed by relative dyadic structure (level pair, dimensions,
-origins/parity, and clipping shape), never absolute geographic position.
-Before a plan is reused, an exact verifier checks every contribution offset,
-parent index, and Float64 weight against the new packed topology; equal
-structural keys then prove the derived total weights are translation invariant.
-Differently shaped support-edge windows rebuild their plans. Dots and Squares
-receive the same replacement topology and clear incompatible temporal
-summaries, mapped arrays, and packed instances before evaluating the new
+range when the retained camera window or stable display level changes. A
+canonical-window change is a hard spatial-compatibility boundary: all packed
+levels, provider sampling geometry, source-frame caches, temporal summaries,
+mapped arrays, and instances are discarded before the new window is evaluated.
+For a range-only replacement at the same canonical window, the topology reuses
+the exact immutable packed `levelData` objects for overlapping levels when
+level, window, integer bounds, dimensions, spacing, count, and canonical-anchor
+storage all match. It likewise reuses transition-parent and direct-pair arrays
+when both endpoint objects are retained. Removed levels become unreachable;
+new levels are constructed normally.
+
+Centered contribution plans and geometric `totalWeight` arrays use a bounded
+cache keyed by relative dyadic structure (level pair, dimensions,
+origins/parity, and clipping shape), never absolute geographic position. Before
+a plan is reused, an exact verifier checks every contribution offset, parent
+index, and Float64 weight against the new packed topology; equal structural
+keys then prove the derived total weights are translation invariant.
+Differently shaped support-edge windows rebuild their plans. Range-only pyramid
+replacement carries sampling geometry and its compatible source-frame spatial
+cache only when the exact packed level object is retained; this preserves the
+provider's prepared lookup and potential-support state without coupling the
+provider to a renderer.
+
+Dots and Squares receive the same replacement topology. Their active temporal
+states, mapped arrays, and packed instances are retained only when the
+canonical window and corresponding immutable `levelData` objects are
+compatible. Thus an adjacent transition can promote its already prepared
+destination keyframes through the following stable range adjustment without a
+second weather evaluation. Reversal retains both endpoint states. Any
+incompatible level or window clears the affected state and evaluates the new
 configuration at the current weather time. Blur and Areas intentionally do not
 use this state: they remain implemented but inactive on the existing fixed
 support-derived L14 scalar lattice until viewport-windowed scalar
@@ -383,7 +401,9 @@ independently; neither interpolates a lower discrete summary.
 
 Only the active discrete renderer retains temporal summary/mapping buffers;
 switching away releases that renderer's temporal state while retaining the
-shared topology and reusable GPU capacities.
+shared topology and reusable GPU capacities. A range-only topology replacement
+does not by itself release compatible active renderer state; canonical-window
+replacement remains the explicit invalidation boundary.
 Within an active Dots or Squares renderer, temporal state is owned per LOD
 level: a stable renderer retains the current level's frame 0/frame 1 summary
 and mapped state, while a transition retains those states for both `fromLevel`
@@ -432,9 +452,11 @@ transitions use deterministic parent/child topology below/equal to L13 and
 direct-pair refinement for L13↔L14 and L14↔L15.
 Dots retain the stable same-level temporal/mapped state for a source LOD while
 a transition builds the required pair representation; promoting a destination
-therefore only performs the unavoidable same-level instance pass. Reversals
-reuse physical and mapped states and rebuild only the direction-specific pair
-instance representation.
+therefore only performs the unavoidable same-level instance pass. A subsequent
+same-window stable-range replacement retains the promoted temporal/mapped state
+and compatible packed instances, so it does not reevaluate the destination.
+Reversals reuse physical and mapped states and rebuild only the
+direction-specific pair instance representation.
 Rain glyph radii use the shared monotonic physical anchor transfer in squared
 radius/visual area; the light-blue base saturates at 0.86 spacing near 10 mm/h,
 while the nested Dots-only strong-blue overlay starts visually at 1.6 mm/h and
@@ -463,7 +485,10 @@ rain values above 3 mm/h therefore remain distinguishable through the
 progressive strong-color transfer. Squares assign each active LOD to one of
 two reusable instance groups. A transition builds and uploads only its new
 destination group; completion promotes that group as stable, and reversal
-swaps group ownership without repacking or reuploading unchanged data.
+swaps group ownership without repacking or reuploading unchanged data. A
+same-window stable-range replacement retains that promoted group and its two
+prepared temporal keyframes when their packed level object is unchanged;
+canonical-window changes clear both groups as incompatible.
 Temporal updates dirty only groups whose mapped frame data changed.
 
 ## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`

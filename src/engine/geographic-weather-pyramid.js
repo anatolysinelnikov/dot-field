@@ -507,10 +507,16 @@ export function evaluateFusedRainAggregateSummary(parentLevel, frame, samplingGe
 export class GeographicWeatherPyramid {
   constructor(summaryArrayType = Float32Array, topology = new GeographicLodTopology(), options = {}) {
     this.summaryArrayType = summaryArrayType;
+    this.diagnostics = { samplingGeometryPreparations: 0, evaluateCalls: 0 };
     this.setTopology(topology, options);
   }
 
   setTopology(topology, options = {}) {
+    const previousTopology = this.topology;
+    const previousSamplingGeometries = this.samplingGeometries;
+    const preserveCompatibleState = options.preserveCompatibleState !== false
+      && previousTopology
+      && canonicalWindowsEqual(previousTopology.canonicalWindow, topology.canonicalWindow);
     this.topology = topology;
     this.levels = topology.levels;
     const setup = buildAggregationSetup(topology, this.summaryArrayType, options.reuse !== false);
@@ -518,6 +524,11 @@ export class GeographicWeatherPyramid {
     this.totalWeights = setup.totalWeights;
     this.topologySetupTimings = setup.timings;
     this.samplingGeometries = new Map();
+    if (preserveCompatibleState && previousSamplingGeometries) {
+      for (const [level, geometry] of previousSamplingGeometries) {
+        if (previousTopology.levels.get(level) === topology.levels.get(level)) this.samplingGeometries.set(level, geometry);
+      }
+    }
   }
 
   setCanonicalWindow(canonicalWindow) {
@@ -532,7 +543,10 @@ export class GeographicWeatherPyramid {
     const nextWindow = normalizeCanonicalWindow(canonicalWindow);
     const nextRange = normalizeLodRange(levelRange);
     if (canonicalWindowsEqual(this.topology.canonicalWindow, nextWindow) && lodRangesEqual(this.topology.levelRange, nextRange)) return false;
-    this.setTopology(new GeographicLodTopology(nextWindow, nextRange));
+    const sameWindow = canonicalWindowsEqual(this.topology.canonicalWindow, nextWindow);
+    this.setTopology(new GeographicLodTopology(nextWindow, nextRange, sameWindow ? this.topology : null), {
+      preserveCompatibleState: sameWindow
+    });
     return true;
   }
 
@@ -559,11 +573,13 @@ export class GeographicWeatherPyramid {
     if (existing && frame.isSamplingGeometryCompatible(existing)) return existing;
     const geometry = prepareGeographicSamplingGeometry(frame, this.levelDataFor(level), existing);
     this.samplingGeometries.set(level, geometry);
+    this.diagnostics.samplingGeometryPreparations++;
     return geometry;
   }
 
   evaluate(requestedLevels, frame, reusableStates = null) {
     if (!requestedLevels.length) return [];
+    this.diagnostics.evaluateCalls++;
     const minimumRequested = Math.min(...requestedLevels);
     if (minimumRequested < MIN_GRID_LEVEL || Math.max(...requestedLevels) > MAX_DISPLAY_GRID_LEVEL) {
       throw new Error(`Weather summary levels must be between L${MIN_GRID_LEVEL} and L${MAX_DISPLAY_GRID_LEVEL}.`);
