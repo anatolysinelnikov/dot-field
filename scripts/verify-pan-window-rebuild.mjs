@@ -13,7 +13,7 @@ import {
   lodRangeForStableLevel
 } from '../src/engine/geographic-lod.js';
 import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
-import { RealWeatherSequence } from '../src/engine/real-weather.js';
+import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
 import { buildCenteredContributions, forEachCenteredContributionRelationEntry, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 
 const TEMPORAL_FRAME_COUNT = 180;
@@ -186,18 +186,7 @@ function compareRendererPacking(oldPyramid, optimizedPyramid, level, oldSummarie
   check(sameArray(oldSquaresInstances, optimizedSquaresInstances), `${name} L${level} Squares instances match exactly`);
 }
 
-const metadata = JSON.parse(fs.readFileSync(new URL('../data/generated/202608262200/metadata.json', import.meta.url), 'utf8'));
-const binary = fs.readFileSync(new URL('../data/generated/202608262200/rain.f32', import.meta.url));
-const { width, height, longitude_start: longitudeStart, latitude_start: latitudeStart, longitude_spacing: longitudeSpacing, latitude_spacing: latitudeSpacing } = metadata.spatial_grid;
-const weather = new RealWeatherSequence({
-  longitudes: Float64Array.from({ length: width }, (_, index) => longitudeStart + index * longitudeSpacing),
-  latitudes: Float64Array.from({ length: height }, (_, index) => latitudeStart + index * latitudeSpacing),
-  rainFramesMmh: new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / Float32Array.BYTES_PER_ELEMENT),
-  frameCount: metadata.time.count,
-  longitudeSpacing,
-  latitudeSpacing,
-  timestamps: metadata.time.timestamps
-});
+const { weather } = await loadRealWeatherFixture();
 setActiveWeatherField(weather);
 const [centerX, centerY] = lngLatToMercator(...WEATHER_REGION.center);
 const base = canonicalWindowFromMercatorBounds({ minX: centerX - 0.004, maxX: centerX + 0.004, minY: centerY - 0.004, maxY: centerY + 0.004 });

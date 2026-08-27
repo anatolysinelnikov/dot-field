@@ -1,27 +1,15 @@
 import fs from 'node:fs';
-import { RealWeatherSequence } from '../src/engine/real-weather.js';
+import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
 import { setActiveWeatherField, prepareGeographicFieldFrame } from '../src/engine/geography.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { canonicalCoordinatesForIndex, GeographicLodTopology, canonicalWindowFromMercatorBounds, lngLatToMercator, mercatorToLngLat, mercatorXForIndex, mercatorYForIndex } from '../src/engine/geographic-lod.js';
 import { GeographicWeatherPyramid, rainCoverageWeightForThreshold } from '../src/engine/geographic-weather-pyramid.js';
 
-const root = new URL('../data/generated/202608262200/', import.meta.url);
-const metadata = JSON.parse(fs.readFileSync(new URL('metadata.json', root), 'utf8'));
-const binary = fs.readFileSync(new URL('rain.f32', root));
+const { metadata, weather: sequence, sourceFrames } = await loadRealWeatherFixture();
 const grid = metadata.spatial_grid;
-const longitudes = Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing);
-const latitudes = Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing);
-const rain = new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / Float32Array.BYTES_PER_ELEMENT);
-const sequence = new RealWeatherSequence({
-  longitudes,
-  latitudes,
-  rainFramesMmh: rain,
-  frameCount: metadata.time.count,
-  longitudeSpacing: grid.longitude_spacing,
-  latitudeSpacing: grid.latitude_spacing,
-  timestamps: metadata.time.timestamps
-});
+const longitudes = sequence.longitudes;
+const latitudes = sequence.latitudes;
 setActiveWeatherField(sequence);
 
 const sourceX = 846;
@@ -29,7 +17,7 @@ const sourceY = 977;
 const frameIndex = 0;
 const cropX = sourceX - metadata.spatial_grid.source_crop_indices.x_start;
 const cropY = sourceY - metadata.spatial_grid.source_crop_indices.y_start;
-const sourceValue = rain[frameIndex * grid.width * grid.height + cropY * grid.width + cropX];
+const sourceValue = sourceFrames.get(frameIndex)[cropY * grid.width + cropX];
 const sourceLongitude = longitudes[cropX];
 const sourceLatitude = latitudes[cropY];
 const frame = prepareGeographicFieldFrame(0);
@@ -86,7 +74,7 @@ function assert(condition, message) {
   console.log(`PASS ${message}`);
 }
 
-assert(Math.abs(sourceValue - 5.837427139282227) <= 1e-6, `frame 0 source x=${sourceX}, y=${sourceY} is ${sourceValue} mm/h in rain.f32`);
+assert(Math.abs(sourceValue - 5.837427139282227) <= 1e-6, `frame 0 source x=${sourceX}, y=${sourceY} is ${sourceValue} mm/h in its independent Float32 asset`);
 assert(Math.abs(direct.rainMmh - sourceValue) <= 1e-6, 'direct sequence sampling preserves the northern source node');
 assert(Math.abs(prepared.rainMmh - direct.rainMmh) <= 1e-12, 'prepared sequence sampling matches direct sampling');
 assert(targetX >= visibleBounds.minX && targetX <= visibleBounds.maxX && targetY >= visibleBounds.minY && targetY <= visibleBounds.maxY, 'northern source lies inside the recorded visible Mercator bounds');

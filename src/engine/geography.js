@@ -103,7 +103,6 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
   try {
     field = await loadRealWeatherSequence(
       './data/generated/202608262200/metadata.json',
-      './data/generated/202608262200/rain.f32',
       { onTiming }
     );
   } catch (error) {
@@ -118,7 +117,6 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
 export function beginActiveWeatherLoad({ onTiming = null } = {}) {
   const sequenceLoad = beginRealWeatherSequenceLoad(
     './data/generated/202608262200/metadata.json',
-    './data/generated/202608262200/rain.f32',
     { onTiming }
   );
   let fallbackPromise = null;
@@ -132,7 +130,8 @@ export function beginActiveWeatherLoad({ onTiming = null } = {}) {
 
   return {
     metadataReady,
-    loadSequence() {
+    supportReady: sequenceLoad.supportReady,
+    loadSequence(initialFrameIndex = 0) {
       if (fieldPromise) return fieldPromise;
       fieldPromise = (async () => {
         const metadata = await metadataReady;
@@ -141,7 +140,7 @@ export function beginActiveWeatherLoad({ onTiming = null } = {}) {
           field = await fallbackPromise;
         } else {
           try {
-            field = await sequenceLoad.loadSequence();
+            field = await sequenceLoad.loadSequence(initialFrameIndex);
           } catch (error) {
             if (!(error instanceof RealWeatherSequenceAssetsUnavailableError)) throw error;
             console.warn('Real weather sequence assets are unavailable; using the checked-in CSV snapshot.');
@@ -152,6 +151,24 @@ export function beginActiveWeatherLoad({ onTiming = null } = {}) {
         return field;
       })();
       return fieldPromise;
+    },
+    async requestSourceFrame(frameIndex) {
+      const field = await this.loadSequence(0);
+      if (field.frameCount === undefined) return field;
+      await sequenceLoad.requestSourceFrame(frameIndex);
+      return field;
+    },
+    async requestTime(normalizedTime) {
+      const field = await this.loadSequence(0);
+      if (field.frameCount === undefined) return field;
+      await Promise.all(field.requiredSourceFrames(normalizedTime).map((frameIndex) => sequenceLoad.requestSourceFrame(frameIndex)));
+      return field;
+    },
+    async prefetchRemaining({ concurrency = 1 } = {}) {
+      const field = await this.loadSequence(0);
+      if (field.frameCount === undefined) return field;
+      await sequenceLoad.prefetchFrames(Array.from({ length: field.frameCount - 1 }, (_, index) => index + 1), { concurrency });
+      return field;
     }
   };
 }

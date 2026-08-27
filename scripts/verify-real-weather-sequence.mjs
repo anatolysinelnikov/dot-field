@@ -1,94 +1,74 @@
 import { readFile } from 'node:fs/promises';
 import { geographicTemporalFrameAt } from '../src/engine/geographic-layer-utils.js';
-import { RealWeatherSequence } from '../src/engine/real-weather.js';
+import { decodePackedWeatherSupport, RealWeatherSequence } from '../src/engine/real-weather.js';
 
 const root = new URL('../data/generated/202608262200/', import.meta.url);
 const metadata = JSON.parse(await readFile(new URL('metadata.json', root), 'utf8'));
-const binary = await readFile(new URL('rain.f32', root));
-const { width, height, longitude_start: longitudeStart, latitude_start: latitudeStart, longitude_spacing: longitudeSpacing, latitude_spacing: latitudeSpacing } = metadata.spatial_grid;
-const { count: frameCount, timestamps } = metadata.time;
-const longitudes = Float64Array.from({ length: width }, (_, index) => longitudeStart + index * longitudeSpacing);
-const latitudes = Float64Array.from({ length: height }, (_, index) => latitudeStart + index * latitudeSpacing);
-const rainFramesMmh = new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / Float32Array.BYTES_PER_ELEMENT);
-const sequence = new RealWeatherSequence({ longitudes, latitudes, rainFramesMmh, frameCount, longitudeSpacing, latitudeSpacing, timestamps });
+const grid = metadata.spatial_grid;
+const frameSize = grid.width * grid.height;
+const frameBuffers = await Promise.all(metadata.rain.frame_assets.map(async (asset) => readFile(new URL(asset, root))));
+const sourceFrames = new Map(frameBuffers.map((buffer, index) => [
+  index,
+  new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / Float32Array.BYTES_PER_ELEMENT)
+]));
+const supportBuffer = await readFile(new URL(metadata.support_mask.asset, root));
+const potentialWeatherMask = decodePackedWeatherSupport(
+  supportBuffer.buffer.slice(supportBuffer.byteOffset, supportBuffer.byteOffset + supportBuffer.byteLength), frameSize
+);
+const longitudes = Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing);
+const latitudes = Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing);
+const sequence = new RealWeatherSequence({
+  longitudes, latitudes, sourceFrames, frameCount: metadata.time.count,
+  longitudeSpacing: grid.longitude_spacing, latitudeSpacing: grid.latitude_spacing,
+  timestamps: metadata.time.timestamps, potentialWeatherMask,
+  sourceFrameCacheLimit: metadata.time.count
+});
 
-function assertClose(actual, expected, message) {
-  if (Math.abs(actual - expected) > 1e-6) throw new Error(`${message}: expected ${expected}, received ${actual}`);
+function same(left, right, message) {
+  if (left !== right) throw new Error(`${message}: expected ${right}, received ${left}`);
 }
-
 function sourceValue(frame, longitudeIndex, latitudeIndex) {
-  return rainFramesMmh[frame * sequence.frameSize + latitudeIndex * width + longitudeIndex];
+  return sourceFrames.get(frame)[latitudeIndex * grid.width + longitudeIndex];
 }
 
+for (const [index, buffer] of frameBuffers.entries()) {
+  same(buffer.byteLength, metadata.rain.frame_byte_length, `frame ${index} byte length`);
+  const values = sourceFrames.get(index);
+  for (let node = 0; node < values.length; node++) {
+    if (!Number.isFinite(values[node]) || values[node] < 0) throw new Error(`frame ${index} has invalid value ${node}`);
+  }
+}
 const longitudeIndex = 160;
 const latitudeIndex = 41;
 const longitude = longitudes[longitudeIndex];
 const latitude = latitudes[latitudeIndex];
-const output = {};
-
-assertClose(sequence.prepareFrame(0).sample(longitude, latitude, output).rainMmh, sourceValue(0, longitudeIndex, latitudeIndex), 't=0 source node');
-assertClose(sequence.prepareFrame(1).sample(longitude, latitude, output).rainMmh, sourceValue(18, longitudeIndex, latitudeIndex), 't=1 source node');
-assertClose(sequence.prepareFrame(4.5 / 18).sample(longitude, latitude, output).rainMmh, (sourceValue(4, longitudeIndex, latitudeIndex) + sourceValue(5, longitudeIndex, latitudeIndex)) / 2, 'temporal midpoint');
-assertClose(sequence.prepareFrame(7 / 18).sample(longitude, latitude, output).rainMmh, sourceValue(7, longitudeIndex, latitudeIndex), 'spatial source node');
-
-const sampleLongitudes = Float64Array.of(longitude, longitude + longitudeSpacing * 0.37);
-const sampleLatitudes = Float64Array.of(latitude, latitude + latitudeSpacing * 0.61);
-const geometry = sequence.prepareSamplingGeometry(sampleLongitudes, sampleLatitudes);
-const frame = sequence.prepareFrame(8.25 / 18);
-for (let index = 0; index < sampleLongitudes.length; index++) {
-  const direct = frame.sample(sampleLongitudes[index], sampleLatitudes[index], {});
-  const prepared = frame.samplePrepared(geometry, index, {});
-  assertClose(prepared.rainMmh, direct.rainMmh, `prepared sample ${index}`);
-  assertClose(prepared.storm, 0, `prepared storm ${index}`);
-  assertClose(prepared.hail, 0, `prepared hail ${index}`);
+for (let frame = 0; frame < sequence.frameCount; frame++) {
+  same(sequence.prepareFrame(frame / (sequence.frameCount - 1)).sample(longitude, latitude, {}).rainMmh, sourceValue(frame, longitudeIndex, latitudeIndex), `exact source frame ${frame}`);
+}
+for (let frame = 0; frame < sequence.frameCount - 1; frame++) {
+  const progress = 0.37;
+  const actual = sequence.prepareFrame((frame + progress) / (sequence.frameCount - 1)).sample(longitude, latitude, {}).rainMmh;
+  const expected = sourceValue(frame, longitudeIndex, latitudeIndex) + (sourceValue(frame + 1, longitudeIndex, latitudeIndex) - sourceValue(frame, longitudeIndex, latitudeIndex)) * progress;
+  same(actual, expected, `interpolated source node ${frame}`);
 }
 
-const exactFrame = sequence.exactSourceFrameAt(7);
-assertClose(exactFrame.rawCellAt(longitude, latitude).mmh, sourceValue(7, longitudeIndex, latitudeIndex), 'exact source frame');
-if (exactFrame.timestamp !== timestamps[7]) throw new Error('exact source frame timestamp is not preserved.');
-if (sequence.exactSourceFrameAt(7) !== exactFrame) throw new Error('exact source frame cache is not reused.');
-if (exactFrame.longitudes !== sequence.longitudes || exactFrame.latitudes !== sequence.latitudes) throw new Error('exact source frame duplicated spatial axes.');
+const geometry = sequence.prepareSamplingGeometry(Float64Array.of(longitude, longitude + grid.longitude_spacing * 0.37), Float64Array.of(latitude, latitude + grid.latitude_spacing * 0.61));
+for (const time of [0, 0.123, 0.347, 0.777, 1]) {
+  const frame = sequence.prepareFrame(time);
+  for (let index = 0; index < 2; index++) {
+    const direct = frame.sample(geometry.longitudes?.[index] ?? [longitude, longitude + grid.longitude_spacing * 0.37][index], [latitude, latitude + grid.latitude_spacing * 0.61][index], {});
+    const prepared = frame.samplePrepared(geometry, index, {});
+    same(prepared.rainMmh, direct.rainMmh, `prepared exact output ${time}/${index}`);
+  }
+}
 
 const endpoint = geographicTemporalFrameAt(1);
 if (endpoint.index !== 180 || endpoint.nextIndex !== 180 || endpoint.progress !== 0) throw new Error('terminal renderer keyframe is cyclic.');
-const finalSourceFrame = sequence.prepareFrame(1);
-if (finalSourceFrame.frame0 !== 18 || finalSourceFrame.frame1 !== 18 || finalSourceFrame.progress !== 0) throw new Error('terminal source frame is cyclic.');
+const terminal = sequence.prepareFrame(1);
+if (terminal.frame0 !== 18 || terminal.frame1 !== 18 || terminal.progress !== 0) throw new Error('terminal source frame must require one frame.');
 
-const firstWetSourceIndex = rainFramesMmh.findIndex((value) => value > 0);
-const wetLongitudeIndex = firstWetSourceIndex % width;
-const wetLatitudeIndex = Math.floor(firstWetSourceIndex / width);
-const cacheGeometry = sequence.prepareSamplingGeometry(
-  Float64Array.of(longitudes[wetLongitudeIndex]),
-  Float64Array.of(latitudes[wetLatitudeIndex])
-);
-const expectedSpatialFrames = new Array(sequence.frameCount);
-for (let frameIndex = 0; frameIndex < sequence.frameCount; frameIndex++) {
-  expectedSpatialFrames[frameIndex] = Float64Array.from(
-    sequence.prepareFrame(frameIndex / (sequence.frameCount - 1)).preparedSourceFrame(cacheGeometry, frameIndex)
-  );
-}
-if (cacheGeometry.spatialRainCache.size > 4) throw new Error('spatial rain cache exceeded its four-frame bound.');
-if (cacheGeometry.spatialRainCache.size !== 4) throw new Error('full source-frame traversal did not retain the four most recent spatial frames.');
-const cachedFrame = sequence.prepareFrame(7 / 18).preparedSourceFrame(cacheGeometry, 7);
-const refreshedCachedFrame = sequence.prepareFrame(7 / 18).preparedSourceFrame(cacheGeometry, 7);
-if (cachedFrame !== refreshedCachedFrame) throw new Error('spatial rain cache hit did not return the exact existing Float64Array.');
-cacheGeometry.spatialRainCache.clear();
-for (const frameIndex of [0, 1, 2, 3]) sequence.prepareFrame(frameIndex / 18).preparedSourceFrame(cacheGeometry, frameIndex);
-const refreshedFirstFrame = sequence.prepareFrame(0).preparedSourceFrame(cacheGeometry, 0);
-sequence.prepareFrame(4 / 18).preparedSourceFrame(cacheGeometry, 4);
-if (!cacheGeometry.spatialRainCache.has(0) || cacheGeometry.spatialRainCache.has(1) || refreshedFirstFrame !== cacheGeometry.spatialRainCache.get(0)) {
-  throw new Error('spatial rain cache hit did not refresh LRU recency.');
-}
-for (const frameIndex of [0, 9, 18, 1, 17, 2, 16, 3, 15, 4, 14]) {
-  sequence.prepareFrame(frameIndex / 18).preparedSourceFrame(cacheGeometry, frameIndex);
-}
-const recomputedFrame = sequence.prepareFrame(0).preparedSourceFrame(cacheGeometry, 0);
-if (!recomputedFrame.every((value, index) => value === expectedSpatialFrames[0][index])) {
-  throw new Error('evicted spatial source frame did not reproduce exact Float64 values.');
-}
-if (cacheGeometry.spatialRainCache.size > 4) throw new Error('wide scrub exceeded the spatial rain cache bound.');
-const terminalBatch = finalSourceFrame.samplePreparedBatch(cacheGeometry);
-const terminalFrame = finalSourceFrame.preparedSourceFrame(cacheGeometry, 18);
-if (terminalBatch[0] !== terminalFrame[0]) throw new Error('terminal frame did not use the identical source-frame cache value.');
+const expectedPackedSupport = new Uint8Array(frameSize);
+for (const values of sourceFrames.values()) for (let index = 0; index < values.length; index++) if (values[index] > 0) expectedPackedSupport[index] = 1;
+for (let index = 0; index < frameSize; index++) same(potentialWeatherMask[index], expectedPackedSupport[index], `support bit ${index}`);
 
-console.log('Real weather sequence verification passed.');
+console.log(`Real weather sequence verification passed: ${sequence.frameCount} independent exact Float32 frames; every exact time, every interval source-node interpolation, packed sequence-wide support, prepared reconstruction, and terminal semantics.`);

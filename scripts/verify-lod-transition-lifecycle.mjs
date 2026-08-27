@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
-import { RealWeatherSequence } from '../src/engine/real-weather.js';
+import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
 import {
   canonicalWindowFromMercatorBounds,
   GeographicLodTopology,
@@ -23,21 +23,7 @@ function check(condition, message) {
   else { failures++; console.error(`FAIL ${message}`); }
 }
 
-function loadSequence() {
-  const dataRoot = new URL('../data/generated/202608262200/', import.meta.url);
-  const metadata = JSON.parse(fs.readFileSync(new URL('metadata.json', dataRoot), 'utf8'));
-  const binary = fs.readFileSync(new URL('rain.f32', dataRoot));
-  const grid = metadata.spatial_grid;
-  return new RealWeatherSequence({
-    longitudes: Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing),
-    latitudes: Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing),
-    rainFramesMmh: new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / Float32Array.BYTES_PER_ELEMENT),
-    frameCount: metadata.time.count,
-    longitudeSpacing: grid.longitude_spacing,
-    latitudeSpacing: grid.latitude_spacing,
-    timestamps: metadata.time.timestamps
-  });
-}
+async function loadSequence() { return (await loadRealWeatherFixture()).weather; }
 
 function arraysEqual(left, right) {
   if (left === right) return true;
@@ -180,7 +166,7 @@ function verifyReversal(Layer, fromLevel, toLevel) {
   check(snapshotsEqual(endpointSnapshot, valueSnapshot(layer)) === false, `${Layer.name} reversal changes only transition ownership/progress`);
 }
 
-const sequence = loadSequence();
+const sequence = await loadSequence();
 setActiveWeatherField(sequence);
 const [centerX, centerY] = lngLatToMercator(...WEATHER_REGION.center);
 const testWindow = canonicalWindowFromMercatorBounds({ minX: centerX - 0.004, maxX: centerX + 0.004, minY: centerY - 0.004, maxY: centerY + 0.004 });

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { setActiveWeatherField } from '../src/engine/geography.js';
-import { RealWeatherSequence } from '../src/engine/real-weather.js';
+import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
 import {
   GeographicWeatherPyramid,
   WEATHER_SUMMARY_PROFILE_GENERIC,
@@ -11,16 +11,8 @@ import { GeographicLodTopology } from '../src/engine/geographic-lod.js';
 import { mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
-const metadata = JSON.parse(fs.readFileSync(new URL('../data/generated/202608262200/metadata.json', import.meta.url), 'utf8'));
-const grid = metadata.spatial_grid;
+const { metadata, weather } = await loadRealWeatherFixture();
 const time = metadata.time;
-const binary = fs.readFileSync(new URL('../data/generated/202608262200/rain.f32', import.meta.url));
-const weather = new RealWeatherSequence({
-  longitudes: Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing),
-  latitudes: Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing),
-  rainFramesMmh: new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / 4),
-  frameCount: time.count, longitudeSpacing: grid.longitude_spacing, latitudeSpacing: grid.latitude_spacing, timestamps: time.timestamps
-});
 setActiveWeatherField(weather);
 if (weather.prepareFrame(0).weatherSummaryProfile !== WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) throw new Error('sequence did not explicitly select compact rain-only summary profile');
 

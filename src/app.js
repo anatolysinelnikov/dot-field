@@ -17,6 +17,7 @@ import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
+import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 
 const applicationStartupAt = performance.now();
 const startupTimings = Object.create(null);
@@ -118,6 +119,7 @@ const INITIAL_RAW_MAX_ZOOM = rawZoomForLogicalSamplingZoom(
   REFERENCE_LATITUDE,
   REFERENCE_LATITUDE
 );
+const BACKGROUND_FRAME_PREFETCH_CONCURRENCY = 1;
 
 markStartup('maplibre-constructor');
 const map = new window.maplibregl.Map({
@@ -156,6 +158,7 @@ const state = {
   basemapReady: false,
   weatherReady: false,
   weatherQueued: false,
+  playbackReady: false,
   renderMode: 'raw',
   hazardsVisible: true,
   rawFrameIndex: 0,
@@ -170,8 +173,9 @@ const VALID_RENDER_MODES = new Set(['raw', 'dots', 'squares']);
 let lastMapErrorSignature = '';
 let weatherSequencePromise = null;
 let basemapFallbackTimer = null;
+let weatherRequestGeneration = 0;
 
-for (const control of [...renderModeButtons, hazards, timeSlider]) control.disabled = true;
+for (const control of [...renderModeButtons, hazards, timeSlider, playPause]) control.disabled = true;
 
 function activateWeatherField(field) {
   activeWeatherField = field;
@@ -183,8 +187,20 @@ function activateWeatherField(field) {
   rawLayer = new RawWeatherLayer(rawWeatherField);
   state.weatherReady = true;
   for (const control of [...renderModeButtons, hazards, timeSlider]) control.disabled = false;
-  markStartup('playback-ready-full-sequence');
+  markStartup('first-weather-ready');
   tryInitializeWeatherLayer();
+  if (field.frameCount === undefined) {
+    state.playbackReady = true;
+    markStartup('playback-ready');
+    return;
+  }
+  markStartup('background-prefetch-start');
+  void weatherLoad.prefetchRemaining({ concurrency: BACKGROUND_FRAME_PREFETCH_CONCURRENCY }).then(() => {
+    state.playbackReady = true;
+    markStartup('all-source-frames-prefetched');
+    markStartup('playback-ready');
+    if (state.renderMode !== 'raw') playPause.disabled = false;
+  }).catch((error) => console.error('Unable to prefetch weather source frames.', error));
 }
 
 function startWeatherSequence(trigger) {
@@ -193,9 +209,13 @@ function startWeatherSequence(trigger) {
     window.clearTimeout(basemapFallbackTimer);
     basemapFallbackTimer = null;
   }
-  markStartup(`weather-binary-trigger-${trigger}`);
+  markStartup(`first-source-frame-trigger-${trigger}`);
+  markStartup('first-source-frame-request-start');
   weatherSequencePromise = weatherLoad.loadSequence();
-  void weatherSequencePromise.then(activateWeatherField).catch((error) => {
+  void weatherSequencePromise.then((field) => {
+    markStartup('first-source-frame-ready');
+    activateWeatherField(field);
+  }).catch((error) => {
     console.error('Unable to load weather data.', error);
   });
   return weatherSequencePromise;
@@ -624,12 +644,28 @@ function queueWeatherUpdate() {
   state.weatherQueued = true;
   requestAnimationFrame(() => {
     state.weatherQueued = false;
-    if (!state.mapReady) return;
+    if (!state.mapReady || !activeWeatherField) return;
     const time = state.time / LOOP_SECONDS;
     if (state.renderMode === 'raw') return;
-    if (state.renderMode === 'dots') weatherLayer.updateWeather(time);
-    else if (state.renderMode === 'squares') squaresLayer.updateWeather(time);
+    requestWeatherTime(time);
   });
+}
+
+function requestWeatherTime(normalizedTime) {
+  if (!activeWeatherField) return;
+  const requestGeneration = ++weatherRequestGeneration;
+  // Dots/Squares retain two adjacent 100 ms renderer keyframes. Resolve both
+  // provider times above the hot path before asking either layer to evaluate.
+  const rendererFrame = geographicTemporalFrameAt(normalizedTime);
+  const nextRendererTime = rendererFrame.nextIndex / TEMPORAL_FRAME_COUNT;
+  void Promise.all([weatherLoad.requestTime(normalizedTime), weatherLoad.requestTime(nextRendererTime)]).then(() => {
+    if (requestGeneration !== weatherRequestGeneration || !state.mapReady || state.renderMode === 'raw') return;
+    // Temporal reconstruction remains synchronous once the adjacent source
+    // frames are present. A stale load cannot overwrite a newer timeline target.
+    if (state.renderMode === 'dots') weatherLayer.updateWeather(state.time / LOOP_SECONDS);
+    else if (state.renderMode === 'squares') squaresLayer.updateWeather(state.time / LOOP_SECONDS);
+    map.triggerRepaint();
+  }).catch((error) => console.error('Unable to load requested weather time.', error));
 }
 
 function applyRenderMode() {
@@ -647,10 +683,7 @@ function applyRenderMode() {
     updateTimestamp();
     return;
   }
-  if (mode === 'dots') {
-    weatherLayer.updateWeather(time);
-  }
-  else if (mode === 'squares') squaresLayer.updateWeather(time);
+  if (mode === 'dots' || mode === 'squares') requestWeatherTime(time);
   updateTimestamp();
 }
 
@@ -658,17 +691,22 @@ function setRawFrame(frameIndex, commitTime = false) {
   if (!activeWeatherField || !rawLayer) return;
   const nextFrameIndex = clamp(frameIndex, 0, sourceFrameCount - 1);
   state.rawFrameIndex = nextFrameIndex;
-  const frame = typeof activeWeatherField.exactSourceFrameAt === 'function'
-    ? activeWeatherField.exactSourceFrameAt(nextFrameIndex)
-    : rawWeatherField;
-  rawLayer.setFrame(frame);
   timeSlider.value = String(normalizedTimeForSourceFrame(nextFrameIndex));
   if (commitTime) {
     state.time = normalizedTimeForSourceFrame(nextFrameIndex) * LOOP_SECONDS;
     state.rawTimeChanged = true;
   }
-  refreshHighlightedRawCell();
   updateTimestamp();
+  const requestGeneration = ++weatherRequestGeneration;
+  void weatherLoad.requestSourceFrame(nextFrameIndex).then(() => {
+    if (requestGeneration !== weatherRequestGeneration || state.renderMode !== 'raw') return;
+    const frame = typeof activeWeatherField.exactSourceFrameAt === 'function'
+      ? activeWeatherField.exactSourceFrameAt(nextFrameIndex)
+      : rawWeatherField;
+    rawLayer.setFrame(frame);
+    refreshHighlightedRawCell();
+    map.triggerRepaint();
+  }).catch((error) => console.error('Unable to load requested RAW weather frame.', error));
 }
 
 function setRenderMode(mode) {
@@ -688,8 +726,8 @@ function setRenderMode(mode) {
   for (const button of renderModeButtons) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
   }
-  playPause.disabled = mode === 'raw';
-  playPause.setAttribute('aria-disabled', String(mode === 'raw'));
+  playPause.disabled = mode === 'raw' || !state.playbackReady;
+  playPause.setAttribute('aria-disabled', String(mode === 'raw' || !state.playbackReady));
   applyRenderMode();
 }
 
@@ -773,10 +811,10 @@ function selectRawCell(event) {
 }
 
 function setPlaying(playing) {
-  const nextPlaying = Boolean(playing) && state.renderMode !== 'raw';
+  const nextPlaying = Boolean(playing) && state.renderMode !== 'raw' && state.playbackReady;
   state.playing = nextPlaying;
-  playPause.disabled = state.renderMode === 'raw';
-  playPause.setAttribute('aria-disabled', String(state.renderMode === 'raw'));
+  playPause.disabled = state.renderMode === 'raw' || !state.playbackReady;
+  playPause.setAttribute('aria-disabled', String(state.renderMode === 'raw' || !state.playbackReady));
   playPause.dataset.state = nextPlaying ? 'playing' : 'paused';
   playPause.setAttribute('aria-label', nextPlaying ? 'Pause' : 'Play');
   if (nextPlaying) wakeApplicationFrame();
@@ -995,8 +1033,8 @@ function frame(now) {
     const normalizedTime = state.time / LOOP_SECONDS;
     if (state.renderMode === 'raw') {
       updateRawTooltipPosition();
-    } else if (state.renderMode === 'dots') weatherLayer.updateWeather(normalizedTime);
-    else if (state.renderMode === 'squares') squaresLayer.updateWeather(normalizedTime);
+    } else if (state.renderMode === 'dots') queueWeatherUpdate();
+    else if (state.renderMode === 'squares') queueWeatherUpdate();
   }
   if (reachedEndpoint) setPlaying(false);
   updateLODTransition(now);

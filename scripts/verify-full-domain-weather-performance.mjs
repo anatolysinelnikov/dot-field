@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { geographicPrepareTemporalSampling, setActiveWeatherField } from '../src/engine/geography.js';
-import { RealWeatherSequence } from '../src/engine/real-weather.js';
+import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
 import {
   aggregateWeatherSummary,
   buildCenteredContributions,
@@ -12,22 +12,8 @@ import { GeographicLodTopology, lodRangeForStableLevel, mercatorXForIndex, merca
 import { mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
-const metadata = JSON.parse(fs.readFileSync(new URL('../data/generated/202608262200/metadata.json', import.meta.url), 'utf8'));
-const grid = metadata.spatial_grid;
+const { metadata, weather } = await loadRealWeatherFixture();
 const time = metadata.time;
-const binary = fs.readFileSync(new URL('../data/generated/202608262200/rain.f32', import.meta.url));
-const rainFramesMmh = new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / Float32Array.BYTES_PER_ELEMENT);
-const longitudes = Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing);
-const latitudes = Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing);
-const weather = new RealWeatherSequence({
-  longitudes,
-  latitudes,
-  rainFramesMmh,
-  frameCount: time.count,
-  longitudeSpacing: grid.longitude_spacing,
-  latitudeSpacing: grid.latitude_spacing,
-  timestamps: time.timestamps
-});
 setActiveWeatherField(weather);
 
 const topology = new GeographicLodTopology(undefined, lodRangeForStableLevel(10));

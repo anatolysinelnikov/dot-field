@@ -1,20 +1,12 @@
 import fs from 'node:fs';
 import { setActiveWeatherField } from '../src/engine/geography.js';
-import { RealWeatherSequence } from '../src/engine/real-weather.js';
+import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
 import { createWeatherSummary, GeographicWeatherPyramid, WEATHER_SUMMARY_PROFILE_GENERIC } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicLodTopology } from '../src/engine/geographic-lod.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
-const metadata = JSON.parse(fs.readFileSync(new URL('../data/generated/202608262200/metadata.json', import.meta.url), 'utf8'));
-const grid = metadata.spatial_grid;
-const binary = fs.readFileSync(new URL('../data/generated/202608262200/rain.f32', import.meta.url));
-const weather = new RealWeatherSequence({
-  longitudes: Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing),
-  latitudes: Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing),
-  rainFramesMmh: new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / 4),
-  frameCount: metadata.time.count, longitudeSpacing: grid.longitude_spacing, latitudeSpacing: grid.latitude_spacing, timestamps: metadata.time.timestamps
-});
+const { weather } = await loadRealWeatherFixture();
 setActiveWeatherField(weather);
 const topology = new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 14 });
 const pyramid = new GeographicWeatherPyramid(Float32Array, topology);
