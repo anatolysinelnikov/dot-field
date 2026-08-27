@@ -4,7 +4,8 @@ import { GeographicWeatherPyramid, rainCoverageWeightForThreshold, WEATHER_SUMMA
 import { canonicalWindowsEqual, MAX_GRID_LEVEL, mercatorXForIndex, mercatorYForIndex } from './geographic-lod.js';
 import { RAIN_VISIBILITY_SHADER, STRONG_RAIN_SHADER } from './precipitation-mapping.js';
 
-const INSTANCE_STRIDE = 18;
+const FULL_INSTANCE_STRIDE = 18;
+const RAIN_ONLY_INSTANCE_STRIDE = 6;
 const CELL_VERTICES = new Float32Array([-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5]);
 
 const now = () => globalThis.performance?.now?.() ?? Date.now();
@@ -23,13 +24,22 @@ function retainedTemporalState(previousTopology, nextTopology, level, state) {
     && state.frames1?.summaries?.[level]?.levelData === levelData);
 }
 
-function makeMappedState(length, reusable) {
-  if (reusable?.rainWetMeanMmh?.length === length) return reusable;
-  return {
-    rainWetMeanMmh: new Float32Array(length), rainCoverage: new Float32Array(length),
+function mappedLayoutForSummary(summary) {
+  return summary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY ? 'rain-only' : 'full';
+}
+
+function instanceStrideForLayout(layout) {
+  return layout === 'rain-only' ? RAIN_ONLY_INSTANCE_STRIDE : FULL_INSTANCE_STRIDE;
+}
+
+function makeMappedState(length, layout, reusable) {
+  if (reusable?.layout === layout && reusable.rainWetMeanMmh?.length === length) return reusable;
+  const state = { layout, rainWetMeanMmh: new Float32Array(length), rainCoverage: new Float32Array(length) };
+  if (layout === 'full') Object.assign(state, {
     stormCoverage: new Float32Array(length), stormMeanSeverity: new Float32Array(length), stormMaxSeverity: new Float32Array(length),
     hailCoverage: new Float32Array(length), hailMeanSeverity: new Float32Array(length), hailMaxSeverity: new Float32Array(length)
-  };
+  });
+  return state;
 }
 
 function samePotentialActiveIndices(left, right) {
@@ -46,22 +56,18 @@ function prepareMappedActiveSet(state, activeIndices) {
       for (const index of previous) {
         state.rainWetMeanMmh[index] = 0;
         state.rainCoverage[index] = 0;
-        state.stormCoverage[index] = 0;
-        state.stormMeanSeverity[index] = 0;
-        state.stormMaxSeverity[index] = 0;
-        state.hailCoverage[index] = 0;
-        state.hailMeanSeverity[index] = 0;
-        state.hailMaxSeverity[index] = 0;
+        if (state.layout === 'full') {
+          state.stormCoverage[index] = 0; state.stormMeanSeverity[index] = 0; state.stormMaxSeverity[index] = 0;
+          state.hailCoverage[index] = 0; state.hailMeanSeverity[index] = 0; state.hailMaxSeverity[index] = 0;
+        }
       }
     } else if (state.mappingInitialized) {
       state.rainWetMeanMmh.fill(0);
       state.rainCoverage.fill(0);
-      state.stormCoverage.fill(0);
-      state.stormMeanSeverity.fill(0);
-      state.stormMaxSeverity.fill(0);
-      state.hailCoverage.fill(0);
-      state.hailMeanSeverity.fill(0);
-      state.hailMaxSeverity.fill(0);
+      if (state.layout === 'full') {
+        state.stormCoverage.fill(0); state.stormMeanSeverity.fill(0); state.stormMaxSeverity.fill(0);
+        state.hailCoverage.fill(0); state.hailMeanSeverity.fill(0); state.hailMaxSeverity.fill(0);
+      }
     }
   }
   state.potentialActiveIndices = activeIndices || null;
@@ -70,27 +76,28 @@ function prepareMappedActiveSet(state, activeIndices) {
 
 // Pure renderer mapping. Coverage remains separate from wet/positive severity.
 export function mapSquaresWeatherSummary(summary, reusable = null) {
-  const state = makeMappedState(summary.levelData.count, reusable);
+  const layout = mappedLayoutForSummary(summary);
+  const state = makeMappedState(summary.levelData.count, layout, reusable);
   const activeIndices = summary.potentialActiveIndices;
   prepareMappedActiveSet(state, activeIndices);
   const count = activeIndices ? activeIndices.length : summary.levelData.count;
   const rainWeights = rainCoverageWeightForThreshold(summary, 0.05);
-  const hazardsUnavailable = summary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY;
+  if (layout === 'rain-only') {
+    for (let position = 0; position < count; position++) {
+      const index = activeIndices ? activeIndices[position] : position;
+      const total = summary.totalWeight[index];
+      const rainWeight = rainWeights[index];
+      state.rainCoverage[index] = total > 0 ? rainWeight / total : 0;
+      state.rainWetMeanMmh[index] = rainWeight > 0 ? summary.rainWeightedSumMmh[index] / rainWeight : 0;
+    }
+    return state;
+  }
   for (let position = 0; position < count; position++) {
     const index = activeIndices ? activeIndices[position] : position;
     const total = summary.totalWeight[index];
     const rainWeight = rainWeights[index];
     state.rainCoverage[index] = total > 0 ? rainWeight / total : 0;
     state.rainWetMeanMmh[index] = rainWeight > 0 ? summary.rainWeightedSumMmh[index] / rainWeight : 0;
-    if (hazardsUnavailable) {
-      state.stormCoverage[index] = 0;
-      state.stormMeanSeverity[index] = 0;
-      state.stormMaxSeverity[index] = 0;
-      state.hailCoverage[index] = 0;
-      state.hailMeanSeverity[index] = 0;
-      state.hailMaxSeverity[index] = 0;
-      continue;
-    }
     const stormWeight = summary.stormCoverageWeight[index];
     const hailWeight = summary.hailCoverageWeight[index];
     state.stormCoverage[index] = total > 0 ? stormWeight / total : 0;
@@ -111,15 +118,24 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
-function makeProgram(gl, shaderData) {
+function makeProgram(gl, shaderData, layout) {
+  const rainOnly = layout === 'rain-only';
   const vertexSource = [
     '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define,
-    'in vec2 a_vertex;\nin vec2 a_center;\nin vec4 a_values0;\nin vec4 a_values1;\nin vec4 a_hazards0;\nin vec4 a_hazards1;\nuniform float u_temporalProgress;\nuniform float u_spacing;\nout vec4 v_values;\nout vec4 v_hazards;\nvoid main() {\n  v_values = mix(a_values0, a_values1, u_temporalProgress);\n  v_hazards = mix(a_hazards0, a_hazards1, u_temporalProgress);\n  gl_Position = projectTile(a_center + a_vertex * u_spacing);\n}'
+    rainOnly
+      ? 'in vec2 a_vertex;\nin vec2 a_center;\nin vec2 a_rain0;\nin vec2 a_rain1;\nuniform float u_temporalProgress;\nuniform float u_spacing;\nout vec2 v_rain;\nvoid main() {\n  v_rain = mix(a_rain0, a_rain1, u_temporalProgress);\n  gl_Position = projectTile(a_center + a_vertex * u_spacing);\n}'
+      : 'in vec2 a_vertex;\nin vec2 a_center;\nin vec4 a_values0;\nin vec4 a_values1;\nin vec4 a_hazards0;\nin vec4 a_hazards1;\nuniform float u_temporalProgress;\nuniform float u_spacing;\nout vec4 v_values;\nout vec4 v_hazards;\nvoid main() {\n  v_values = mix(a_values0, a_values1, u_temporalProgress);\n  v_hazards = mix(a_hazards0, a_hazards1, u_temporalProgress);\n  gl_Position = projectTile(a_center + a_vertex * u_spacing);\n}'
   ].join('\n');
   const fragmentSource = [
-    '#version 300 es', 'precision highp float;', 'in vec4 v_values;\nin vec4 v_hazards;\nuniform float u_opacity;\nuniform float u_hazardsVisible;\nout vec4 fragColor;',
+    '#version 300 es', 'precision highp float;', rainOnly ? 'in vec2 v_rain;\nuniform float u_opacity;\nout vec4 fragColor;' : 'in vec4 v_values;\nin vec4 v_hazards;\nuniform float u_opacity;\nuniform float u_hazardsVisible;\nout vec4 fragColor;',
     `${RAIN_VISIBILITY_SHADER}
 ${STRONG_RAIN_SHADER}
+${rainOnly ? `void main() {
+  float rain = rainVisibility(v_rain.x) * clamp(v_rain.y, 0.0, 1.0);
+  float strong = strongRain(v_rain.x);
+  vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), strong);
+  fragColor = vec4(color, rain * u_opacity);
+}` : `
 float strength(float value, float threshold) { return smoothstep(threshold * 0.45, 0.93, value); }
 void main() {
   float rain = rainVisibility(v_values.x) * clamp(v_values.y, 0.0, 1.0);
@@ -135,14 +151,16 @@ void main() {
   float hail = u_hazardsVisible * clamp(v_hazards.y, 0.0, 1.0) * max(hailStrength, hailPeak);
   if (hail > 0.0) { color = mix(color, vec3(1.0, 0.831, 0.0), mix(0.5, 1.0, pow(max(hailStrength, hailPeak), 0.47))); alpha = max(alpha, hail); }
   fragColor = vec4(color, alpha * u_opacity);
-}`
+}`}`
   ].join('\n');
   const program = gl.createProgram();
   gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
   gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'Square weather shader linking failed.');
-  const names = ['a_vertex', 'a_center', 'a_values0', 'a_values1', 'a_hazards0', 'a_hazards1', 'u_temporalProgress', 'u_spacing', 'u_opacity', 'u_hazardsVisible', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'];
+  const names = rainOnly
+    ? ['a_vertex', 'a_center', 'a_rain0', 'a_rain1', 'u_temporalProgress', 'u_spacing', 'u_opacity', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition']
+    : ['a_vertex', 'a_center', 'a_values0', 'a_values1', 'a_hazards0', 'a_hazards1', 'u_temporalProgress', 'u_spacing', 'u_opacity', 'u_hazardsVisible', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'];
   return { program, locations: Object.fromEntries(names.map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)])) };
 }
 
@@ -161,6 +179,7 @@ export class GeographicSquaresLayer {
     this.temporal = null;
     this.temporalProgress = 0;
     this.instanceData = [new Float32Array(), new Float32Array()];
+    this.instanceLayouts = [null, null];
     this.instanceCounts = [0, 0];
     this.instanceBufferCapacity = [0, 0];
     this.instanceDirty = [true, true];
@@ -201,6 +220,7 @@ export class GeographicSquaresLayer {
       this.temporal = null;
       this.temporalProgress = 0;
       this.instanceData = [new Float32Array(), new Float32Array()];
+      this.instanceLayouts = [null, null];
       this.instanceCounts = [0, 0];
       this.instanceBufferCapacity = [0, 0];
       this.instanceDirty = [true, true];
@@ -223,6 +243,7 @@ export class GeographicSquaresLayer {
         this.transition = this.temporal && this.transition ? this.transition : null;
         if (!this.levelData || !this.temporal) {
           this.instanceData = [new Float32Array(), new Float32Array()];
+          this.instanceLayouts = [null, null];
           this.instanceCounts = [0, 0];
           this.instanceBufferCapacity = [0, 0];
           this.instanceDirty = [true, true];
@@ -367,16 +388,25 @@ export class GeographicSquaresLayer {
   }
 
   buildGroup(group, level, state0, state1) {
+    if (state0.layout !== state1.layout) throw new Error('Squares temporal endpoint mapped layouts must match.');
+    const layout = state0.layout;
+    const stride = instanceStrideForLayout(layout);
     const levelData = this.weatherPyramid.topology.levels.get(level);
     const activeIndices = state0.potentialActiveIndices && state1.potentialActiveIndices
       && samePotentialActiveIndices(state0.potentialActiveIndices, state1.potentialActiveIndices)
       ? state0.potentialActiveIndices
       : null;
     const count = activeIndices ? activeIndices.length : levelData.count;
-    const length = count * INSTANCE_STRIDE;
+    const length = count * stride;
     let result = this.instanceData[group];
-    if (result.length < length) result = new Float32Array(Math.max(length, result.length * 2, INSTANCE_STRIDE * 256));
-    for (let position = 0, offset = 0; position < count; position++, offset += INSTANCE_STRIDE) {
+    if (this.instanceLayouts[group] !== layout) result = new Float32Array();
+    if (result.length < length) result = new Float32Array(Math.max(length, result.length * 2, stride * 256));
+    if (layout === 'rain-only') for (let position = 0, offset = 0; position < count; position++, offset += stride) {
+      const index = activeIndices ? activeIndices[position] : position;
+      result[offset] = mercatorXForIndex(levelData, index); result[offset + 1] = mercatorYForIndex(levelData, index);
+      result[offset + 2] = state0.rainWetMeanMmh[index]; result[offset + 3] = state0.rainCoverage[index];
+      result[offset + 4] = state1.rainWetMeanMmh[index]; result[offset + 5] = state1.rainCoverage[index];
+    } else for (let position = 0, offset = 0; position < count; position++, offset += stride) {
       const index = activeIndices ? activeIndices[position] : position;
       result[offset] = mercatorXForIndex(levelData, index); result[offset + 1] = mercatorYForIndex(levelData, index);
       result[offset + 2] = state0.rainWetMeanMmh[index]; result[offset + 3] = state0.rainCoverage[index];
@@ -387,6 +417,7 @@ export class GeographicSquaresLayer {
       result[offset + 15] = state1.hailCoverage[index]; result[offset + 16] = state1.hailMeanSeverity[index]; result[offset + 17] = state1.hailMaxSeverity[index];
     }
     this.instanceData[group] = result;
+    this.instanceLayouts[group] = layout;
     this.instanceCounts[group] = count;
   }
 
@@ -434,9 +465,10 @@ export class GeographicSquaresLayer {
     if (this.active) this.map?.triggerRepaint();
   }
 
-  programFor(gl, shaderData) {
-    let entry = this.programs.get(shaderData.variantName);
-    if (!entry) { entry = makeProgram(gl, shaderData); this.programs.set(shaderData.variantName, entry); }
+  programFor(gl, shaderData, layout) {
+    const key = `${shaderData.variantName}:${layout}`;
+    let entry = this.programs.get(key);
+    if (!entry) { entry = makeProgram(gl, shaderData, layout); this.programs.set(key, entry); }
     return entry;
   }
 
@@ -451,23 +483,26 @@ export class GeographicSquaresLayer {
       : this.levelData.level;
     gl.uniform1f(locations.u_spacing, 1 / 2 ** level);
     gl.uniform1f(locations.u_opacity, opacity);
-    gl.uniform1f(locations.u_hazardsVisible, this.hazardsVisible ? 1 : 0);
+    const layout = this.instanceLayouts[group];
+    const stride = instanceStrideForLayout(layout);
+    if (layout === 'full') gl.uniform1f(locations.u_hazardsVisible, this.hazardsVisible ? 1 : 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
     gl.enableVertexAttribArray(locations.a_vertex);
     gl.vertexAttribPointer(locations.a_vertex, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[group]);
     gl.enableVertexAttribArray(locations.a_center);
-    gl.vertexAttribPointer(locations.a_center, 2, gl.FLOAT, false, INSTANCE_STRIDE * 4, 0); gl.vertexAttribDivisor(locations.a_center, 1);
-    gl.enableVertexAttribArray(locations.a_values0);
-    gl.vertexAttribPointer(locations.a_values0, 4, gl.FLOAT, false, INSTANCE_STRIDE * 4, 8); gl.vertexAttribDivisor(locations.a_values0, 1);
-    gl.enableVertexAttribArray(locations.a_hazards0);
-    gl.vertexAttribPointer(locations.a_hazards0, 4, gl.FLOAT, false, INSTANCE_STRIDE * 4, 24); gl.vertexAttribDivisor(locations.a_hazards0, 1);
-    gl.enableVertexAttribArray(locations.a_values1);
-    gl.vertexAttribPointer(locations.a_values1, 4, gl.FLOAT, false, INSTANCE_STRIDE * 4, 40); gl.vertexAttribDivisor(locations.a_values1, 1);
-    gl.enableVertexAttribArray(locations.a_hazards1);
-    gl.vertexAttribPointer(locations.a_hazards1, 4, gl.FLOAT, false, INSTANCE_STRIDE * 4, 56); gl.vertexAttribDivisor(locations.a_hazards1, 1);
+    gl.vertexAttribPointer(locations.a_center, 2, gl.FLOAT, false, stride * 4, 0); gl.vertexAttribDivisor(locations.a_center, 1);
+    if (layout === 'rain-only') {
+      gl.enableVertexAttribArray(locations.a_rain0); gl.vertexAttribPointer(locations.a_rain0, 2, gl.FLOAT, false, stride * 4, 8); gl.vertexAttribDivisor(locations.a_rain0, 1);
+      gl.enableVertexAttribArray(locations.a_rain1); gl.vertexAttribPointer(locations.a_rain1, 2, gl.FLOAT, false, stride * 4, 16); gl.vertexAttribDivisor(locations.a_rain1, 1);
+    } else {
+      gl.enableVertexAttribArray(locations.a_values0); gl.vertexAttribPointer(locations.a_values0, 4, gl.FLOAT, false, stride * 4, 8); gl.vertexAttribDivisor(locations.a_values0, 1);
+      gl.enableVertexAttribArray(locations.a_hazards0); gl.vertexAttribPointer(locations.a_hazards0, 4, gl.FLOAT, false, stride * 4, 24); gl.vertexAttribDivisor(locations.a_hazards0, 1);
+      gl.enableVertexAttribArray(locations.a_values1); gl.vertexAttribPointer(locations.a_values1, 4, gl.FLOAT, false, stride * 4, 40); gl.vertexAttribDivisor(locations.a_values1, 1);
+      gl.enableVertexAttribArray(locations.a_hazards1); gl.vertexAttribPointer(locations.a_hazards1, 4, gl.FLOAT, false, stride * 4, 56); gl.vertexAttribDivisor(locations.a_hazards1, 1);
+    }
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.instanceCounts[group]);
-    for (const location of [locations.a_center, locations.a_values0, locations.a_hazards0, locations.a_values1, locations.a_hazards1]) gl.vertexAttribDivisor(location, 0);
+    for (const location of layout === 'rain-only' ? [locations.a_center, locations.a_rain0, locations.a_rain1] : [locations.a_center, locations.a_values0, locations.a_hazards0, locations.a_values1, locations.a_hazards1]) gl.vertexAttribDivisor(location, 0);
   }
 
   uploadBuffers(gl) {
@@ -475,12 +510,12 @@ export class GeographicSquaresLayer {
     for (let index = 0; index < 2; index++) {
       if (!this.instanceDirty[index]) continue;
       gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffers[index]);
-      const byteLength = this.instanceCounts[index] * INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
+      const byteLength = this.instanceCounts[index] * instanceStrideForLayout(this.instanceLayouts[index]) * Float32Array.BYTES_PER_ELEMENT;
       if (byteLength > this.instanceBufferCapacity[index]) {
         gl.bufferData(gl.ARRAY_BUFFER, byteLength, gl.DYNAMIC_DRAW);
         this.instanceBufferCapacity[index] = byteLength;
       }
-      if (byteLength) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData[index].subarray(0, this.instanceCounts[index] * INSTANCE_STRIDE));
+      if (byteLength) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData[index].subarray(0, this.instanceCounts[index] * instanceStrideForLayout(this.instanceLayouts[index])));
       this.instanceDirty[index] = false;
     }
   }
@@ -488,7 +523,9 @@ export class GeographicSquaresLayer {
   render(gl, args) {
     if (!this.active || !this.temporal) return;
     this.uploadBuffers(gl);
-    const entry = this.programFor(gl, args.shaderData);
+    const activeLayout = this.instanceLayouts[this.transition ? this.transition.fromGroup : this.stableGroup];
+    if (this.transition && this.instanceLayouts[this.transition.toGroup] !== activeLayout) throw new Error('Squares transition groups must use one mapped layout.');
+    const entry = this.programFor(gl, args.shaderData, activeLayout);
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.enable(gl.DEPTH_TEST); gl.depthMask(false); gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -1);
     if (this.transition) {
       this.renderGroup(gl, entry, args.defaultProjectionData, this.transition.fromGroup, 1 - this.transitionProgress);

@@ -220,7 +220,10 @@ summary contract: weighted rain, maximum rain, all seven rain-coverage
 thresholds, and storm/hail coverage, weighted severity, and maxima. Providers
 may explicitly advertise the `rain-only-display` summary profile. The current
 prepared real-weather sequence does so together with explicit unavailable storm
-and hail channels; selection is a provider capability, never a renderer choice
+and hail channels. Provider/engine capability is separate from availability in
+the currently loaded dataset: a future sequence from the same provider may
+expose hazard channels and must use the generic profile even when a particular
+frame contains only zero hazard values. Selection is never a renderer choice
 or an inference from a zero-valued frame.
 
 That compact profile is shared by Dots and Squares and contains only weighted
@@ -234,6 +237,15 @@ without owning provider semantics. Generic and future hazard-capable providers
 continue to use the full contract. Renderers resolve each profile-supported
 rain coverage array once before their sample loop; temporal reconstruction
 remains provider-owned.
+
+Renderer layouts are selected once from that explicit physical profile, not
+from the Hazards UI preference. Rain-only datasets map Dots to rain/strong
+radius arrays only and use the compact Squares program/instance record
+`centerXY + rainWetMean/coverage` for both temporal endpoints (6 Float32,
+24 bytes/sample). Full hazard-capable datasets retain Dots storm/hail radii,
+the complete Squares hazard mapped fields, and its existing 18-Float32 layout.
+The Hazards checkbox remains presentation-only: it gates hazard compositing on
+full data and causes no data/layout rebuild on a rain-only dataset.
 
 During an active L12/L13 transition, a temporal keyframe that must rebuild both
 levels is evaluated as one multi-level pyramid request, then mapped into the

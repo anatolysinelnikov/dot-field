@@ -89,8 +89,8 @@ function verifyOmittedSamples(level, summary, sparseDots, denseDots, sparseSquar
   if (!active) return;
   const activeMask = new Uint8Array(summary.levelData.count);
   for (const index of active) activeMask[index] = 1;
-  const dotNames = ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius'];
-  const squareNames = ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity'];
+  const dotNames = ['rainRadius', 'strongRadius'];
+  const squareNames = ['rainWetMeanMmh', 'rainCoverage'];
   for (let index = 0; index < activeMask.length; index++) {
     if (activeMask[index]) continue;
     for (const name of dotNames) {
@@ -143,7 +143,7 @@ function makeTransitionSquares(pyramid, fromLevel, toLevel, mapped0, mapped1) {
 }
 
 function compareDotPacked(level, sparse, dense) {
-  for (const type of ['rain', 'strong', 'storm', 'hail']) compareArrays(`L${level} Dots packed ${type}`, sparse.instances[type], dense.instances[type]);
+  for (const type of ['rain', 'strong']) compareArrays(`L${level} Dots packed ${type}`, sparse.instances[type], dense.instances[type]);
 }
 
 function compareSquarePacked(level, sparse, dense, summary) {
@@ -153,9 +153,9 @@ function compareSquarePacked(level, sparse, dense, summary) {
   const sparseData = sparse.instanceData[0];
   const denseData = dense.instanceData[0];
   for (let position = 0; position < active.length; position++) {
-    const sparseOffset = position * 18;
-    const denseOffset = active[position] * 18;
-    for (let component = 0; component < 18; component++) {
+    const sparseOffset = position * 6;
+    const denseOffset = active[position] * 6;
+    for (let component = 0; component < 6; component++) {
       if (Math.abs(sparseData[sparseOffset + component] - denseData[denseOffset + component]) > 1e-6) throw new Error(`L${level} sparse Squares packed value differs at active ${active[position]}, component ${component}.`);
     }
   }
@@ -172,17 +172,17 @@ function compareTransitionSquares(level, sparse, dense, fromSummary, toSummary) 
     const sparseData = sparse.instanceData[group];
     const denseData = dense.instanceData[group];
     for (let position = 0; position < active.length; position++) {
-      const sparseOffset = position * 18;
-      const denseOffset = active[position] * 18;
-      for (let component = 0; component < 18; component++) {
+      const sparseOffset = position * 6;
+      const denseOffset = active[position] * 6;
+      for (let component = 0; component < 6; component++) {
         if (Math.abs(sparseData[sparseOffset + component] - denseData[denseOffset + component]) > 1e-6) throw new Error(`L${level} transition Squares packed value differs.`);
       }
     }
   }
 }
 
-const mappedNamesDots = ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius'];
-const mappedNamesSquares = ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity'];
+const mappedNamesDots = ['rainRadius', 'strongRadius'];
+const mappedNamesSquares = ['rainWetMeanMmh', 'rainCoverage'];
 const testTimes = [0, 1 / 18, 5 / 18, 9 / 18, 13 / 18, 1, 0.123, 0.347, 0.777];
 let stableChecks = 0;
 for (const normalizedTime of testTimes) {

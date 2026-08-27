@@ -28,8 +28,8 @@ const topology = new GeographicLodTopology(undefined, { minLevel: 10, maxLevel: 
 const compactPyramid = new GeographicWeatherPyramid(Float32Array, topology);
 const genericPyramid = new GeographicWeatherPyramid(Float32Array, topology);
 const fields = ['totalWeight', 'rainWeightedSumMmh', 'rainMaxMmh'];
-const mappedDots = ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius'];
-const mappedSquares = ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity'];
+const mappedDots = ['rainRadius', 'strongRadius'];
+const mappedSquares = ['rainWetMeanMmh', 'rainCoverage'];
 
 function same(left, right, name) {
   if (left.length !== right.length) throw new Error(`${name}: length mismatch`);
@@ -47,6 +47,9 @@ function compare(level, compact, generic) {
   same(compact.potentialActiveIndices, generic.potentialActiveIndices, `L${level}.potentialActiveIndices`);
   for (const field of mappedDots) same(mapDotsWeatherSummary(compact)[field], mapDotsWeatherSummary(generic)[field], `L${level}.Dots.${field}`);
   for (const field of mappedSquares) same(mapSquaresWeatherSummary(compact)[field], mapSquaresWeatherSummary(generic)[field], `L${level}.Squares.${field}`);
+  if (mapDotsWeatherSummary(compact).layout !== 'rain-only' || 'stormRadius' in mapDotsWeatherSummary(compact)) throw new Error(`L${level}: compact Dots layout allocated hazards`);
+  if (mapSquaresWeatherSummary(compact).layout !== 'rain-only' || 'stormCoverage' in mapSquaresWeatherSummary(compact)) throw new Error(`L${level}: compact Squares layout allocated hazards`);
+  if (mapDotsWeatherSummary(generic).layout !== 'full' || mapSquaresWeatherSummary(generic).layout !== 'full') throw new Error(`L${level}: generic zero-hazard reference did not retain full layouts`);
   if ('stormCoverageWeight' in compact || 'hailCoverageWeight' in compact) throw new Error(`L${level}: compact profile allocated hazard fields`);
 }
 

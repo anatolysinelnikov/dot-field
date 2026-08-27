@@ -204,10 +204,10 @@ function compareSummary(level, optimized, dense) {
   }
   const dots = mapDotsWeatherSummary(optimized);
   const denseDots = mapDotsWeatherSummary(dense);
-  for (const name of ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius']) compare(`Dots.${name}`, dots[name], denseDots[name]);
+  for (const name of dots.layout === 'rain-only' ? ['rainRadius', 'strongRadius'] : ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius']) compare(`Dots.${name}`, dots[name], denseDots[name]);
   const squares = mapSquaresWeatherSummary(optimized);
   const denseSquares = mapSquaresWeatherSummary(dense);
-  for (const name of ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity']) compare(`Squares.${name}`, squares[name], denseSquares[name]);
+  for (const name of squares.layout === 'rain-only' ? ['rainWetMeanMmh', 'rainCoverage'] : ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity']) compare(`Squares.${name}`, squares[name], denseSquares[name]);
   for (const [name, result] of differences) {
     if (result.maximum > 0) console.log(`L${level} ${name}: maxError=${result.maximum} mismatches=${result.mismatches}`);
     if (result.maximum > 1e-6) throw new Error(`L${level} ${name} differs beyond Float32 tolerance.`);

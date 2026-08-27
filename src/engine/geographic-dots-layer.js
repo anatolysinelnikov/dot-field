@@ -16,7 +16,9 @@ const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1], storm: [1, 0, 1, 
 const INSTANCE_STRIDE = 8;
 const INSTANCE_BYTES = INSTANCE_STRIDE * Float32Array.BYTES_PER_ELEMENT;
 const WEATHER_TYPES = ['rain', 'strong', 'storm', 'hail'];
+const RAIN_ONLY_WEATHER_TYPES = ['rain', 'strong'];
 const RADIUS_KEYS = { rain: 'rainRadius', strong: 'strongRadius', storm: 'stormRadius', hail: 'hailRadius' };
+const EMPTY_INSTANCES = new Float32Array();
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 
@@ -70,14 +72,22 @@ function summaryCoverage(summary, weight, index) {
   return total > 0 ? weight / total : 0;
 }
 
-function makeMappedState(length, reusable) {
-  if (reusable?.rainRadius?.length === length) return reusable;
-  return {
-    rainRadius: new Float32Array(length),
-    strongRadius: new Float32Array(length),
-    stormRadius: new Float32Array(length),
-    hailRadius: new Float32Array(length)
-  };
+function mappedLayoutForSummary(summary) {
+  return summary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY ? 'rain-only' : 'full';
+}
+
+function weatherTypesForMapped(mapped) {
+  return mapped.layout === 'rain-only' ? RAIN_ONLY_WEATHER_TYPES : WEATHER_TYPES;
+}
+
+function makeMappedState(length, layout, reusable) {
+  if (reusable?.layout === layout && reusable.rainRadius?.length === length) return reusable;
+  const state = { layout, rainRadius: new Float32Array(length), strongRadius: new Float32Array(length) };
+  if (layout === 'full') {
+    state.stormRadius = new Float32Array(length);
+    state.hailRadius = new Float32Array(length);
+  }
+  return state;
 }
 
 // A sequence active set is static for a prepared topology. Aggregate summaries
@@ -104,14 +114,12 @@ function prepareMappedActiveSet(state, activeIndices) {
         for (const index of previous) {
           state.rainRadius[index] = 0;
           state.strongRadius[index] = 0;
-          state.stormRadius[index] = 0;
-          state.hailRadius[index] = 0;
+          if (state.layout === 'full') { state.stormRadius[index] = 0; state.hailRadius[index] = 0; }
         }
       } else if (state.mappingInitialized) {
         state.rainRadius.fill(0);
         state.strongRadius.fill(0);
-        state.stormRadius.fill(0);
-        state.hailRadius.fill(0);
+        if (state.layout === 'full') { state.stormRadius.fill(0); state.hailRadius.fill(0); }
       }
     }
   }
@@ -121,7 +129,8 @@ function prepareMappedActiveSet(state, activeIndices) {
 
 // Pure presentation mapping: physical summary values never feed a coarser LOD.
 export function mapDotsWeatherSummary(summary, reusable = null) {
-  const state = makeMappedState(summary.levelData.count, reusable);
+  const layout = mappedLayoutForSummary(summary);
+  const state = makeMappedState(summary.levelData.count, layout, reusable);
   const activeIndices = summary.potentialActiveIndices;
   prepareMappedActiveSet(state, activeIndices);
   const isDirectPointSummary = summary.level >= REFERENCE_GRID_LEVEL;
@@ -129,9 +138,23 @@ export function mapDotsWeatherSummary(summary, reusable = null) {
   const directHazard = { stormRadius: 0, hailRadius: 0 };
   const rainCoverageWeights = rainCoverageWeightForThreshold(summary, 0.05);
   const strongCoverageWeights = rainCoverageWeightForThreshold(summary, 2.5);
-  const hazardsUnavailable = summary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY;
   const count = activeIndices ? activeIndices.length : summary.levelData.count;
   const spacing = summary.levelData.spacing;
+  if (layout === 'rain-only') {
+    for (let position = 0; position < count; position++) {
+      const index = activeIndices ? activeIndices[position] : position;
+      const total = summary.totalWeight[index];
+      const rainCoverageWeight = rainCoverageWeights[index];
+      const rainCoverage = summaryCoverage(summary, rainCoverageWeight, index);
+      const wetMeanMmh = positiveMean(summary.rainWeightedSumMmh[index], rainCoverageWeight);
+      const strongCoverage = summaryCoverage(summary, strongCoverageWeights[index], index);
+      state.rainRadius[index] = spacing * Math.sqrt(rainCoverage) * rainMmhToRadiusFraction(wetMeanMmh);
+      state.strongRadius[index] = isDirectPointSummary
+        ? dotsStrongRainMmhToRadius(total > 0 ? summary.rainWeightedSumMmh[index] / total : 0, spacing)
+        : spacing * Math.sqrt(strongCoverage) * dotsStrongRainMmhToRadiusFraction(summary.rainMaxMmh[index]);
+    }
+    return state;
+  }
   for (let position = 0; position < count; position++) {
     const index = activeIndices ? activeIndices[position] : position;
     const total = summary.totalWeight[index];
@@ -148,11 +171,6 @@ export function mapDotsWeatherSummary(summary, reusable = null) {
         * dotsStrongRainMmhToRadiusFraction(summary.rainMaxMmh[index]);
     }
 
-    if (hazardsUnavailable) {
-      state.stormRadius[index] = 0;
-      state.hailRadius[index] = 0;
-      continue;
-    }
     const hailCoverageWeight = summary.hailCoverageWeight[index];
     const hailCoverage = summaryCoverage(summary, hailCoverageWeight, index);
     const hailMean = positiveMean(summary.hailWeightedSeverity[index], hailCoverageWeight);
@@ -683,9 +701,11 @@ export class GeographicDotsLayer {
       const level = this.levelData.level;
       const { frames0, frames1 } = this.temporal.levels.get(level);
       const levelData = this.topology.levels.get(level);
-      for (const type of WEATHER_TYPES) {
+      const types = weatherTypesForMapped(frames0.mapped[level]);
+      for (const type of types) {
         this.setInstances(type, buildSameLevelTemporalInstances(frames0.mapped[level], frames1.mapped[level], levelData, RADIUS_KEYS[type], this.instanceWriters[type]));
       }
+      for (const type of WEATHER_TYPES) if (!types.includes(type)) this.setInstances(type, EMPTY_INSTANCES);
     } else {
       const fromLevel = this.transition.fromLevelData.level;
       const toLevel = this.transition.toLevelData.level;
@@ -702,7 +722,9 @@ export class GeographicDotsLayer {
       const fromLevelData = this.topology.levels.get(fromLevel);
       const toLevelData = this.topology.levels.get(toLevel);
 
-      for (const type of WEATHER_TYPES) {
+      const types = weatherTypesForMapped(fromTemporal.frames0.mapped[fromLevel]);
+      if (types !== weatherTypesForMapped(toTemporal.frames0.mapped[toLevel])) throw new Error('Dots transition endpoint mapped layouts must match.');
+      for (const type of types) {
         const data = hierarchical
           ? buildHierarchicalTemporalInstances(
             this.temporal.levels.get(coarseLevel).frames0.mapped[coarseLevel],
@@ -728,6 +750,7 @@ export class GeographicDotsLayer {
           );
         this.setInstances(type, data);
       }
+      for (const type of WEATHER_TYPES) if (!types.includes(type)) this.setInstances(type, EMPTY_INSTANCES);
     }
 
     this.buffersDirty = true;

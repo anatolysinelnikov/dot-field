@@ -107,8 +107,8 @@ function compareSummary(level, fused, old) {
 }
 
 function compareMapped(level, fusedDots, oldDots, fusedSquares, oldSquares) {
-  const dot = ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius'];
-  const square = ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity'];
+  const dot = fusedDots.layout === 'rain-only' ? ['rainRadius', 'strongRadius'] : ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius'];
+  const square = fusedSquares.layout === 'rain-only' ? ['rainWetMeanMmh', 'rainCoverage'] : ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity'];
   for (const field of dot) {
     const error = maximumDifference(fusedDots[field], oldDots[field]);
     if (error > 1e-6) throw new Error(`L${level} mapped ${field} differs by ${error}`);
@@ -136,7 +136,7 @@ function makeSquares(pyramid, level, mapped0, mapped1) {
 }
 
 function comparePacked(level, fusedDots, oldDots, fusedSquares, oldSquares, summary) {
-  for (const type of ['rain', 'strong', 'storm', 'hail']) {
+  for (const type of fusedDots.temporal.levels.values().next().value.frames0.mapped[level].layout === 'rain-only' ? ['rain', 'strong'] : ['rain', 'strong', 'storm', 'hail']) {
     const error = maximumDifference(fusedDots.instances[type], oldDots.instances[type]);
     if (error > 1e-6) throw new Error(`L${level} packed Dots ${type} differs by ${error}`);
   }
@@ -145,9 +145,17 @@ function comparePacked(level, fusedDots, oldDots, fusedSquares, oldSquares, summ
   if (fusedSquares.instanceCounts[0] !== active.length) throw new Error(`L${level} packed Squares count is not the static active count`);
   const fusedData = fusedSquares.instanceData[0];
   const oldData = oldSquares.instanceData[0];
-  const length = fusedSquares.instanceCounts[0] * 18;
-  const error = maximumDifference(fusedData.subarray(0, length), oldData.subarray(0, length));
-  if (error > 1e-6) throw new Error(`L${level} packed Squares differs by ${error}`);
+  let error = 0;
+  const fusedRainOnly = fusedSquares.instanceLayouts[0] === 'rain-only';
+  const oldRainOnly = oldSquares.instanceLayouts[0] === 'rain-only';
+  for (let index = 0; index < fusedSquares.instanceCounts[0]; index++) {
+    const fusedOffset = index * (fusedRainOnly ? 6 : 18);
+    const oldOffset = index * (oldRainOnly ? 6 : 18);
+    const fusedRainFields = fusedRainOnly ? [0, 1, 2, 3, 4, 5] : [0, 1, 2, 3, 10, 11];
+    const oldRainFields = oldRainOnly ? [0, 1, 2, 3, 4, 5] : [0, 1, 2, 3, 10, 11];
+    for (let component = 0; component < 6; component++) error = Math.max(error, Math.abs(fusedData[fusedOffset + fusedRainFields[component]] - oldData[oldOffset + oldRainFields[component]]));
+  }
+  if (error > 1e-6) throw new Error(`L${level} packed Squares rain fields differ by ${error}`);
 }
 
 const testTimes = [...Array(time.count).keys()].map((index) => index / (time.count - 1)).concat([0.123, 0.347, 0.5, 0.777, 0.91]);

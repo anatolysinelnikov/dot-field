@@ -159,8 +159,8 @@ function compareRendererPacking(oldPyramid, optimizedPyramid, level, oldSummarie
   const optimizedDots = mapDotsWeatherSummary(optimizedSummaries[level]);
   const oldSquares = mapSquaresWeatherSummary(oldSummaries[level]);
   const optimizedSquares = mapSquaresWeatherSummary(optimizedSummaries[level]);
-  const mappedNames = ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius'];
-  const squareNames = ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity'];
+  const mappedNames = oldDots.layout === 'rain-only' ? ['rainRadius', 'strongRadius'] : ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius'];
+  const squareNames = oldSquares.layout === 'rain-only' ? ['rainWetMeanMmh', 'rainCoverage'] : ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity'];
   check(mappedNames.every((key) => sameArray(oldDots[key], optimizedDots[key])), `${name} L${level} Dots mapped values match exactly`);
   check(squareNames.every((key) => sameArray(oldSquares[key], optimizedSquares[key])), `${name} L${level} Squares mapped values match exactly`);
 
