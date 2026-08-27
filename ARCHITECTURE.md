@@ -9,7 +9,7 @@
 ## Project model
 
 This is a browser-native geographic weather prototype. It uses MapLibre GL JS in
-Globe projection, a validated compact real-data precipitation sequence, a globally
+Globe projection, a validated real-data precipitation sequence, a globally
 anchored Mercator sampling topology, and projection-aware MapLibre custom WebGL
 layers. The current active prototype exposes **RAW**, **Dots**, and **Squares**;
 RAW is the initial mode and Dots remains available as a selectable mode. Blur
@@ -38,10 +38,11 @@ real geographic weather sequence
 The scalar branch remains implemented for later reintroduction but is not part
 of the current active application/runtime path.
 
-The planned data/runtime sequence is: (1) viewport- and LOD-bounded Dots/Squares
-topology, (2) restoration of the full precipitation provider domain, (3) data
-chunking only if measured loading or memory requires it, and (4) reintroduction
-of Blur/Areas after viewport-windowed scalar reconstruction.
+The current data/runtime sequence is: (1) the full positive-rain provider
+domain from the local 19-frame sequence, (2) viewport- and LOD-bounded
+Dots/Squares topology, (3) data chunking only if measured loading or memory
+requires it, and (4) reintroduction of Blur/Areas after viewport-windowed
+scalar reconstruction.
 
 The spatial runtime separates provider/data bounds from the active render
 window and from sample identity:
@@ -59,9 +60,8 @@ Dots / Squares
 The viewport selects globally anchored canonical identities; it does not define
 or reseat them. Panning therefore cannot change a sample's canonical ID,
 canonical coordinates, Mercator position, geographic position, or weather value
-at a given time. The current `WEATHER_SUPPORT` remains the temporary compact
-data/support scope; restoration of the complete provider domain is a later
-task, not part of this windowing change.
+at a given time. The current `WEATHER_SUPPORT` is the full positive-rain extent
+of the local sequence, not a final global-provider contract.
 
 The intended provider boundary remains:
 
@@ -70,7 +70,7 @@ provider format -> validation -> temporal/spatial interpolation
 -> geographic sampling/reconstruction -> rendering
 ```
 
-`real-weather.js` owns CSV and compact-sequence validation, physical typed-array
+`real-weather.js` owns CSV and sequence validation, physical typed-array
 storage, and representation-independent geographic reconstruction. The active
 sequence samples physical `rainMmh` bilinearly from four geographic source nodes
 and linearly between its adjacent source frames; storm and hail are independent
@@ -162,18 +162,20 @@ application RAF so its progress still completes while paused.
 
 ## Real-data geographic adapter — `src/engine/real-weather.js`, `src/engine/geography.js`
 
-The active provider is the ignored local compact sequence at
+The active provider is the ignored local full-precipitation sequence at
 `data/generated/202608262200/metadata.json` plus `rain.f32`: 19 frames on the
-current 105 × 85 regular geographic grid, stored as little-endian Float32 in
-`[time][latitude][longitude]` order. The support was derived from the full
-source NetCDF by taking the exact-positive union across all 19 frames,
-labeling deterministic 8-connected components, selecting every component
-with a wet node inside the prior experiment support, taking the combined
-selected extent, and adding one source-grid cell on every side for
-`WEATHER_SUPPORT`. The binary crop adds one further source-grid cell on every
-side as the bilinear interpolation halo, so its inclusive source indices are
-`x=1167..1271`, `y=294..378`; the support indices are `x=1168..1270`,
-`y=295..377`. The selected wet extent is `x=1169..1269`, `y=296..376`.
+`1051 × 719` regular geographic crop, stored as little-endian Float32 in
+`[time][latitude][longitude]` order. Its support is derived from the exact
+positive union across every source node and all 19 frames, without connected
+component selection: 28,018 union wet nodes in 61 diagnostic 8-connected
+components span source indices `x=744..1790`, `y=296..1010`. One source-grid
+cell on every side gives `WEATHER_SUPPORT` indices `x=743..1791`,
+`y=295..1011`; the binary crop adds one further interpolation halo cell on
+every side, giving inclusive indices `x=742..1792`, `y=294..1012`.
+The source-grid geographic union bounds are 29.7600002289..71.5999984741°E
+and 41.8400001526..70.4000015259°N; support bounds are
+29.7199993134..71.6399993896°E and 41.7999992371..70.4400024414°N; crop
+bounds are 29.6800003052..71.6800003052°E and 41.7599983215..70.4800033569°N.
 Metadata validation requires the supported schema, metadata-driven dimensions
 with width/height/frame-count minimums, timestamps, binary layout/counts/byte
 count, positive regular axis spacing, mm/h normalized units, rain availability,
@@ -194,24 +196,26 @@ are unavailable (such as HTTP 404), with one concise warning; malformed
 metadata, inconsistent values/geometry, or an incorrect binary length fail
 visibly instead. `WEATHER_SUPPORT` is the stable grid-aligned support rectangle
 described above. The availability GeoJSON is diagnostic observation coverage
-only, not a forecast-rain mask. The deterministic globally anchored Mercator
-topology still derives all L10–L15 identities from this support. Dots and
-Squares materialize only the current snapped viewport topology window plus its
-coarse safety margin and the LOD dependency range required by the active
-display level. The runtime never intentionally materializes the complete
-provider-support topology. Changing either bound changes only which globally
-anchored identities are materialized, not grid anchoring, canonical identity,
-target spacing, LOD levels, or parent/child relationships. The compact source
-crop and converter are unchanged by viewport windowing.
+only, not a forecast-rain mask; later forecast frames may legitimately leave
+its footprint. The deterministic globally anchored Mercator topology still
+derives all L10–L15 identities from this support. Dots and Squares materialize
+only the current snapped viewport topology window plus its coarse safety margin
+and the LOD dependency range required by the active display level. The runtime
+never intentionally materializes the complete provider-support topology.
+Changing either bound changes only which globally anchored identities are
+materialized, not grid anchoring, canonical identity, target spacing, LOD
+levels, or parent/child relationships. The full local sequence retains every
+positive source node; the converter derives its crop in a first pass and
+streams the second-pass crop without loading all frames at once.
 
 ## RAW source-grid diagnostic — `src/engine/raw-weather-layer.js`
 
 The source-of-truth weather data is defined at geographic source nodes. RAW is a
 separate static diagnostic representation of the first sequence source frame on
-its 259 × 93 provider grid: it interprets each source-node value as a
+the `1051 × 719` exported provider grid: it interprets each source-node value as a
 piecewise-constant midpoint cell
 (half-spacing at the outer edges), draws raw `mmh > 0` cells as solid opaque
-blue. The compact sequence has no storm or hail, so RAW has no phenomenon
+blue. The rain-only sequence has no storm or hail, so RAW has no phenomenon
 markers. These RAW cell boundaries are diagnostic, not assumed meteorological
 boundaries. Values between source nodes use the shared bilinear reconstruction;
 RAW does not constrain Dots, Squares, Blur, or Areas. RAW never calls the
@@ -320,7 +324,7 @@ relative error bounds. Contribution weights remain Float64 because their
 topology is shared and their smaller memory cost does not justify a precision
 tradeoff.
 
-Storm and hail are zero throughout the active compact sequence and are never
+Storm and hail are zero throughout the active rain-only sequence and are never
 inferred from precipitation. Dots and Squares map these same summaries into
 renderer-owned compact presentation buffers;
 neither renderer recursively aggregates radii, colors, opacity, or hazard
@@ -402,10 +406,11 @@ Temporal updates dirty only groups whose mapped frame data changed.
 
 ## Fixed scalar reconstruction — `src/engine/geographic-scalar-lattice.js`
 
-Blur and Areas share one explicitly fixed `SCALAR_GRID_LEVEL = 14` lattice with
-104,850 vertices (466 × 225). This scalar level is independent of the discrete
-maximum display LOD, so enabling discrete L15 cannot change scalar texture
-dimensions, smoothing resolution, or reconstruction topology.
+Blur and Areas share one explicitly fixed `SCALAR_GRID_LEVEL = 14` lattice.
+The scalar lattice remains independent of the discrete maximum display LOD. With
+the current full-support bounds, its inactive fixed L14 implementation would
+contain 4,753,990 vertices (1,910 × 2,489); viewport-windowed scalar
+reconstruction is required before Blur/Areas can be safely reactivated.
 Its rows,
 columns, Mercator positions, and triangle indices are created once from the
 globally anchored geographic topology and cached for the life of the layer.
@@ -418,8 +423,8 @@ Each temporal keyframe evaluates the bilinearly reconstructed source field at
 those fixed L14 vertices using the prepared geographic field. Smooth state and
 coverage remapping are computed only for Areas with Smooth enabled. Both Blur
 and Areas pack the selected L14 channel values into two reusable RGBA32F
-textures sized exactly to the lattice (466 × 225); the fragment shader performs
-explicit four-texel bilinear sampling from those textures. The indexed mesh is
+textures sized exactly to the inactive support-derived lattice; the fragment
+shader performs explicit four-texel bilinear sampling from those textures. The indexed mesh is
 surface/projection tessellation only. The scalar mesh is a surface-attached
 MapLibre custom 3D layer.
 

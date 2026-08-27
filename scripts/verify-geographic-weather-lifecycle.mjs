@@ -1,7 +1,7 @@
 import fs from 'node:fs';
-import { setActiveWeatherField } from '../src/engine/geography.js';
+import { setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
-import { GeographicLodTopology, selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
+import { canonicalWindowFromMercatorBounds, GeographicLodTopology, lngLatToMercator } from '../src/engine/geographic-lod.js';
 import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
@@ -10,6 +10,9 @@ import { TEMPORAL_FRAME_COUNT, geographicTemporalFrameAt } from '../src/engine/g
 const FRAME_TIME = 0.347;
 const field = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
 setActiveWeatherField(field);
+const [centerX, centerY] = lngLatToMercator(...WEATHER_REGION.center);
+const testWindow = canonicalWindowFromMercatorBounds({ minX: centerX - 0.004, maxX: centerX + 0.004, minY: centerY - 0.004, maxY: centerY + 0.004 });
+const testTopology = new GeographicLodTopology(testWindow, { minLevel: 13, maxLevel: 15 });
 
 let failures = 0;
 function check(condition, message) {
@@ -18,7 +21,7 @@ function check(condition, message) {
 }
 
 function makeInstrumentedLayer(Layer) {
-  const pyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 15 }));
+  const pyramid = new GeographicWeatherPyramid(Float32Array, testTopology);
   const layer = new Layer(pyramid);
   layer.setActive(true);
   const stats = { evaluations: [], keyframes: [], dotBuilds: 0, packedLevels: [] };
@@ -56,7 +59,7 @@ function resetStats(stats) {
 }
 
 function samples(level) {
-  return selectMercatorGridSamples(level).samples;
+  return testTopology.samplesFor(level);
 }
 
 function typedStateEqual(left, right) {

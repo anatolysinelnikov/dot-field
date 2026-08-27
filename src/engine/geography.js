@@ -9,14 +9,14 @@ export const WEATHER_REGION = Object.freeze({
   initialZoom: 5.8
 });
 
-// The selected 8-connected positive-rain union across all 19 source frames
-// plus one full source-grid cell on every side. The binary sequence adds one
-// further source-grid cell as its bilinear interpolation halo.
+// The full positive-rain union across all 19 source frames plus one full
+// source-grid cell on every side. The binary sequence adds one further
+// source-grid cell as its bilinear interpolation halo.
 export const WEATHER_SUPPORT = Object.freeze({
-  west: 46.720001220703125,
-  east: 50.79999923706055,
+  west: 29.719999313354492,
+  east: 71.63999938964844,
   south: 41.79999923706055,
-  north: 45.08000183105469
+  north: 70.44000244140625
 });
 
 let activeWeatherField = null;

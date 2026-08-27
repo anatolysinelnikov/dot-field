@@ -1,12 +1,14 @@
 import fs from 'node:fs';
-import { prepareGeographicFieldFrame, setActiveWeatherField } from '../src/engine/geography.js';
+import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import {
   GeographicLodTopology,
   MAX_GRID_LEVEL,
   MIN_GRID_LEVEL,
+  canonicalWindowFromMercatorBounds,
   lodRangeForStableLevel,
+  lngLatToMercator,
   normalizeLodRange
 } from '../src/engine/geographic-lod.js';
 import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
@@ -177,7 +179,9 @@ function verifyWeatherInvariance(window, name) {
 
 const field = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
 setActiveWeatherField(field);
-const supportTopology = new GeographicLodTopology(undefined, { minLevel: MIN_GRID_LEVEL, maxLevel: MIN_GRID_LEVEL });
+const [centerX, centerY] = lngLatToMercator(...WEATHER_REGION.center);
+const testWindow = canonicalWindowFromMercatorBounds({ minX: centerX - 0.0015, maxX: centerX + 0.0015, minY: centerY - 0.0015, maxY: centerY + 0.0015 });
+const supportTopology = new GeographicLodTopology(testWindow, { minLevel: MIN_GRID_LEVEL, maxLevel: MIN_GRID_LEVEL });
 const windows = alignedInteriorWindows(supportTopology.canonicalWindow);
 const fullRange = normalizeLodRange({ minLevel: MIN_GRID_LEVEL, maxLevel: MAX_GRID_LEVEL });
 const fullPyramid = new GeographicWeatherPyramid(Float64Array, new GeographicLodTopology(windows[0], fullRange));

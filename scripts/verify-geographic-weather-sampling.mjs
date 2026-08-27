@@ -1,10 +1,10 @@
 import fs from 'node:fs';
-import { prepareGeographicFieldFrame, setActiveWeatherField } from '../src/engine/geography.js';
+import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
 import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH, aggregateWeatherSummary, evaluateDirectWeatherSummary } from '../src/engine/geographic-weather-pyramid.js';
 import { mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
-import { GeographicLodTopology } from '../src/engine/geographic-lod.js';
+import { canonicalWindowFromMercatorBounds, GeographicLodTopology, lngLatToMercator } from '../src/engine/geographic-lod.js';
 
 const TOLERANCE = 1e-12;
 let failures = 0;
@@ -38,6 +38,8 @@ function mappingError(left, right, names) {
 const field = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
 setActiveWeatherField(field);
 const frame = prepareGeographicFieldFrame(0.347);
+const [centerX, centerY] = lngLatToMercator(...WEATHER_REGION.center);
+const testWindow = canonicalWindowFromMercatorBounds({ minX: centerX - 0.004, maxX: centerX + 0.004, minY: centerY - 0.004, maxY: centerY + 0.004 });
 
 const points = [
   [field.longitudes[0], field.latitudes[0]],
@@ -104,7 +106,7 @@ check(field.isSamplingGeometryCompatible(geometry), 'prepared geometry records c
 check(!('rainMmh' in geometry) && !('storm' in geometry) && !('hail' in geometry), 'prepared geometry does not cache weather values');
 console.log(`batch stencil: ${geometry.baseIndex.length} samples, ${field.samplingGeometryBytes(geometry)} bytes, ${field.samplingGeometryBytes(geometry) / geometry.baseIndex.length} bytes/sample`);
 
-const fullTopology = new GeographicLodTopology(undefined, { minLevel: 10, maxLevel: 15 });
+const fullTopology = new GeographicLodTopology(testWindow, { minLevel: 10, maxLevel: 15 });
 const pyramid = new GeographicWeatherPyramid(Float64Array, fullTopology);
 const preparedSummaries = new Map();
 const directSummaryErrors = [];

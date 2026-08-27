@@ -21,6 +21,7 @@ import json
 import math
 import re
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 try:
@@ -40,15 +41,6 @@ FLOAT_FORMAT = ".9g"
 COORDINATE_FORMAT = ".17g"
 SEQUENCE_SCHEMA_VERSION = "dot-field-netcdf-sequence-v1"
 SEQUENCE_HALO_CELLS = 1
-# Exact source-grid-aligned WEATHER_SUPPORT in src/engine/geography.js.
-# Derived from the 8-connected union of all positive source values across the
-# 19-frame sequence, plus one full source-grid cell on every side.
-CURRENT_WEATHER_SUPPORT = {
-    "west": 46.720001220703125,
-    "east": 50.79999923706055,
-    "south": 41.79999923706055,
-    "north": 45.08000183105469,
-}
 DEFAULT_AVAILABILITY_PATH = Path("data/availability/available_region_latest.json")
 
 
@@ -369,25 +361,35 @@ def decode_times(time_variable: Any, time_values: np.ndarray) -> list[str]:
     return [decoded_timestamp(item) for item in timestamps]
 
 
-def source_grid_crop(longitudes: np.ndarray, latitudes: np.ndarray) -> dict[str, Any]:
-    support = CURRENT_WEATHER_SUPPORT
-    support_x0 = int(np.searchsorted(longitudes, support["west"], side="right") - 1)
-    support_x1 = int(np.searchsorted(longitudes, support["east"], side="left"))
-    support_y0 = int(np.searchsorted(latitudes, support["south"], side="right") - 1)
-    support_y1 = int(np.searchsorted(latitudes, support["north"], side="left"))
-    support_node_x0 = int(np.searchsorted(longitudes, support["west"], side="left"))
-    support_node_x1 = int(np.searchsorted(longitudes, support["east"], side="right") - 1)
-    support_node_y0 = int(np.searchsorted(latitudes, support["south"], side="left"))
-    support_node_y1 = int(np.searchsorted(latitudes, support["north"], side="right") - 1)
+def source_grid_crop(
+    longitudes: np.ndarray,
+    latitudes: np.ndarray,
+    union_nonzero: np.ndarray,
+) -> dict[str, Any]:
+    wet_y, wet_x = np.nonzero(union_nonzero)
+    if not len(wet_x):
+        raise ValueError("the full precipitation sequence contains no positive source values")
+    wet_x0 = int(wet_x.min())
+    wet_x1 = int(wet_x.max())
+    wet_y0 = int(wet_y.min())
+    wet_y1 = int(wet_y.max())
+    support_x0 = wet_x0 - SEQUENCE_HALO_CELLS
+    support_x1 = wet_x1 + SEQUENCE_HALO_CELLS
+    support_y0 = wet_y0 - SEQUENCE_HALO_CELLS
+    support_y1 = wet_y1 + SEQUENCE_HALO_CELLS
     x0 = support_x0 - SEQUENCE_HALO_CELLS
     x1 = support_x1 + SEQUENCE_HALO_CELLS
     y0 = support_y0 - SEQUENCE_HALO_CELLS
     y1 = support_y1 + SEQUENCE_HALO_CELLS
     if min(x0, y0) < 0 or x1 >= longitudes.size or y1 >= latitudes.size:
-        raise ValueError("current WEATHER_SUPPORT plus halo lies outside the source grid")
+        raise ValueError("derived WEATHER_SUPPORT plus halo lies outside the source grid")
     width = x1 - x0 + 1
     height = y1 - y0 + 1
     return {
+        "wet_x_start": wet_x0,
+        "wet_x_end": wet_x1,
+        "wet_y_start": wet_y0,
+        "wet_y_end": wet_y1,
         "x_start": x0,
         "x_end": x1,
         "y_start": y0,
@@ -396,10 +398,6 @@ def source_grid_crop(longitudes: np.ndarray, latitudes: np.ndarray) -> dict[str,
         "support_x_end": support_x1,
         "support_y_start": support_y0,
         "support_y_end": support_y1,
-        "support_node_x_start": support_node_x0,
-        "support_node_x_end": support_node_x1,
-        "support_node_y_start": support_node_y0,
-        "support_node_y_end": support_node_y1,
         "width": width,
         "height": height,
         "node_count": width * height,
@@ -410,6 +408,20 @@ def source_grid_crop(longitudes: np.ndarray, latitudes: np.ndarray) -> dict[str,
         "longitude_spacing": float(np.mean(np.diff(longitudes))),
         "latitude_spacing": float(np.mean(np.diff(latitudes))),
     }
+
+
+def read_validated_source_frame(precipitation: Any, time_index: int) -> np.ndarray:
+    masked_values = np.ma.asarray(precipitation[time_index, :, :])
+    values = np.asarray(masked_values.filled(np.nan), dtype=np.float64)
+    stats = source_stats(values)
+    if stats["missing_cells"]:
+        raise SystemExit(
+            f"timestep {time_index} contains {stats['missing_cells']} missing cells; "
+            "rain.f32 cannot preserve missing cells as a separate state"
+        )
+    if stats["negative_cells"]:
+        raise SystemExit(f"timestep {time_index} contains negative precipitation cells")
+    return values
 
 
 def load_observation_polygons(path: Path) -> tuple[list[list[list[float]]], dict[str, Any]]:
@@ -592,11 +604,11 @@ def sequence_metadata(
                 "y_start": crop["support_y_start"],
                 "y_end": crop["support_y_end"],
             },
-            "support_node_indices": {
-                "x_start": crop["support_node_x_start"],
-                "x_end": crop["support_node_x_end"],
-                "y_start": crop["support_node_y_start"],
-                "y_end": crop["support_node_y_end"],
+            "union_wet_indices": {
+                "x_start": crop["wet_x_start"],
+                "x_end": crop["wet_x_end"],
+                "y_start": crop["wet_y_start"],
+                "y_end": crop["wet_y_end"],
             },
             "crop_bounds": {
                 "west": crop["longitude_start"],
@@ -604,7 +616,12 @@ def sequence_metadata(
                 "south": crop["latitude_start"],
                 "north": crop["latitude_end"],
             },
-            "current_weather_support": CURRENT_WEATHER_SUPPORT,
+            "weather_support": {
+                "west": float(crop_longitudes[crop["support_x_start"] - crop["x_start"]]),
+                "east": float(crop_longitudes[crop["support_x_end"] - crop["x_start"]]),
+                "south": float(crop_latitudes[crop["support_y_start"] - crop["y_start"]]),
+                "north": float(crop_latitudes[crop["support_y_end"] - crop["y_start"]]),
+            },
             "halo_source_grid_cells": SEQUENCE_HALO_CELLS,
         },
         "binary": {
@@ -663,75 +680,74 @@ def convert_sequence(args: argparse.Namespace) -> int:
         latitudes = np.asarray(latitude_variable[:], dtype=np.float64)
         longitude_spacing, _ = coordinate_spacing(longitudes, "longitude")
         latitude_spacing, _ = coordinate_spacing(latitudes, "latitude")
-        crop = source_grid_crop(longitudes, latitudes)
+        union_nonzero = np.zeros((latitudes.size, longitudes.size), dtype=bool)
+        frame_statistics = []
+        for time_index, timestamp in enumerate(timestamps):
+            values = read_validated_source_frame(precipitation, time_index)
+            normalized = values * factor
+            frame_statistics.append(sequence_frame_statistics(normalized, longitudes, latitudes))
+            union_nonzero |= normalized > 0
+
+        crop = source_grid_crop(longitudes, latitudes, union_nonzero)
         crop["longitude_spacing"] = longitude_spacing
         crop["latitude_spacing"] = latitude_spacing
         crop_longitudes = longitudes[crop["x_start"]:crop["x_end"] + 1]
         crop_latitudes = latitudes[crop["y_start"]:crop["y_end"] + 1]
         crop_availability = points_in_polygon_union(crop_longitudes, crop_latitudes, polygons)
-        support_longitudes = longitudes[crop["support_node_x_start"]:crop["support_node_x_end"] + 1]
-        support_latitudes = latitudes[crop["support_node_y_start"]:crop["support_node_y_end"] + 1]
+        support_longitudes = longitudes[crop["support_x_start"]:crop["support_x_end"] + 1]
+        support_latitudes = latitudes[crop["support_y_start"]:crop["support_y_end"] + 1]
         support_availability = points_in_polygon_union(support_longitudes, support_latitudes, polygons)
-        sequence = np.empty((len(timestamps), crop["height"], crop["width"]), dtype=np.float32)
-        frame_statistics = []
         per_frame_coverage = []
-        union_nonzero = np.zeros((crop["height"], crop["width"]), dtype=bool)
-        for time_index, timestamp in enumerate(timestamps):
-            masked_values = np.ma.asarray(
-                precipitation[time_index, crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1]
-            )
-            values = np.asarray(masked_values.filled(np.nan), dtype=np.float64)
-            raw_stats = source_stats(values)
-            if raw_stats["missing_cells"]:
-                raise SystemExit(
-                    f"timestep {time_index} contains {raw_stats['missing_cells']} missing cells; "
-                    "rain.f32 cannot preserve missing values as a separate state"
-                )
-            if raw_stats["negative_cells"]:
-                raise SystemExit(f"timestep {time_index} contains negative precipitation cells")
-            normalized = values * factor
-            sequence[time_index] = normalized.astype("<f4")
-            frame_statistics.append(sequence_frame_statistics(normalized, crop_longitudes, crop_latitudes))
-            nonzero = normalized > 0
-            union_nonzero |= nonzero
-            nonzero_y, nonzero_x = np.nonzero(nonzero)
-            inside = crop_availability[nonzero_y, nonzero_x]
-            per_frame_coverage.append({
-                "timestamp": timestamp,
-                "non_zero_nodes": int(nonzero.sum()),
-                "inside_observation": int(inside.sum()),
-                "outside_observation": int((~inside).sum()),
-            })
-
         output_dir = args.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         rain_path = output_dir / "rain.f32"
         metadata_path = output_dir / "metadata.json"
-        np.asarray(sequence, dtype="<f4").tofile(rain_path)
-        metadata = sequence_metadata(
-            source,
-            dataset,
-            precipitation,
-            time_variable,
-            timestamps,
-            crop,
-            frame_statistics,
-            union_nonzero,
-            crop_longitudes,
-            crop_latitudes,
-            original_units,
-            unit_basis,
-            conversion,
-            observation,
-            int(support_availability.sum()),
-            int(support_availability.size),
-            int(crop_availability.sum()),
-            per_frame_coverage[0],
-            per_frame_coverage,
-        )
-        with metadata_path.open("w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, indent=2, sort_keys=True)
-            handle.write("\n")
+        with NamedTemporaryFile(dir=output_dir, prefix=".rain.", suffix=".f32.tmp", delete=False) as temporary:
+            temporary_rain_path = Path(temporary.name)
+        try:
+            with temporary_rain_path.open("wb") as rain_handle:
+                for time_index, timestamp in enumerate(timestamps):
+                    values = read_validated_source_frame(precipitation, time_index)
+                    normalized = values * factor
+                    crop_values = normalized[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1]
+                    np.asarray(crop_values, dtype="<f4", order="C").tofile(rain_handle)
+                    nonzero = crop_values > 0
+                    nonzero_y, nonzero_x = np.nonzero(nonzero)
+                    inside = crop_availability[nonzero_y, nonzero_x]
+                    per_frame_coverage.append({
+                        "timestamp": timestamp,
+                        "non_zero_nodes": int(nonzero.sum()),
+                        "inside_observation": int(inside.sum()),
+                        "outside_observation": int((~inside).sum()),
+                    })
+
+            metadata = sequence_metadata(
+                source,
+                dataset,
+                precipitation,
+                time_variable,
+                timestamps,
+                crop,
+                frame_statistics,
+                union_nonzero[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1],
+                crop_longitudes,
+                crop_latitudes,
+                original_units,
+                unit_basis,
+                conversion,
+                observation,
+                int(support_availability.sum()),
+                int(support_availability.size),
+                int(crop_availability.sum()),
+                per_frame_coverage[0],
+                per_frame_coverage,
+            )
+            temporary_rain_path.replace(rain_path)
+            with metadata_path.open("w", encoding="utf-8") as handle:
+                json.dump(metadata, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+        finally:
+            temporary_rain_path.unlink(missing_ok=True)
 
     print(f"wrote {rain_path} ({metadata['binary']['byte_count']} bytes)")
     print(f"wrote {metadata_path}")

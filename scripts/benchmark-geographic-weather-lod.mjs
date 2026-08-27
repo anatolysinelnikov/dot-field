@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import { performance } from 'node:perf_hooks';
-import { prepareGeographicFieldFrame, setActiveWeatherField } from '../src/engine/geography.js';
+import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
-import { GeographicLodTopology, selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
+import { canonicalWindowFromMercatorBounds, GeographicLodTopology, lngLatToMercator } from '../src/engine/geographic-lod.js';
 import { evaluateDirectWeatherSummary, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
@@ -11,6 +11,9 @@ const FRAME_TIME = 0.347;
 const TRANSITIONS = [[13, 14], [14, 15]];
 const weather = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
 setActiveWeatherField(weather);
+const [centerX, centerY] = lngLatToMercator(...WEATHER_REGION.center);
+const testWindow = canonicalWindowFromMercatorBounds({ minX: centerX - 0.004, maxX: centerX + 0.004, minY: centerY - 0.004, maxY: centerY + 0.004 });
+const testTopology = new GeographicLodTopology(testWindow, { minLevel: 13, maxLevel: 15 });
 
 function median(values) {
   const sorted = [...values].sort((left, right) => left - right);
@@ -18,7 +21,7 @@ function median(values) {
 }
 
 function benchmarkDirectLevel(level) {
-  const pyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 15 }));
+  const pyramid = new GeographicWeatherPyramid(Float32Array, testTopology);
   const levelData = pyramid.levels.get(level);
   const frame = prepareGeographicFieldFrame(0.347);
   const started = performance.now();
@@ -57,11 +60,11 @@ for (const level of [13, 14, 15]) {
 }
 
 function metricLayer(Layer, fromLevel, toLevel) {
-  const pyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 15 }));
+  const pyramid = new GeographicWeatherPyramid(Float32Array, testTopology);
   const layer = new Layer(pyramid);
   layer.setActive(true);
-  const fromSamples = selectMercatorGridSamples(fromLevel).samples;
-  const toSamples = selectMercatorGridSamples(toLevel).samples;
+  const fromSamples = testTopology.samplesFor(fromLevel);
+  const toSamples = testTopology.samplesFor(toLevel);
   const metrics = {
     evaluations: 0,
     physicalSamples: 0,

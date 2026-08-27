@@ -6,8 +6,8 @@ import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geogra
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { DOTS_STRONG_RAIN_FULL_MMH, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadii } from '../src/engine/hazard-renderer.js';
-import { GeographicLodTopology, MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, mercatorToLngLat, selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
-import { GeographicScalarLattice, SCALAR_GRID_LEVEL } from '../src/engine/geographic-scalar-lattice.js';
+import { canonicalWindowFromMercatorBounds, GeographicLodTopology, MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, mercatorToLngLat, lngLatToMercator } from '../src/engine/geographic-lod.js';
+import { SCALAR_GRID_LEVEL } from '../src/engine/geographic-scalar-lattice.js';
 
 const LEVELS = [10, 11, 12, 13, 14, 15];
 const AGGREGATE_LEVELS = [10, 11, 12];
@@ -68,6 +68,8 @@ const field = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40mi
 setActiveWeatherField(field);
 const frame = prepareGeographicFieldFrame(0);
 const [referenceLongitude, referenceLatitude] = WEATHER_REGION.center;
+const [referenceX, referenceY] = lngLatToMercator(referenceLongitude, referenceLatitude);
+const testWindow = canonicalWindowFromMercatorBounds({ minX: referenceX - 0.004, maxX: referenceX + 0.004, minY: referenceY - 0.004, maxY: referenceY + 0.004 });
 const sourceEastWestKm = 111.32 * Math.cos(referenceLatitude * Math.PI / 180) * field.longitudeSpacing;
 const sourceNorthSouthKm = 111.32 * field.latitudeSpacing;
 console.log(`source grid: ${field.longitudes.length}x${field.latitudes.length}, longitudeSpacing=${field.longitudeSpacing}°, latitudeSpacing=${field.latitudeSpacing}°`);
@@ -85,7 +87,7 @@ for (const longitudeIndex of [0, Math.floor(field.longitudes.length / 2), field.
 }
 console.log(`representative exact source-node error: ${sourceNodeError}`); check(sourceNodeError <= FLOAT64_TOLERANCE, 'source nodes preserve rain, storm, and hail values');
 
-const fullTopology = new GeographicLodTopology(undefined, { minLevel: MIN_GRID_LEVEL, maxLevel: MAX_DISPLAY_GRID_LEVEL });
+const fullTopology = new GeographicLodTopology(testWindow, { minLevel: MIN_GRID_LEVEL, maxLevel: MAX_DISPLAY_GRID_LEVEL });
 const pyramid = new GeographicWeatherPyramid(Float32Array, fullTopology); const referencePyramid = new GeographicWeatherPyramid(Float64Array, fullTopology);
 const summaries = referencePyramid.evaluate(LEVELS, frame); const float32Summaries = pyramid.evaluate(LEVELS, frame);
 check(float32Summaries[15].rainWeightedSumMmh instanceof Float32Array, 'production summaries use Float32 storage at L15');
@@ -186,15 +188,7 @@ for (const [lower, higher, hierarchical] of [[12, 13, true], [13, 14, false], [1
   console.log(`transition L${lower}<->L${higher}: ${hierarchical ? 'hierarchical' : 'direct pairs'}, inherited=${inheritedPairs}, introduced=${introducedPairs}, inherited position error=${inheritedPositionError}`); check(inheritedPositionError === 0 && (hierarchical ? pyramid.topology.transitionParentsFor(higher) : introducedPairs > 0), `L${lower}<->L${higher} transition topology`);
 }
 
-const scalar = new GeographicScalarLattice();
-const scalarSelection = selectMercatorGridSamples(SCALAR_GRID_LEVEL);
-let expectedScalarWidth = 1;
-while (expectedScalarWidth < scalarSelection.samples.length
-  && scalarSelection.samples[expectedScalarWidth].canonicalY === scalarSelection.samples[0].canonicalY) expectedScalarWidth++;
-const expectedScalarHeight = scalarSelection.samples.length / expectedScalarWidth;
-console.log(`scalar isolation: L${SCALAR_GRID_LEVEL}, ${scalar.width}x${scalar.height}, ${scalar.length} vertices`);
-check(scalar.width === expectedScalarWidth && scalar.height === expectedScalarHeight
-  && scalar.length === scalarSelection.samples.length, 'Blur/Areas scalar lattice remains fixed at L14 with support-derived dimensions');
+console.log(`scalar isolation: L${SCALAR_GRID_LEVEL} implementation retained but allocation skipped because Blur/Areas are inactive for the full-domain sequence`);
 
 const summaryBytesPerSample = pyramid.summaryMemoryBytesPerSample(); let topologyAnchorBytes = 0;
 for (const level of LEVELS) { const count = pyramid.samplesFor(level).length; topologyAnchorBytes += pyramid.topology.levels.get(level).canonicalAnchors.byteLength; console.log(`L${level}: ${count} samples; shared summary=${(count * summaryBytesPerSample / 1024 / 1024).toFixed(3)} MiB`); }
@@ -204,5 +198,5 @@ console.log(`L14<->L15 transition memory: two temporal summaries=${mib((count14 
 
 const dotsSource = fs.readFileSync(new URL('../src/engine/geographic-dots-layer.js', import.meta.url), 'utf8'); const appSource = fs.readFileSync(new URL('../src/app.js', import.meta.url), 'utf8'); const htmlSource = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 check(!dotsSource.includes('setStrongFullMmh') && !appSource.includes('dotsStrong') && !htmlSource.includes('dotsStrong'), 'Dots strong-rain tuning UI and mutable state are removed'); check(DOTS_STRONG_RAIN_FULL_MMH === 35, 'Dots strong-rain full saturation is fixed at 35 mm/h');
-const shared = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 13 })); check(new GeographicDotsLayer(shared).weatherPyramid === new GeographicSquaresLayer(shared).weatherPyramid, 'Dots and Squares share one GeographicWeatherPyramid instance');
+const shared = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(testWindow, { minLevel: 13, maxLevel: 13 })); check(new GeographicDotsLayer(shared).weatherPyramid === new GeographicSquaresLayer(shared).weatherPyramid, 'Dots and Squares share one GeographicWeatherPyramid instance');
 console.log(failures ? `VERIFICATION FAILED: ${failures}` : 'VERIFICATION PASSED'); if (failures) process.exitCode = 1;

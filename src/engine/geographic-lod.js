@@ -91,7 +91,7 @@ export function normalizeCanonicalWindow(window = canonicalSupport) {
     const snappedMin = Math.max(supportMin, Math.floor(rawMin / COARSE_CANONICAL_STEP) * COARSE_CANONICAL_STEP);
     const snappedMax = Math.min(supportMax, Math.ceil(rawMax / COARSE_CANONICAL_STEP) * COARSE_CANONICAL_STEP);
     if (snappedMax >= snappedMin) return [snappedMin, snappedMax];
-    // A camera can be panned entirely outside the finite compact data domain.
+    // A camera can be panned entirely outside the finite provider data domain.
     // Keep a valid one-cell topology at the nearest supported edge so an
     // off-domain viewport never creates an invalid or exception path.
     if (rawMax < supportMin) {
