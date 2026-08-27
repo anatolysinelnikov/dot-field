@@ -21,6 +21,7 @@ const COARSE_CANONICAL_STEP = 2 ** (MAX_GRID_LEVEL - MIN_GRID_LEVEL);
 const COARSE_MERCATOR_STEP = 1 / 2 ** MIN_GRID_LEVEL;
 const DEFAULT_TOPOLOGY_MIN_LEVEL = 13;
 const DEFAULT_TOPOLOGY_MAX_LEVEL = 13;
+const now = () => globalThis.performance?.now?.() ?? Date.now();
 
 export function lngLatToMercator(longitude, latitude) {
   const clampedLatitude = clamp(latitude, -MAX_MERCATOR_LATITUDE, MAX_MERCATOR_LATITUDE);
@@ -33,9 +34,17 @@ export function lngLatToMercator(longitude, latitude) {
 
 export function mercatorToLngLat(x, y) {
   return [
-    x * 360 - 180,
-    Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI
+    mercatorXToLongitude(x),
+    mercatorYToLatitude(y)
   ];
+}
+
+export function mercatorXToLongitude(x) {
+  return x * 360 - 180;
+}
+
+export function mercatorYToLatitude(y) {
+  return Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI;
 }
 
 function latitudeCosine(latitude) {
@@ -169,7 +178,7 @@ export function zoomToMercatorGridLevel(zoom) {
   return clamp(Math.round(desired), MIN_GRID_LEVEL, MAX_DISPLAY_GRID_LEVEL);
 }
 
-export function selectMercatorGridSamples(level, canonicalWindow = canonicalSupport) {
+export function selectMercatorGridLevel(level, canonicalWindow = canonicalSupport) {
   const boundedLevel = clamp(level, MIN_GRID_LEVEL, MAX_GRID_LEVEL);
   const window = normalizeCanonicalWindow(canonicalWindow);
   const gridSize = 2 ** boundedLevel;
@@ -179,96 +188,131 @@ export function selectMercatorGridSamples(level, canonicalWindow = canonicalSupp
   const maxI = Math.floor(window.maxX / identityScale);
   const minJ = Math.ceil(window.minY / identityScale);
   const maxJ = Math.floor(window.maxY / identityScale);
-  const samples = [];
-
-  for (let j = minJ; j <= maxJ; j++) {
-    for (let i = minI; i <= maxI; i++) {
-      const x = i * step;
-      const y = j * step;
-      const canonicalX = i * identityScale;
-      const canonicalY = j * identityScale;
-      samples.push({
-        // Max-resolution integer coordinates give a single compact identity
-        // to a point shared by every coarser dyadic level.
-        id: `${canonicalX}:${canonicalY}`,
-        canonicalX,
-        canonicalY,
-        mercator: [x, y],
-        lngLat: mercatorToLngLat(x, y),
-        level: boundedLevel,
-        spacing: step
-      });
-    }
+  const width = Math.max(0, maxI - minI + 1);
+  const height = Math.max(0, maxJ - minJ + 1);
+  const count = width * height;
+  const canonicalAnchors = new Float64Array(count * 2);
+  for (let index = 0; index < count; index++) {
+    const i = minI + index % width;
+    const j = minJ + Math.floor(index / width);
+    canonicalAnchors[index * 2] = i * step;
+    canonicalAnchors[index * 2 + 1] = j * step;
   }
-  return { samples, level: boundedLevel, gridSize, spacing: step };
+  return Object.freeze({
+    level: boundedLevel,
+    spacing: step,
+    gridSize,
+    identityScale,
+    minI,
+    maxI,
+    minJ,
+    maxJ,
+    width,
+    height,
+    count,
+    canonicalWindow: window,
+    canonicalAnchors
+  });
 }
 
-function parentIdFor(child, bounds, parentStep) {
-  const x = Math.max(bounds.minX, Math.min(bounds.maxX, Math.floor(child.canonicalX / parentStep) * parentStep));
-  const y = Math.max(bounds.minY, Math.min(bounds.maxY, Math.floor(child.canonicalY / parentStep) * parentStep));
-  return `${x}:${y}`;
+export const selectMercatorGridSamples = selectMercatorGridLevel;
+
+export function canonicalCoordinatesForIndex(levelData, index) {
+  if (!Number.isInteger(index) || index < 0 || index >= levelData.count) throw new Error('Level sample index is out of bounds.');
+  return {
+    canonicalX: canonicalXForIndex(levelData, index),
+    canonicalY: canonicalYForIndex(levelData, index)
+  };
+}
+
+export function canonicalXForIndex(levelData, index) {
+  return (levelData.minI + index % levelData.width) * levelData.identityScale;
+}
+
+export function canonicalYForIndex(levelData, index) {
+  return (levelData.minJ + Math.floor(index / levelData.width)) * levelData.identityScale;
+}
+
+export function canonicalIndexForCoordinates(levelData, canonicalX, canonicalY) {
+  const i = canonicalX / levelData.identityScale;
+  const j = canonicalY / levelData.identityScale;
+  if (!Number.isInteger(i) || !Number.isInteger(j)
+    || i < levelData.minI || i > levelData.maxI || j < levelData.minJ || j > levelData.maxJ) return -1;
+  return (j - levelData.minJ) * levelData.width + i - levelData.minI;
+}
+
+function parentIndexForChild(fine, coarse, childIndex) {
+  const parentStep = coarse.identityScale;
+  const childI = canonicalXForIndex(fine, childIndex) / parentStep;
+  const childJ = canonicalYForIndex(fine, childIndex) / parentStep;
+  const parentI = Math.max(coarse.minI, Math.min(coarse.maxI, Math.floor(childI)));
+  const parentJ = Math.max(coarse.minJ, Math.min(coarse.maxJ, Math.floor(childJ)));
+  return (parentJ - coarse.minJ) * coarse.width + parentI - coarse.minI;
 }
 
 function buildTransitionParents(fine, coarse) {
-  const samplesById = new Map(coarse.samples.map((sample, index) => [sample.id, index]));
-  const bounds = {
-    minX: coarse.samples[0].canonicalX,
-    maxX: coarse.samples[coarse.samples.length - 1].canonicalX,
-    minY: coarse.samples[0].canonicalY,
-    maxY: coarse.samples[coarse.samples.length - 1].canonicalY
-  };
-  const parentStep = 2 ** (MAX_GRID_LEVEL - coarse.level);
-  const childIndices = Array.from({ length: coarse.samples.length }, () => []);
-  const parentIndexByChild = new Int32Array(fine.samples.length);
-  for (let childIndex = 0; childIndex < fine.samples.length; childIndex++) {
-    const parentIndex = samplesById.get(parentIdFor(fine.samples[childIndex], bounds, parentStep));
-    if (parentIndex === undefined) throw new Error('Fine Mercator sample has no deterministic transition parent.');
-    childIndices[parentIndex].push(childIndex);
+  const parentIndexByChild = new Int32Array(fine.count);
+  const childCounts = new Uint32Array(coarse.count);
+  for (let childIndex = 0; childIndex < fine.count; childIndex++) {
+    const parentIndex = parentIndexForChild(fine, coarse, childIndex);
+    if (parentIndex < 0 || parentIndex >= coarse.count) throw new Error('Fine Mercator sample has no deterministic transition parent.');
+    childCounts[parentIndex]++;
     parentIndexByChild[childIndex] = parentIndex;
   }
-  return { childIndices, parentIndexByChild };
+  const childOffsets = new Uint32Array(coarse.count + 1);
+  for (let parentIndex = 0; parentIndex < coarse.count; parentIndex++) childOffsets[parentIndex + 1] = childOffsets[parentIndex] + childCounts[parentIndex];
+  const childIndices = new Uint32Array(fine.count);
+  const cursors = childOffsets.slice(0, -1);
+  for (let childIndex = 0; childIndex < fine.count; childIndex++) childIndices[cursors[parentIndexByChild[childIndex]]++] = childIndex;
+  return { childOffsets, childIndices, parentIndexByChild };
 }
 
 function buildDirectPairs(lower, higher) {
-  const higherIndices = new Map(higher.samples.map((sample, index) => [sample.id, index]));
-  const lowerIndices = new Map(lower.samples.map((sample, index) => [sample.id, index]));
-  const pairs = [];
-  for (let index = 0; index < lower.samples.length; index++) pairs.push(index, higherIndices.get(lower.samples[index].id) ?? -1);
-  for (let index = 0; index < higher.samples.length; index++) {
-    if (!lowerIndices.has(higher.samples[index].id)) pairs.push(-1, index);
+  const pairs = new Int32Array((lower.count + higher.count) * 2);
+  let cursor = 0;
+  for (let index = 0; index < lower.count; index++) {
+    const canonicalX = canonicalXForIndex(lower, index);
+    const canonicalY = canonicalYForIndex(lower, index);
+    pairs[cursor++] = index;
+    pairs[cursor++] = canonicalIndexForCoordinates(higher, canonicalX, canonicalY);
   }
-  return new Int32Array(pairs);
+  for (let index = 0; index < higher.count; index++) {
+    const canonicalX = canonicalXForIndex(higher, index);
+    const canonicalY = canonicalYForIndex(higher, index);
+    if (canonicalIndexForCoordinates(lower, canonicalX, canonicalY) >= 0) continue;
+    pairs[cursor++] = -1;
+    pairs[cursor++] = index;
+  }
+  return pairs.slice(0, cursor);
 }
 
 // Canonical positions and one-parent ownership for visual LOD morphs. This is
 // deliberately independent from centered weather-summary contributions.
 export class GeographicLodTopology {
   constructor(canonicalWindow = canonicalSupport, levelRange) {
+    const topologyStarted = now();
     this.canonicalWindow = normalizeCanonicalWindow(canonicalWindow);
     this.levelRange = normalizeLodRange(levelRange);
     this.levels = new Map();
+    this.constructionTimings = { levels: [], transitionParentsMs: 0, directPairsMs: 0, totalMs: 0 };
     for (let level = this.levelRange.minLevel; level <= this.levelRange.maxLevel; level++) {
-      const selection = selectMercatorGridSamples(level, this.canonicalWindow);
-      const canonicalAnchors = new Float64Array(selection.samples.length * 2);
-      for (let index = 0; index < selection.samples.length; index++) {
-        canonicalAnchors[index * 2] = selection.samples[index].mercator[0];
-        canonicalAnchors[index * 2 + 1] = selection.samples[index].mercator[1];
-      }
-      this.levels.set(level, {
-        level,
-        samples: selection.samples,
-        samplesById: new Map(selection.samples.map((sample, index) => [sample.id, index])),
-        canonicalAnchors
-      });
+      const levelStarted = now();
+      this.levels.set(level, selectMercatorGridLevel(level, this.canonicalWindow));
+      this.constructionTimings.levels.push({ level, ms: now() - levelStarted });
     }
     this.transitionParents = new Map();
+    const transitionStarted = now();
     for (let level = this.levelRange.minLevel + 1; level <= this.levelRange.maxLevel; level++) {
       this.transitionParents.set(level, buildTransitionParents(this.levels.get(level), this.levels.get(level - 1)));
     }
+    this.constructionTimings.transitionParentsMs = now() - transitionStarted;
     this.directPairs = new Map();
+    const directPairsStarted = now();
     for (let level = this.levelRange.minLevel + 1; level <= this.levelRange.maxLevel; level++) {
       this.directPairs.set(level, buildDirectPairs(this.levels.get(level - 1), this.levels.get(level)));
     }
+    this.constructionTimings.directPairsMs = now() - directPairsStarted;
+    this.constructionTimings.totalMs = now() - topologyStarted;
   }
 
   levelDataFor(level) {
@@ -277,7 +321,6 @@ export class GeographicLodTopology {
     return levelData;
   }
 
-  samplesFor(level) { return this.levelDataFor(level).samples; }
   transitionParentsFor(fineLevel) {
     const parents = this.transitionParents.get(fineLevel);
     if (!parents) throw new Error(`LOD transition parent data for L${fineLevel} is not materialized.`);

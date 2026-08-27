@@ -42,7 +42,7 @@ function benchmarkDirectLevel(level) {
   }
   return {
     level,
-    samples: levelData.samples.length,
+    samples: levelData.count,
     stencilPreparationMs,
     stencilBytes,
     normalMs: median(normalTimes),
@@ -63,8 +63,8 @@ function metricLayer(Layer, fromLevel, toLevel) {
   const pyramid = new GeographicWeatherPyramid(Float32Array, testTopology);
   const layer = new Layer(pyramid);
   layer.setActive(true);
-  const fromSamples = testTopology.samplesFor(fromLevel);
-  const toSamples = testTopology.samplesFor(toLevel);
+  const fromLevelData = testTopology.levelDataFor(fromLevel);
+  const toLevelData = testTopology.levelDataFor(toLevel);
   const metrics = {
     evaluations: 0,
     physicalSamples: 0,
@@ -86,7 +86,7 @@ function metricLayer(Layer, fromLevel, toLevel) {
     const result = evaluate(...args);
     metrics.evaluations++;
     metrics.physicalMs += performance.now() - started;
-    for (const level of new Set(args[0])) metrics.physicalSamples += pyramid.samplesFor(level).length;
+    for (const level of new Set(args[0])) metrics.physicalSamples += pyramid.levelDataFor(level).count;
     return result;
   };
   const prepareSamplingGeometry = pyramid.prepareSamplingGeometry.bind(pyramid);
@@ -103,13 +103,13 @@ function metricLayer(Layer, fromLevel, toLevel) {
     const result = evaluateKeyframe(...args);
     metrics.keyframes++;
     metrics.keyframeMs += performance.now() - started;
-    metrics.mappedSamples += pyramid.samplesFor(args[0]).length;
+    metrics.mappedSamples += pyramid.levelDataFor(args[0]).count;
     return result;
   };
   if (Layer === GeographicSquaresLayer) {
     const buildGroup = layer.buildGroup.bind(layer);
     layer.buildGroup = (...args) => {
-      metrics.packingBytes += pyramid.samplesFor(args[1]).length * 18 * Float32Array.BYTES_PER_ELEMENT;
+      metrics.packingBytes += pyramid.levelDataFor(args[1]).count * 18 * Float32Array.BYTES_PER_ELEMENT;
       return buildGroup(...args);
     };
   }
@@ -125,7 +125,7 @@ function metricLayer(Layer, fromLevel, toLevel) {
     return result;
   };
 
-  layer.setSamples(fromSamples, FRAME_TIME);
+  layer.setLevelData(fromLevelData, FRAME_TIME);
   layer.instanceBuffers = Layer === GeographicSquaresLayer ? [{}, {}] : { rain: {}, strong: {}, storm: {}, hail: {} };
   layer.uploadBuffers({
     ARRAY_BUFFER: 1,
@@ -148,7 +148,7 @@ function metricLayer(Layer, fromLevel, toLevel) {
   metrics.gpuUploadBytes = 0;
   metrics.gpuAllocationBytes = 0;
   const startTime = performance.now();
-  layer.setTransition(fromSamples, toSamples, FRAME_TIME, 0);
+  layer.setTransition(fromLevelData, toLevelData, FRAME_TIME, 0);
   const startMs = performance.now() - startTime;
   layer.uploadBuffers({
     ARRAY_BUFFER: 1,
@@ -173,7 +173,7 @@ function metricLayer(Layer, fromLevel, toLevel) {
   metrics.gpuUploadBytes = 0;
   metrics.gpuAllocationBytes = 0;
   const completionTime = performance.now();
-  layer.setSamples(toSamples, FRAME_TIME);
+  layer.setLevelData(toLevelData, FRAME_TIME);
   layer.uploadBuffers({
     ARRAY_BUFFER: 1,
     STREAM_DRAW: 2,

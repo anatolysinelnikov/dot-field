@@ -79,7 +79,7 @@ function compareSummary(level, fused, old) {
   let classificationChanges = 0;
   for (let threshold = 0; threshold < RAIN_COVERAGE_THRESHOLDS_MMH.length; threshold++) {
     maximum = Math.max(maximum, maximumDifference(fused.rainCoverageWeight[threshold], old.rainCoverageWeight[threshold]));
-    for (let index = 0; index < fused.samples.length; index++) {
+    for (let index = 0; index < fused.levelData.count; index++) {
       if ((fused.rainCoverageWeight[threshold][index] > 0) !== (old.rainCoverageWeight[threshold][index] > 0)) classificationChanges++;
     }
   }
@@ -102,7 +102,7 @@ function compareMapped(level, fusedDots, oldDots, fusedSquares, oldSquares) {
 
 function makeDots(pyramid, level, mapped0, mapped1) {
   const layer = new GeographicDotsLayer(pyramid);
-  layer.samples = pyramid.samplesFor(level);
+    layer.levelData = pyramid.levelDataFor(level);
   layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped0 } }, frames1: { mapped: { [level]: mapped1 } } }]]) };
   layer.rebuildInstances();
   return layer;
@@ -110,7 +110,7 @@ function makeDots(pyramid, level, mapped0, mapped1) {
 
 function makeSquares(pyramid, level, mapped0, mapped1) {
   const layer = new GeographicSquaresLayer(pyramid);
-  layer.samples = pyramid.samplesFor(level);
+    layer.levelData = pyramid.levelDataFor(level);
   layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped0 } }, frames1: { mapped: { [level]: mapped1 } } }]]) };
   layer.rebuildInstances();
   return layer;

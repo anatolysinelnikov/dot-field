@@ -4,6 +4,14 @@ import {
   RealWeatherSequenceAssetsUnavailableError
 } from './real-weather.js';
 
+function mercatorXToLongitude(x) {
+  return x * 360 - 180;
+}
+
+function mercatorYToLatitude(y) {
+  return Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI;
+}
+
 export const WEATHER_REGION = Object.freeze({
   center: [45.0300, 43.3500],
   initialZoom: 5.8
@@ -41,12 +49,13 @@ export function geographicPreparedIntensityAt(frame, point, output) {
   return frame.sample(point.x, point.y, output);
 }
 
-export function prepareGeographicSamplingGeometry(frame, samples, reusable = null) {
-  const longitudes = new Float64Array(samples.length);
-  const latitudes = new Float64Array(samples.length);
-  for (let index = 0; index < samples.length; index++) {
-    longitudes[index] = samples[index].lngLat[0];
-    latitudes[index] = samples[index].lngLat[1];
+export function prepareGeographicSamplingGeometry(frame, levelData, reusable = null) {
+  const longitudes = new Float64Array(levelData.count);
+  const latitudes = new Float64Array(levelData.count);
+  for (let index = 0; index < levelData.count; index++) {
+    const anchorIndex = index * 2;
+    longitudes[index] = mercatorXToLongitude(levelData.canonicalAnchors[anchorIndex]);
+    latitudes[index] = mercatorYToLatitude(levelData.canonicalAnchors[anchorIndex + 1]);
   }
   return frame.prepareSamplingGeometry(longitudes, latitudes, reusable);
 }

@@ -1,6 +1,6 @@
 import { AREA_PRECIPITATION_BANDS, RAIN_PRESENTATION_MAX_MMH } from './config.js';
 import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographicToSynthetic } from './geography.js';
-import { selectMercatorGridSamples } from './geographic-lod.js';
+import { mercatorXToLongitude, mercatorYToLatitude, selectMercatorGridLevel } from './geographic-lod.js';
 
 // Blur and Areas share one L14 lattice.  Unlike the display LOD, this grid is
 // never selected from the camera: its vertices, cells, and identities persist
@@ -115,22 +115,23 @@ function remapThresholds(state, histogram, rainCoverage) {
 
 export class GeographicScalarLattice {
   constructor() {
-    const selection = selectMercatorGridSamples(SCALAR_GRID_LEVEL);
-    this.samples = selection.samples;
-    this.length = selection.samples.length;
-    this.spacing = selection.spacing;
-    this.width = 1;
-    const firstY = selection.samples[0].canonicalY;
-    while (this.width < this.length && selection.samples[this.width].canonicalY === firstY) this.width++;
-    this.height = this.length / this.width;
-    this.origin = new Float32Array(selection.samples[0].mercator);
+    const levelData = selectMercatorGridLevel(SCALAR_GRID_LEVEL);
+    this.levelData = levelData;
+    this.length = levelData.count;
+    this.spacing = levelData.spacing;
+    this.width = levelData.width;
+    this.height = levelData.height;
+    this.origin = new Float32Array(levelData.canonicalAnchors.subarray(0, 2));
     this.positions = new Float32Array(this.length * 2);
     this.fieldPoints = new Float32Array(this.length * 2);
     for (let index = 0; index < this.length; index++) {
-      const sample = selection.samples[index];
-      this.positions[index * 2] = sample.mercator[0];
-      this.positions[index * 2 + 1] = sample.mercator[1];
-      const point = geographicToSynthetic(...sample.lngLat);
+      const anchorIndex = index * 2;
+      this.positions[anchorIndex] = levelData.canonicalAnchors[anchorIndex];
+      this.positions[anchorIndex + 1] = levelData.canonicalAnchors[anchorIndex + 1];
+      const point = geographicToSynthetic(
+        mercatorXToLongitude(levelData.canonicalAnchors[anchorIndex]),
+        mercatorYToLatitude(levelData.canonicalAnchors[anchorIndex + 1])
+      );
       this.fieldPoints[index * 2] = point.x;
       this.fieldPoints[index * 2 + 1] = point.y;
     }

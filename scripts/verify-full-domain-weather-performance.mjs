@@ -121,6 +121,6 @@ for (const normalizedTime of [...exactSourceFrameTimes].reverse()) {
 }
 
 const activeCount = optimizedGeometry.potentialActiveIndices.length;
-const zeroCount = optimizedPyramid.samplesFor(13).length - activeCount;
+const zeroCount = optimizedPyramid.levelDataFor(13).count - activeCount;
 console.log(`sequence union source mask: ${weather.potentialWeatherMask.reduce((sum, value) => sum + value, 0)} positive source nodes; L13 potentially-active=${activeCount}; guaranteed-dry=${zeroCount}`);
 console.log(`dense/sparse comparisons passed: ${totalComparisons} summaries across ${exactSourceFrameTimes.length} exact frames plus ${interpolatedTimes.length} interpolated times in forward and reverse order; all physical and mapped arrays match within 1e-6`);

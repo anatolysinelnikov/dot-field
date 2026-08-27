@@ -72,7 +72,7 @@ function verifyDiscreteLayer(Layer) {
   const level = 13;
   const layer = new Layer(new GeographicWeatherPyramid(Float32Array, testTopology));
   layer.setActive(true);
-  layer.setSamples(testTopology.samplesFor(level), 0);
+  layer.setLevelData(testTopology.levelDataFor(level), 0);
   pairMatches(layer.temporal, 0, `${Layer.name} start`);
 
   for (let index = 1; index <= 22; index++) {

@@ -7,6 +7,8 @@ import {
   MAX_GRID_LEVEL,
   MIN_GRID_LEVEL,
   canonicalWindowFromMercatorBounds,
+  canonicalCoordinatesForIndex,
+  canonicalIndexForCoordinates,
   lodRangeForStableLevel,
   lngLatToMercator,
   normalizeLodRange
@@ -34,7 +36,7 @@ function maxError(left, right) {
 }
 
 function sumCounts(topology) {
-  return [...topology.levels.values()].reduce((total, levelData) => total + levelData.samples.length, 0);
+  return [...topology.levels.values()].reduce((total, levelData) => total + levelData.count, 0);
 }
 
 function alignedInteriorWindows(support) {
@@ -50,27 +52,36 @@ function alignedInteriorWindows(support) {
 }
 
 function selectionDigest(topology) {
-  return LEVELS.flatMap((level) => topology.samplesFor(level).map((sample) => [
-    level, sample.id, sample.canonicalX, sample.canonicalY, sample.mercator[0], sample.mercator[1], sample.lngLat[0], sample.lngLat[1]
-  ]));
+  return LEVELS.flatMap((level) => {
+    if (!topology.levels.has(level)) return [];
+    const levelData = topology.levelDataFor(level);
+    return Array.from({ length: levelData.count }, (_, index) => {
+      const { canonicalX, canonicalY } = canonicalCoordinatesForIndex(levelData, index);
+      const anchorIndex = index * 2;
+      return [level, `${canonicalX}:${canonicalY}`, canonicalX, canonicalY, levelData.canonicalAnchors[anchorIndex], levelData.canonicalAnchors[anchorIndex + 1]];
+    });
+  });
 }
 
 function verifyIdentity(A, B) {
   for (const level of LEVELS) {
-    const a = A.samplesFor(level);
-    const bById = new Map(B.samplesFor(level).map((sample) => [sample.id, sample]));
+    const a = A.levelDataFor(level);
+    const b = B.levelDataFor(level);
     let overlap = 0;
     let error = 0;
-    for (const sample of a) {
-      const other = bById.get(sample.id);
-      if (!other) continue;
+    for (let index = 0; index < a.count; index++) {
+      const { canonicalX, canonicalY } = canonicalCoordinatesForIndex(a, index);
+      const otherIndex = canonicalIndexForCoordinates(b, canonicalX, canonicalY);
+      if (otherIndex < 0) continue;
       overlap++;
+      const anchorIndex = index * 2;
+      const otherAnchorIndex = otherIndex * 2;
       error = Math.max(
         error,
-        Math.abs(sample.canonicalX - other.canonicalX), Math.abs(sample.canonicalY - other.canonicalY),
-        Math.abs(sample.mercator[0] - other.mercator[0]), Math.abs(sample.mercator[1] - other.mercator[1]),
-        Math.abs(sample.lngLat[0] - other.lngLat[0]), Math.abs(sample.lngLat[1] - other.lngLat[1]),
-        sample.level === other.level ? 0 : Infinity
+        Math.abs(canonicalX - (b.minI + otherIndex % b.width) * b.identityScale),
+        Math.abs(canonicalY - (b.minJ + Math.floor(otherIndex / b.width)) * b.identityScale),
+        Math.abs(a.canonicalAnchors[anchorIndex] - b.canonicalAnchors[otherAnchorIndex]),
+        Math.abs(a.canonicalAnchors[anchorIndex + 1] - b.canonicalAnchors[otherAnchorIndex + 1])
       );
     }
     console.log(`L${level} overlapping canonical samples=${overlap}, identity error=${error}`);
@@ -87,18 +98,20 @@ function verifyHierarchy(topology, name) {
   for (let level = topology.levelRange.minLevel; level < topology.levelRange.maxLevel; level++) {
     const lower = topology.levels.get(level);
     const higher = topology.levels.get(level + 1);
-    const higherIds = new Set(higher.samples.map((sample) => sample.id));
-    for (const sample of lower.samples) if (!higherIds.has(sample.id)) missingInherited++;
+    for (let index = 0; index < lower.count; index++) {
+      const { canonicalX, canonicalY } = canonicalCoordinatesForIndex(lower, index);
+      if (canonicalIndexForCoordinates(higher, canonicalX, canonicalY) < 0) missingInherited++;
+    }
     const parents = topology.transitionParentsFor(level + 1);
-    for (const parentIndex of parents.parentIndexByChild) if (parentIndex < 0 || parentIndex >= lower.samples.length) invalidParents++;
+    for (const parentIndex of parents.parentIndexByChild) if (parentIndex < 0 || parentIndex >= lower.count) invalidParents++;
     const pairs = topology.directPairsFor(level, level + 1);
-    for (const pair of pairs) if (pair < -1 || pair >= Math.max(lower.samples.length, higher.samples.length)) invalidPairs++;
+    for (const pair of pairs) if (pair < -1 || pair >= Math.max(lower.count, higher.count)) invalidPairs++;
     if (level + 1 <= 13 && topology.levelRange.minLevel <= level) {
       const contributions = pyramid.topologyFor(level + 1).contributionsToParent;
       for (let child = 0; child < contributions.offsets.length - 1; child++) {
         let weight = 0;
         for (let index = contributions.offsets[child]; index < contributions.offsets[child + 1]; index++) {
-          if (contributions.parentIndices[index] >= lower.samples.length) invalidParents++;
+          if (contributions.parentIndices[index] >= lower.count) invalidParents++;
           weight += contributions.weights[index];
         }
         contributionWeightError = Math.max(contributionWeightError, Math.abs(weight - 1));
@@ -121,7 +134,7 @@ function summaryError(left, right) {
 function summaryAt(summary, index) {
   return {
     level: summary.level,
-    samples: [summary.samples[index]],
+    levelData: { ...summary.levelData, count: 1, width: 1, height: 1, canonicalAnchors: summary.levelData.canonicalAnchors.slice(index * 2, index * 2 + 2) },
     totalWeight: summary.totalWeight.subarray(index, index + 1),
     rainWeightedSumMmh: summary.rainWeightedSumMmh.subarray(index, index + 1),
     rainMaxMmh: summary.rainMaxMmh.subarray(index, index + 1),
@@ -150,15 +163,16 @@ function verifyWeatherInvariance(window, name) {
       const reference = fullReference.evaluate([...Array(range.maxLevel - range.minLevel + 1)].map((_, index) => range.minLevel + index), prepareGeographicFieldFrame(time));
       const active = bounded.evaluate([...Array(range.maxLevel - range.minLevel + 1)].map((_, index) => range.minLevel + index), prepareGeographicFieldFrame(time));
       for (const level of Object.keys(active).map(Number).filter(Number.isInteger)) {
-        const fullById = new Map(reference[level].samples.map((sample, index) => [sample.id, index]));
-        const activeSamples = active[level].samples;
-        const interior = activeSamples.map((sample, index) => [sample, index]).filter(([sample]) =>
-          sample.canonicalX > window.minX + L10_STEP && sample.canonicalX < window.maxX - L10_STEP
-          && sample.canonicalY > window.minY + L10_STEP && sample.canonicalY < window.maxY - L10_STEP
-        );
-        for (const [sample, activeIndex] of interior) {
-          const fullIndex = fullById.get(sample.id);
-          if (fullIndex === undefined) continue;
+        const activeLevelData = active[level].levelData;
+        const interior = [];
+        for (let activeIndex = 0; activeIndex < activeLevelData.count; activeIndex++) {
+          const coordinates = canonicalCoordinatesForIndex(activeLevelData, activeIndex);
+          if (coordinates.canonicalX > window.minX + L10_STEP && coordinates.canonicalX < window.maxX - L10_STEP
+            && coordinates.canonicalY > window.minY + L10_STEP && coordinates.canonicalY < window.maxY - L10_STEP) interior.push([activeIndex, coordinates]);
+        }
+        for (const [activeIndex, coordinates] of interior) {
+          const fullIndex = canonicalIndexForCoordinates(reference[level].levelData, coordinates.canonicalX, coordinates.canonicalY);
+          if (fullIndex < 0) continue;
           const activeSummary = summaryAt(active[level], activeIndex);
           const fullSummary = summaryAt(reference[level], fullIndex);
           maximumSummaryError = Math.max(maximumSummaryError, summaryError(activeSummary, fullSummary));
@@ -223,10 +237,9 @@ function verifyRangeRoundTrip(window, firstRange, middleRange, name) {
   const middle = new GeographicLodTopology(window, middleRange);
   const final = new GeographicLodTopology(window, firstRange);
   for (let level = firstRange.minLevel; level <= firstRange.maxLevel; level++) {
-    const originalSamples = original.samplesFor(level);
-    const finalSamples = final.samplesFor(level);
-    check(JSON.stringify(originalSamples.map((sample) => [sample.id, sample.mercator, sample.lngLat]))
-      === JSON.stringify(finalSamples.map((sample) => [sample.id, sample.mercator, sample.lngLat])), `${name} L${level} returns exactly after range round-trip`);
+    const originalLevelData = original.levelDataFor(level);
+    const finalLevelData = final.levelDataFor(level);
+    check(originalLevelData.count === finalLevelData.count && maxError(originalLevelData.canonicalAnchors, finalLevelData.canonicalAnchors) === 0, `${name} L${level} returns exactly after range round-trip`);
   }
   check(middle.levels.size === middleRange.maxLevel - middleRange.minLevel + 1, `${name} intermediate range is contiguous and bounded`);
 }
@@ -242,16 +255,16 @@ const dots = new GeographicDotsLayer(sharedPyramid);
 const squares = new GeographicSquaresLayer(sharedPyramid);
 dots.setActive(true);
 squares.setActive(true);
-dots.setSamples(sharedPyramid.samplesFor(13), 0.5);
-squares.setSamples(sharedPyramid.samplesFor(13), 0.5);
+dots.setLevelData(sharedPyramid.levelDataFor(13), 0.5);
+squares.setLevelData(sharedPyramid.levelDataFor(13), 0.5);
 const oldDotsTemporal = dots.temporal;
 const oldSquaresTemporal = squares.temporal;
 sharedPyramid.setCanonicalWindow(topologyB.canonicalWindow);
 dots.setTopology(sharedPyramid.topology);
 squares.setTopology(sharedPyramid.topology);
-check(dots.temporal === null && squares.temporal === null && dots.samples.length === 0 && squares.samples.length === 0, 'topology replacement clears stale Dots/Squares temporal state');
-dots.setSamples(sharedPyramid.samplesFor(13), 0.5);
-squares.setSamples(sharedPyramid.samplesFor(13), 0.5);
+check(dots.temporal === null && squares.temporal === null && dots.levelData === null && squares.levelData === null, 'topology replacement clears stale Dots/Squares temporal state');
+dots.setLevelData(sharedPyramid.levelDataFor(13), 0.5);
+squares.setLevelData(sharedPyramid.levelDataFor(13), 0.5);
 const switchedFrame = geographicTemporalFrameAt(0.5);
 check(dots.temporal && squares.temporal && dots.temporal.index === switchedFrame.index && squares.temporal.index === switchedFrame.index, 'topology replacement restores both renderers at the current non-zero weather time');
 check(oldDotsTemporal !== dots.temporal && oldSquaresTemporal !== squares.temporal, 'topology replacement does not reuse incompatible temporal arrays');
@@ -259,8 +272,8 @@ const oldRangeTemporal = { dots: dots.temporal, squares: squares.temporal };
 check(sharedPyramid.setLevelRange(lodRangeForStableLevel(14)), 'shared pyramid replaces its materialized range after a stable LOD change');
 dots.setTopology(sharedPyramid.topology);
 squares.setTopology(sharedPyramid.topology);
-dots.setSamples(sharedPyramid.samplesFor(14), 0.5);
-squares.setSamples(sharedPyramid.samplesFor(14), 0.5);
+dots.setLevelData(sharedPyramid.levelDataFor(14), 0.5);
+squares.setLevelData(sharedPyramid.levelDataFor(14), 0.5);
 check(dots.temporal && squares.temporal && dots.temporal.index === switchedFrame.index && squares.temporal.index === switchedFrame.index, 'range replacement restores both renderers at the current non-zero weather time');
 check(oldRangeTemporal.dots !== dots.temporal && oldRangeTemporal.squares !== squares.temporal, 'range replacement does not reuse incompatible temporal arrays');
 
@@ -269,7 +282,7 @@ const fixedCount = sumCounts(fixedWindowTopology);
 const summaryAndAnchorBytes = (topology) => sumCounts(topology) * (SUMMARY_BYTES_PER_SAMPLE + ANCHOR_BYTES_PER_SAMPLE);
 console.log('topology counts and typed summary+anchor memory:');
 for (const [name, topology] of [['all-level same-window', fullPyramid.topology], ['initial/large', topologyA], ['tighter L13', topologyB], ['L14', topologyC], ['L15', new GeographicLodTopology({ minX: windows[1].minX + L10_STEP, maxX: windows[1].maxX - L10_STEP, minY: windows[1].minY + L10_STEP, maxY: windows[1].maxY - L10_STEP }, { minLevel: 14, maxLevel: 15 })]]) {
-  const counts = LEVELS.map((level) => topology.levels.has(level) ? topology.samplesFor(level).length : '—');
+  const counts = LEVELS.map((level) => topology.levels.has(level) ? topology.levelDataFor(level).count : '—');
   const bytes = summaryAndAnchorBytes(topology);
   console.log(`${name}: ${counts.map((count, index) => `L${LEVELS[index]}=${count}`).join(', ')}; approx=${(bytes / 1024 / 1024).toFixed(3)} MiB`);
 }

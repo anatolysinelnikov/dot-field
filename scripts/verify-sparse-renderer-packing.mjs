@@ -78,7 +78,7 @@ function activeIndicesFor(summary, length) {
 function verifyOmittedSamples(level, summary, sparseDots, denseDots, sparseSquares, denseSquares, sparseDotsNext, denseDotsNext, sparseSquaresNext, denseSquaresNext) {
   const active = summary.potentialActiveIndices;
   if (!active) return;
-  const activeMask = new Uint8Array(summary.samples.length);
+  const activeMask = new Uint8Array(summary.levelData.count);
   for (const index of active) activeMask[index] = 1;
   const dotNames = ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius'];
   const squareNames = ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity'];
@@ -95,7 +95,7 @@ function verifyOmittedSamples(level, summary, sparseDots, denseDots, sparseSquar
 
 function makeStableDots(pyramid, level, mapped0, mapped1) {
   const layer = new GeographicDotsLayer(pyramid);
-  layer.samples = pyramid.samplesFor(level);
+  layer.levelData = pyramid.levelDataFor(level);
   layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped0 } }, frames1: { mapped: { [level]: mapped1 } } }]]) };
   layer.rebuildInstances();
   return layer;
@@ -103,7 +103,7 @@ function makeStableDots(pyramid, level, mapped0, mapped1) {
 
 function makeStableSquares(pyramid, level, mapped0, mapped1) {
   const layer = new GeographicSquaresLayer(pyramid);
-  layer.samples = pyramid.samplesFor(level);
+  layer.levelData = pyramid.levelDataFor(level);
   layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped0 } }, frames1: { mapped: { [level]: mapped1 } } }]]) };
   layer.rebuildInstances();
   return layer;
@@ -111,8 +111,8 @@ function makeStableSquares(pyramid, level, mapped0, mapped1) {
 
 function makeTransitionDots(pyramid, fromLevel, toLevel, mapped0, mapped1) {
   const layer = new GeographicDotsLayer(pyramid);
-  layer.samples = pyramid.samplesFor(toLevel);
-  layer.transition = { fromSamples: pyramid.samplesFor(fromLevel), toSamples: pyramid.samplesFor(toLevel) };
+  layer.levelData = pyramid.levelDataFor(toLevel);
+  layer.transition = { fromLevelData: pyramid.levelDataFor(fromLevel), toLevelData: pyramid.levelDataFor(toLevel) };
   layer.temporal = { levels: new Map([
     [fromLevel, { frames0: { mapped: { [fromLevel]: mapped0[fromLevel] } }, frames1: { mapped: { [fromLevel]: mapped1[fromLevel] } } }],
     [toLevel, { frames0: { mapped: { [toLevel]: mapped0[toLevel] } }, frames1: { mapped: { [toLevel]: mapped1[toLevel] } } }]
@@ -123,8 +123,8 @@ function makeTransitionDots(pyramid, fromLevel, toLevel, mapped0, mapped1) {
 
 function makeTransitionSquares(pyramid, fromLevel, toLevel, mapped0, mapped1) {
   const layer = new GeographicSquaresLayer(pyramid);
-  layer.samples = pyramid.samplesFor(toLevel);
-  layer.transition = { fromSamples: pyramid.samplesFor(fromLevel), toSamples: pyramid.samplesFor(toLevel), fromGroup: 0, toGroup: 1 };
+  layer.levelData = pyramid.levelDataFor(toLevel);
+  layer.transition = { fromLevelData: pyramid.levelDataFor(fromLevel), toLevelData: pyramid.levelDataFor(toLevel), fromGroup: 0, toGroup: 1 };
   layer.temporal = { levels: new Map([
     [fromLevel, { frames0: { mapped: { [fromLevel]: mapped0[fromLevel] } }, frames1: { mapped: { [fromLevel]: mapped1[fromLevel] } } }],
     [toLevel, { frames0: { mapped: { [toLevel]: mapped0[toLevel] } }, frames1: { mapped: { [toLevel]: mapped1[toLevel] } } }]
@@ -138,9 +138,9 @@ function compareDotPacked(level, sparse, dense) {
 }
 
 function compareSquarePacked(level, sparse, dense, summary) {
-  const active = activeIndicesFor(summary, summary.samples.length);
+  const active = activeIndicesFor(summary, summary.levelData.count);
   if (sparse.instanceCounts[0] !== active.length) throw new Error(`L${level} sparse Squares count ${sparse.instanceCounts[0]} !== active ${active.length}.`);
-  if (dense.instanceCounts[0] !== summary.samples.length) throw new Error(`L${level} dense Squares count mismatch.`);
+  if (dense.instanceCounts[0] !== summary.levelData.count) throw new Error(`L${level} dense Squares count mismatch.`);
   const sparseData = sparse.instanceData[0];
   const denseData = dense.instanceData[0];
   for (let position = 0; position < active.length; position++) {
@@ -154,8 +154,8 @@ function compareSquarePacked(level, sparse, dense, summary) {
 
 function compareTransitionSquares(level, sparse, dense, fromSummary, toSummary) {
   const activeByGroup = [
-    activeIndicesFor(fromSummary, fromSummary.samples.length),
-    activeIndicesFor(toSummary, toSummary.samples.length)
+    activeIndicesFor(fromSummary, fromSummary.levelData.count),
+    activeIndicesFor(toSummary, toSummary.levelData.count)
   ];
   if (sparse.instanceCounts[0] !== activeByGroup[0].length || sparse.instanceCounts[1] !== activeByGroup[1].length) throw new Error(`L${level} sparse transition Squares count mismatch.`);
   for (let group = 0; group < 2; group++) {

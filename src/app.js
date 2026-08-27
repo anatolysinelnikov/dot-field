@@ -116,7 +116,7 @@ const state = {
   time: 0,
   lastFrame: performance.now(),
   scrubbing: false,
-  samples: [],
+  levelData: null,
   lod: { level: null, leafCount: 0 },
   desiredLevel: null,
   lodTransition: null,
@@ -208,7 +208,7 @@ function applyCanonicalWindow(canonicalWindow) {
   weatherLayer.setTopology(geographicWeatherPyramid.topology);
   squaresLayer.setTopology(geographicWeatherPyramid.topology);
   if (state.lod.level === null) return true;
-  commitSamples(state.lod.level, geographicWeatherPyramid.samplesFor(state.lod.level));
+  commitLevelData(state.lod.level, geographicWeatherPyramid.levelDataFor(state.lod.level));
   updateLodDiagnostics();
   return true;
 }
@@ -218,7 +218,7 @@ function applyStableTopologyRange(level) {
   if (!geographicWeatherPyramid.setLevelRange(range)) return false;
   weatherLayer.setTopology(geographicWeatherPyramid.topology);
   squaresLayer.setTopology(geographicWeatherPyramid.topology);
-  commitSamples(level, geographicWeatherPyramid.samplesFor(level));
+  commitLevelData(level, geographicWeatherPyramid.levelDataFor(level));
   return true;
 }
 
@@ -281,11 +281,11 @@ function updateLogicalSamplingZoom() {
   updateLodDiagnostics();
 }
 
-function commitSamples(level, samples) {
+function commitLevelData(level, levelData) {
   state.lod = { level };
-  state.samples = samples;
-  weatherLayer.setSamples(samples, state.time / LOOP_SECONDS);
-  squaresLayer.setSamples(samples, state.time / LOOP_SECONDS);
+  state.levelData = levelData;
+  weatherLayer.setLevelData(levelData, state.time / LOOP_SECONDS);
+  squaresLayer.setLevelData(levelData, state.time / LOOP_SECONDS);
   updateLodDiagnostics();
 }
 
@@ -408,17 +408,17 @@ function initializeWeatherLayer() {
 function startAdjacentTransition(level, now) {
   const direction = Math.sign(level - state.lod.level);
   const toLevel = state.lod.level + direction;
-  const toSamples = geographicWeatherPyramid.samplesFor(toLevel);
+  const toLevelData = geographicWeatherPyramid.levelDataFor(toLevel);
   state.lodTransition = {
     fromLevel: state.lod.level,
     toLevel,
-    fromSamples: state.samples,
-    toSamples,
+    fromLevelData: state.levelData,
+    toLevelData,
     start: now,
     rawProgress: 0
   };
-  weatherLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
-  squaresLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
+  weatherLayer.setTransition(state.levelData, toLevelData, state.time / LOOP_SECONDS, 0);
+  squaresLayer.setTransition(state.levelData, toLevelData, state.time / LOOP_SECONDS, 0);
   updateLodDiagnostics();
   wakeApplicationFrame();
 }
@@ -427,7 +427,7 @@ function rebuildSamples(level, now = performance.now()) {
   if (!state.mapReady) return;
   state.desiredLevel = level;
   if (state.lod.level === null) {
-    commitSamples(level, geographicWeatherPyramid.samplesFor(level));
+    commitLevelData(level, geographicWeatherPyramid.levelDataFor(level));
     return;
   }
   const transition = state.lodTransition;
@@ -442,13 +442,13 @@ function rebuildSamples(level, now = performance.now()) {
     state.lodTransition = {
       fromLevel: transition.toLevel,
       toLevel: transition.fromLevel,
-      fromSamples: transition.toSamples,
-      toSamples: transition.fromSamples,
+      fromLevelData: transition.toLevelData,
+      toLevelData: transition.fromLevelData,
       start: now - rawProgress * LOD_MORPH_SECONDS * 1000,
       rawProgress
     };
-    weatherLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
-    squaresLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
+    weatherLayer.setTransition(transition.toLevelData, transition.fromLevelData, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
+    squaresLayer.setTransition(transition.toLevelData, transition.fromLevelData, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
     updateLodDiagnostics();
     wakeApplicationFrame();
   }
@@ -464,7 +464,7 @@ function updateLODTransition(now) {
   updateLodDiagnostics();
   if (rawProgress < 1) return;
   state.lodTransition = null;
-  commitSamples(transition.toLevel, transition.toSamples);
+  commitLevelData(transition.toLevel, transition.toLevelData);
   if (state.pendingCanonicalWindow) {
     const pendingWindow = state.pendingCanonicalWindow;
     state.pendingCanonicalWindow = null;

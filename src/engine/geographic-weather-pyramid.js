@@ -9,6 +9,11 @@ import {
   MIN_GRID_LEVEL,
   MAX_GRID_LEVEL,
   GeographicLodTopology,
+  canonicalIndexForCoordinates,
+  canonicalXForIndex,
+  canonicalYForIndex,
+  mercatorXToLongitude,
+  mercatorYToLatitude,
   canonicalWindowsEqual,
   lodRangesEqual,
   normalizeCanonicalWindow,
@@ -28,9 +33,10 @@ export const RAIN_COVERAGE_THRESHOLDS_MMH = Object.freeze([
   10.0,
   50.0
 ]);
+const now = () => globalThis.performance?.now?.() ?? Date.now();
 
 function summaryMatchesLevel(summary, levelData, ArrayType) {
-  return summary?.totalWeight?.length === levelData.samples.length
+  return summary?.totalWeight?.length === levelData.count
     && summary.rainCoverageWeight?.length === RAIN_COVERAGE_THRESHOLDS_MMH.length
     && summary.totalWeight.constructor === ArrayType
     && summary.rainCoverageWeight[0]?.constructor === ArrayType;
@@ -65,7 +71,7 @@ function zeroWeatherFields(summary, activeIndices = null) {
 export function createWeatherSummary(levelData, reusable = null, ArrayType = Float32Array, totalWeight = null) {
   if (summaryMatchesLevel(reusable, levelData, ArrayType)) {
     reusable.level = levelData.level;
-    reusable.samples = levelData.samples;
+    reusable.levelData = levelData;
     if (totalWeight) {
       reusable.totalWeight = totalWeight;
       reusable.totalWeightInitialized = true;
@@ -73,10 +79,10 @@ export function createWeatherSummary(levelData, reusable = null, ArrayType = Flo
     return reusable;
   }
 
-  const length = levelData.samples.length;
+  const length = levelData.count;
   return {
     level: levelData.level,
-    samples: levelData.samples,
+    levelData,
     totalWeight: totalWeight || new ArrayType(length),
     totalWeightInitialized: Boolean(totalWeight),
     potentialActiveIndices: undefined,
@@ -102,7 +108,7 @@ function initializeDirectTotalWeight(summary) {
 function initializeAggregateTotalWeight(summary, childSummary, contributions) {
   if (summary.totalWeightInitialized) return;
   summary.totalWeight.fill(0);
-  for (let childIndex = 0; childIndex < childSummary.samples.length; childIndex++) {
+  for (let childIndex = 0; childIndex < childSummary.levelData.count; childIndex++) {
     const start = contributions.offsets[childIndex];
     const end = contributions.offsets[childIndex + 1];
     for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
@@ -121,7 +127,7 @@ function activeIndicesForAggregate(summary, childSummary, contributions) {
     summary.potentialActiveIndicesInitialized = true;
     return null;
   }
-  const active = new Uint8Array(summary.samples.length);
+  const active = new Uint8Array(summary.levelData.count);
   for (const childIndex of childActiveIndices) {
     const start = contributions.offsets[childIndex];
     const end = contributions.offsets[childIndex + 1];
@@ -136,46 +142,61 @@ function activeIndicesForAggregate(summary, childSummary, contributions) {
   return summary.potentialActiveIndices;
 }
 
-function centeredAxisCandidates(coordinate, parentStep) {
-  const remainder = coordinate % parentStep;
-  if (remainder === 0) return [[coordinate, 1]];
-  if (remainder !== parentStep / 2) throw new Error('Fine sample is not centered between adjacent dyadic anchors.');
-  const halfStep = parentStep / 2;
-  return [[coordinate - halfStep, 0.5], [coordinate + halfStep, 0.5]];
-}
-
 export function buildCenteredContributions(fineLevel, coarseLevel) {
-  const coarseIndices = new Map(coarseLevel.samples.map((sample, index) => [sample.id, index]));
   const parentStep = 2 ** (MAX_GRID_LEVEL - coarseLevel.level);
-  const offsets = new Uint32Array(fineLevel.samples.length + 1);
-  const parentIndices = [];
-  const weights = [];
+  const offsets = new Uint32Array(fineLevel.count + 1);
 
-  for (let childIndex = 0; childIndex < fineLevel.samples.length; childIndex++) {
-    const child = fineLevel.samples[childIndex];
-    const xCandidates = centeredAxisCandidates(child.canonicalX, parentStep);
-    const yCandidates = centeredAxisCandidates(child.canonicalY, parentStep);
-    const candidates = [];
-    for (const [x, xWeight] of xCandidates) {
-      for (const [y, yWeight] of yCandidates) {
-        const parentIndex = coarseIndices.get(`${x}:${y}`);
-        if (parentIndex !== undefined) candidates.push([parentIndex, xWeight * yWeight]);
+  for (let childIndex = 0; childIndex < fineLevel.count; childIndex++) {
+    const canonicalX = canonicalXForIndex(fineLevel, childIndex);
+    const canonicalY = canonicalYForIndex(fineLevel, childIndex);
+    const xRemainder = canonicalX % parentStep;
+    const yRemainder = canonicalY % parentStep;
+    if (xRemainder !== 0 && xRemainder !== parentStep / 2) throw new Error('Fine sample is not centered between adjacent dyadic anchors.');
+    if (yRemainder !== 0 && yRemainder !== parentStep / 2) throw new Error('Fine sample is not centered between adjacent dyadic anchors.');
+    const xCount = xRemainder === 0 ? 1 : 2;
+    const yCount = yRemainder === 0 ? 1 : 2;
+    const xStart = xRemainder === 0 ? canonicalX : canonicalX - parentStep / 2;
+    const yStart = yRemainder === 0 ? canonicalY : canonicalY - parentStep / 2;
+    let candidateCount = 0;
+    for (let xOffset = 0; xOffset < xCount; xOffset++) {
+      const x = xStart + xOffset * parentStep;
+      for (let yOffset = 0; yOffset < yCount; yOffset++) {
+        const y = yStart + yOffset * parentStep;
+        if (canonicalIndexForCoordinates(coarseLevel, x, y) >= 0) candidateCount++;
       }
     }
-    const totalCandidateWeight = candidates.reduce((sum, [, weight]) => sum + weight, 0);
-    if (!(totalCandidateWeight > 0)) throw new Error('Fine sample has no centered coarse contribution.');
-    for (const [parentIndex, weight] of candidates) {
-      parentIndices.push(parentIndex);
-      weights.push(weight / totalCandidateWeight);
-    }
-    offsets[childIndex + 1] = parentIndices.length;
+    if (!candidateCount) throw new Error('Fine sample has no centered coarse contribution.');
+    offsets[childIndex + 1] = offsets[childIndex] + candidateCount;
   }
 
-  return {
-    offsets,
-    parentIndices: Uint32Array.from(parentIndices),
-    weights: Float64Array.from(weights)
-  };
+  const parentIndices = new Uint32Array(offsets[fineLevel.count]);
+  const weights = new Float64Array(parentIndices.length);
+  for (let childIndex = 0; childIndex < fineLevel.count; childIndex++) {
+    const canonicalX = canonicalXForIndex(fineLevel, childIndex);
+    const canonicalY = canonicalYForIndex(fineLevel, childIndex);
+    const xRemainder = canonicalX % parentStep;
+    const yRemainder = canonicalY % parentStep;
+    const xCount = xRemainder === 0 ? 1 : 2;
+    const yCount = yRemainder === 0 ? 1 : 2;
+    const xStart = xRemainder === 0 ? canonicalX : canonicalX - parentStep / 2;
+    const yStart = yRemainder === 0 ? canonicalY : canonicalY - parentStep / 2;
+    const totalCandidateWeight = (xCount === 1 ? 1 : 0.5) * (yCount === 1 ? 1 : 0.5)
+      * (offsets[childIndex + 1] - offsets[childIndex]);
+    let contributionIndex = offsets[childIndex];
+    for (let xOffset = 0; xOffset < xCount; xOffset++) {
+      const x = xStart + xOffset * parentStep;
+      for (let yOffset = 0; yOffset < yCount; yOffset++) {
+        const y = yStart + yOffset * parentStep;
+        const parentIndex = canonicalIndexForCoordinates(coarseLevel, x, y);
+        if (parentIndex < 0) continue;
+        const weight = (xCount === 1 ? 1 : 0.5) * (yCount === 1 ? 1 : 0.5);
+        parentIndices[contributionIndex] = parentIndex;
+        weights[contributionIndex++] = weight / totalCandidateWeight;
+      }
+    }
+  }
+
+  return { offsets, parentIndices, weights };
 }
 
 export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, ArrayType = Float32Array, samplingGeometry = null, totalWeight = null) {
@@ -192,7 +213,7 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
     ? geographicPreparedIntensityAtGeometryBatch(frame, samplingGeometry)
     : null;
   const value = { rainMmh: 0, storm: 0, hail: 0 };
-  const count = activeIndices ? activeIndices.length : levelData.samples.length;
+  const count = activeIndices ? activeIndices.length : levelData.count;
   for (let activeIndex = 0; activeIndex < count; activeIndex++) {
     const index = activeIndices ? activeIndices[activeIndex] : activeIndex;
     if (batchRain) {
@@ -200,7 +221,12 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
       value.storm = 0;
       value.hail = 0;
     } else if (samplingGeometry) geographicPreparedIntensityAtGeometry(frame, samplingGeometry, index, value);
-    else geographicPreparedIntensityAtXY(frame, levelData.samples[index].lngLat[0], levelData.samples[index].lngLat[1], value);
+    else {
+      const anchorIndex = index * 2;
+      const longitude = mercatorXToLongitude(levelData.canonicalAnchors[anchorIndex]);
+      const latitude = mercatorYToLatitude(levelData.canonicalAnchors[anchorIndex + 1]);
+      geographicPreparedIntensityAtXY(frame, longitude, latitude, value);
+    }
     const rainMmh = value.rainMmh;
     const storm = value.storm;
     const hail = value.hail;
@@ -225,7 +251,7 @@ export function aggregateWeatherSummary(parentLevel, childSummary, contributions
   initializeAggregateTotalWeight(summary, childSummary, contributions);
   const activeIndices = activeIndicesForAggregate(summary, childSummary, contributions);
   zeroWeatherFields(summary, activeIndices);
-  const childCount = childSummary.samples.length;
+  const childCount = childSummary.levelData.count;
   const activeChildren = childSummary.potentialActiveIndices;
   for (let activeChild = 0; activeChild < (activeChildren ? activeChildren.length : childCount); activeChild++) {
     const childIndex = activeChildren ? activeChildren[activeChild] : activeChild;
@@ -296,6 +322,8 @@ export class GeographicWeatherPyramid {
   }
 
   setTopology(topology) {
+    const started = now();
+    const contributionsStarted = now();
     this.topology = topology;
     this.levels = topology.levels;
     this.contributions = new Map();
@@ -303,16 +331,18 @@ export class GeographicWeatherPyramid {
       if (!this.levels.has(level - 1)) continue;
       this.contributions.set(level, buildCenteredContributions(this.levels.get(level), this.levels.get(level - 1)));
     }
+    const contributionsMs = now() - contributionsStarted;
     this.totalWeights = new Map();
+    const totalWeightsStarted = now();
     if (this.levels.has(WEATHER_REFERENCE_LEVEL)) {
-      const referenceWeights = new this.summaryArrayType(this.levels.get(WEATHER_REFERENCE_LEVEL).samples.length);
+      const referenceWeights = new this.summaryArrayType(this.levels.get(WEATHER_REFERENCE_LEVEL).count);
       referenceWeights.fill(1);
       this.totalWeights.set(WEATHER_REFERENCE_LEVEL, referenceWeights);
       for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= topology.levelRange.minLevel; level--) {
         const childWeights = this.totalWeights.get(level + 1);
         const contributions = this.contributions.get(level + 1);
         if (!childWeights || !contributions || !this.levels.has(level)) continue;
-        const weights = new this.summaryArrayType(this.levels.get(level).samples.length);
+        const weights = new this.summaryArrayType(this.levels.get(level).count);
         for (let childIndex = 0; childIndex < childWeights.length; childIndex++) {
           const start = contributions.offsets[childIndex];
           const end = contributions.offsets[childIndex + 1];
@@ -323,6 +353,11 @@ export class GeographicWeatherPyramid {
         this.totalWeights.set(level, weights);
       }
     }
+    this.topologySetupTimings = {
+      contributionsMs,
+      totalWeightsMs: now() - totalWeightsStarted,
+      totalMs: now() - started
+    };
     this.samplingGeometries = new Map();
   }
 
@@ -348,14 +383,10 @@ export class GeographicWeatherPyramid {
     return levelData;
   }
 
-  samplesFor(level) {
-    return this.levelDataFor(level).samples;
-  }
-
   topologyFor(level) {
     const levelData = this.levelDataFor(level);
     return {
-      samples: levelData.samples,
+      levelData,
       contributionsToParent: this.contributions.get(level) || null
     };
   }
@@ -367,7 +398,7 @@ export class GeographicWeatherPyramid {
   prepareSamplingGeometry(level, frame) {
     const existing = this.samplingGeometries.get(level);
     if (existing && frame.isSamplingGeometryCompatible(existing)) return existing;
-    const geometry = prepareGeographicSamplingGeometry(frame, this.samplesFor(level), existing);
+    const geometry = prepareGeographicSamplingGeometry(frame, this.levelDataFor(level), existing);
     this.samplingGeometries.set(level, geometry);
     return geometry;
   }

@@ -59,7 +59,7 @@ function resetStats(stats) {
 }
 
 function samples(level) {
-  return testTopology.samplesFor(level);
+  return testTopology.levelDataFor(level);
 }
 
 function typedStateEqual(left, right) {
@@ -73,13 +73,13 @@ function typedStateEqual(left, right) {
 
 function exerciseTransition(Layer, fromLevel, toLevel) {
   const { layer, pyramid, stats } = makeInstrumentedLayer(Layer);
-  const fromSamples = samples(fromLevel);
-  const toSamples = samples(toLevel);
-  layer.setSamples(fromSamples, FRAME_TIME);
+  const fromLevelData = samples(fromLevel);
+  const toLevelData = samples(toLevel);
+  layer.setLevelData(fromLevelData, FRAME_TIME);
   const sourceState = layer.temporal.levels.get(fromLevel);
   const sourceFrames = [sourceState.frames0, sourceState.frames1];
   resetStats(stats);
-  layer.setTransition(fromSamples, toSamples, FRAME_TIME, 0);
+  layer.setTransition(fromLevelData, toLevelData, FRAME_TIME, 0);
   const destinationState = layer.temporal.levels.get(toLevel);
   check(stats.evaluations.length === 2 && stats.evaluations.every((levels) => levels.length === 1 && levels[0] === toLevel), `${Layer.name} L${fromLevel}->L${toLevel} evaluates only destination at start`);
   check(stats.keyframes.length === 2 && stats.keyframes.every(({ level }) => level === toLevel), `${Layer.name} L${fromLevel}->L${toLevel} maps only destination at start`);
@@ -88,15 +88,15 @@ function exerciseTransition(Layer, fromLevel, toLevel) {
   else check(stats.dotBuilds === 1, `Dots builds one transition instance set at start`);
 
   const fresh = makeInstrumentedLayer(Layer).layer;
-  fresh.setSamples(toSamples, FRAME_TIME);
+  fresh.setLevelData(toLevelData, FRAME_TIME);
   resetStats(stats);
-  layer.setSamples(toSamples, FRAME_TIME);
+  layer.setLevelData(toLevelData, FRAME_TIME);
   check(stats.evaluations.length === 0 && stats.keyframes.length === 0, `${Layer.name} L${fromLevel}->L${toLevel} completion does not evaluate or map`);
   check(layer.temporal.levels.size === 1 && layer.temporal.levels.get(toLevel) === destinationState, `${Layer.name} promotes destination temporal state`);
   check(typedStateEqual(layer.temporal.levels.get(toLevel).frames0.mapped[toLevel], fresh.temporal.levels.get(toLevel).frames0.mapped[toLevel]), `${Layer.name} promoted destination mapping matches fresh stable state`);
   if (Layer === GeographicSquaresLayer) check(stats.packedLevels.length === 0, `Squares promotes destination group without repacking`);
   else check(stats.dotBuilds === 1, `Dots performs only the stable destination instance pass at completion`);
-  return { layer, pyramid, stats, fromSamples, toSamples };
+  return { layer, pyramid, stats, fromLevelData, toLevelData };
 }
 
 for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) exerciseTransition(Layer, 14, 15);
@@ -104,13 +104,13 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) exerciseTrans
 
 for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   const { layer, stats } = makeInstrumentedLayer(Layer);
-  const fromSamples = samples(14);
-  const toSamples = samples(15);
-  layer.setSamples(fromSamples, FRAME_TIME);
-  layer.setTransition(fromSamples, toSamples, FRAME_TIME, 0.4);
+  const fromLevelData = samples(14);
+  const toLevelData = samples(15);
+  layer.setLevelData(fromLevelData, FRAME_TIME);
+  layer.setTransition(fromLevelData, toLevelData, FRAME_TIME, 0.4);
   const states = [layer.temporal.levels.get(14), layer.temporal.levels.get(15)];
   resetStats(stats);
-  layer.setTransition(toSamples, fromSamples, FRAME_TIME, 0.6);
+  layer.setTransition(toLevelData, fromLevelData, FRAME_TIME, 0.6);
   check(stats.evaluations.length === 0 && stats.keyframes.length === 0, `${Layer.name} reversal reuses both prepared levels`);
   check(layer.temporal.levels.get(14) === states[0] && layer.temporal.levels.get(15) === states[1], `${Layer.name} reversal preserves both temporal state objects`);
   if (Layer === GeographicSquaresLayer) check(stats.packedLevels.length === 0, 'Squares reversal reuses both packed groups');
@@ -118,8 +118,8 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
 
   for (const progress of [0.2, 0.8, 0.1]) {
     resetStats(stats);
-    const reverseFrom = progress === 0.2 ? fromSamples : (progress === 0.8 ? toSamples : fromSamples);
-    const reverseTo = progress === 0.2 ? toSamples : (progress === 0.8 ? fromSamples : toSamples);
+    const reverseFrom = progress === 0.2 ? fromLevelData : (progress === 0.8 ? toLevelData : fromLevelData);
+    const reverseTo = progress === 0.2 ? toLevelData : (progress === 0.8 ? fromLevelData : toLevelData);
     layer.setTransition(reverseFrom, reverseTo, FRAME_TIME, progress);
     check(stats.evaluations.length === 0 && stats.keyframes.length === 0, `${Layer.name} repeated reversal ${progress} keeps temporal states`);
   }
@@ -127,10 +127,10 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
 
 for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   const { layer, stats } = makeInstrumentedLayer(Layer);
-  const fromSamples = samples(14);
-  const toSamples = samples(15);
-  layer.setSamples(fromSamples, FRAME_TIME);
-  layer.setTransition(fromSamples, toSamples, FRAME_TIME, 0.2);
+  const fromLevelData = samples(14);
+  const toLevelData = samples(15);
+  layer.setLevelData(fromLevelData, FRAME_TIME);
+  layer.setTransition(fromLevelData, toLevelData, FRAME_TIME, 0.2);
   const oldFrames = new Map([...layer.temporal.levels].map(([level, state]) => [level, state.frames1]));
   const current = geographicTemporalFrameAt(FRAME_TIME);
   const rolloverTime = (current.index + 1.25) / TEMPORAL_FRAME_COUNT;
@@ -140,10 +140,10 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   check([...layer.temporal.levels].every(([level, state]) => state.frames0 === oldFrames.get(level) && state.frames0.index === current.index + 1), `${Layer.name} temporal rollover promotes previous next frame`);
   check(layer.temporal.levels.get(14).frames1.index === (current.index + 2) % TEMPORAL_FRAME_COUNT && layer.temporal.levels.get(15).frames1.index === (current.index + 2) % TEMPORAL_FRAME_COUNT, `${Layer.name} temporal rollover prepares only the next future frame`);
   resetStats(stats);
-  layer.setTransition(toSamples, fromSamples, rolloverTime, 0.7);
+  layer.setTransition(toLevelData, fromLevelData, rolloverTime, 0.7);
   check(stats.evaluations.length === 0 && stats.keyframes.length === 0, `${Layer.name} immediate post-rollover reversal reuses current states`);
   resetStats(stats);
-  layer.setSamples(fromSamples, rolloverTime);
+  layer.setLevelData(fromLevelData, rolloverTime);
   check(stats.evaluations.length === 0 && stats.keyframes.length === 0, `${Layer.name} post-rollover completion promotes without stale-state rebuild`);
   layer.setActive(false);
   check(layer.temporal === null, `${Layer.name} releases temporal state while inactive`);

@@ -118,11 +118,11 @@ for (const level of [13, 14, 15]) {
   preparedSummaries.set(level, preparedSummary);
   const error = summaryError(normal, preparedSummary);
   let coverageMismatches = 0;
-  for (let threshold = 0; threshold < RAIN_COVERAGE_THRESHOLDS_MMH.length; threshold++) for (let index = 0; index < normal.samples.length; index++) {
+  for (let threshold = 0; threshold < RAIN_COVERAGE_THRESHOLDS_MMH.length; threshold++) for (let index = 0; index < normal.levelData.count; index++) {
     if (normal.rainCoverageWeight[threshold][index] !== preparedSummary.rainCoverageWeight[threshold][index]) coverageMismatches++;
   }
   directSummaryErrors.push(error);
-  console.log(`L${level} direct summary: samples=${levelData.samples.length}, error=${error}, coverage mismatches=${coverageMismatches}, stencil bytes=${field.samplingGeometryBytes(samplingGeometry)}`);
+  console.log(`L${level} direct summary: samples=${levelData.count}, error=${error}, coverage mismatches=${coverageMismatches}, stencil bytes=${field.samplingGeometryBytes(samplingGeometry)}`);
   check(error <= TOLERANCE && coverageMismatches === 0, `L${level} prepared summary is numerically and categorically identical`);
   const dotsError = mappingError(mapDotsWeatherSummary(normal), mapDotsWeatherSummary(preparedSummary), ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius']);
   const squaresError = mappingError(mapSquaresWeatherSummary(normal), mapSquaresWeatherSummary(preparedSummary), ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity']);

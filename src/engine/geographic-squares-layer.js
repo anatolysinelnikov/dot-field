@@ -61,10 +61,10 @@ function prepareMappedActiveSet(state, activeIndices) {
 
 // Pure renderer mapping. Coverage remains separate from wet/positive severity.
 export function mapSquaresWeatherSummary(summary, reusable = null) {
-  const state = makeMappedState(summary.samples.length, reusable);
+  const state = makeMappedState(summary.levelData.count, reusable);
   const activeIndices = summary.potentialActiveIndices;
   prepareMappedActiveSet(state, activeIndices);
-  const count = activeIndices ? activeIndices.length : summary.samples.length;
+  const count = activeIndices ? activeIndices.length : summary.levelData.count;
   for (let position = 0; position < count; position++) {
     const index = activeIndices ? activeIndices[position] : position;
     const total = summary.totalWeight[index];
@@ -133,7 +133,7 @@ export class GeographicSquaresLayer {
     this.renderingMode = '3d';
     this.active = false;
     this.weatherPyramid = weatherPyramid;
-    this.samples = [];
+    this.levelData = null;
     this.transition = null;
     this.transitionProgress = 1;
     this.temporal = null;
@@ -161,7 +161,7 @@ export class GeographicSquaresLayer {
 
   setTopology(topology) {
     if (this.weatherPyramid.topology !== topology) throw new Error('Squares topology must be the shared weather-pyramid topology.');
-    this.samples = [];
+    this.levelData = null;
     this.transition = null;
     this.temporal = null;
     this.temporalProgress = 0;
@@ -183,8 +183,8 @@ export class GeographicSquaresLayer {
   }
 
   activeLevels() {
-    if (this.transition) return [this.transition.fromSamples[0].level, this.transition.toSamples[0].level];
-    return this.samples.length ? [this.samples[0].level] : [];
+    if (this.transition) return [this.transition.fromLevelData.level, this.transition.toLevelData.level];
+    return this.levelData ? [this.levelData.level] : [];
   }
 
   rebuildTemporal(time) {
@@ -202,13 +202,13 @@ export class GeographicSquaresLayer {
     this.rebuildInstances();
   }
 
-  setSamples(samples, time) {
-    const level = samples.length ? samples[0].level : null;
-    if (this.active && this.transition && level === this.transition.toSamples[0].level) {
+  setLevelData(levelData, time) {
+    const level = levelData?.level ?? null;
+    if (this.active && this.transition && level === this.transition.toLevelData.level) {
       const promoted = this.temporal?.levels.get(level);
       if (promoted) {
         const previousGroup = this.transition.fromGroup;
-        this.samples = samples;
+        this.levelData = levelData;
         this.stableGroup = this.transition.toGroup;
         this.transition = null;
         this.temporal.levels = new Map([[level, promoted]]);
@@ -218,24 +218,24 @@ export class GeographicSquaresLayer {
         return;
       }
     }
-    this.samples = samples;
+    this.levelData = levelData;
     this.transition = null;
     if (this.active) this.rebuildTemporal(time);
     else this.temporal = null;
   }
 
-  setTransition(fromSamples, toSamples, time, progress = 0) {
-    const fromLevel = fromSamples[0].level;
-    const toLevel = toSamples[0].level;
+  setTransition(fromLevelData, toLevelData, time, progress = 0) {
+    const fromLevel = fromLevelData.level;
+    const toLevel = toLevelData.level;
     const previousTransition = this.transition;
     const reversing = previousTransition
-      && previousTransition.fromSamples[0].level === toLevel
-      && previousTransition.toSamples[0].level === fromLevel;
-    this.samples = toSamples;
+      && previousTransition.fromLevelData.level === toLevel
+      && previousTransition.toLevelData.level === fromLevel;
+    this.levelData = toLevelData;
     if (reversing) {
       this.transition = {
-        fromSamples,
-        toSamples,
+        fromLevelData,
+        toLevelData,
         fromGroup: previousTransition.toGroup,
         toGroup: previousTransition.fromGroup
       };
@@ -243,7 +243,7 @@ export class GeographicSquaresLayer {
       this.map?.triggerRepaint();
       return;
     }
-    this.transition = { fromSamples, toSamples, fromGroup: this.stableGroup, toGroup: 1 - this.stableGroup };
+    this.transition = { fromLevelData, toLevelData, fromGroup: this.stableGroup, toGroup: 1 - this.stableGroup };
     this.transitionProgress = progress;
     if (!this.active) {
       this.temporal = null;
@@ -269,18 +269,19 @@ export class GeographicSquaresLayer {
   }
 
   buildGroup(group, level, state0, state1) {
-    const samples = this.weatherPyramid.topology.levels.get(level).samples;
+    const levelData = this.weatherPyramid.topology.levels.get(level);
     const activeIndices = state0.potentialActiveIndices && state1.potentialActiveIndices
       && samePotentialActiveIndices(state0.potentialActiveIndices, state1.potentialActiveIndices)
       ? state0.potentialActiveIndices
       : null;
-    const count = activeIndices ? activeIndices.length : samples.length;
+    const count = activeIndices ? activeIndices.length : levelData.count;
     const length = count * INSTANCE_STRIDE;
     let result = this.instanceData[group];
     if (result.length < length) result = new Float32Array(Math.max(length, result.length * 2, INSTANCE_STRIDE * 256));
     for (let position = 0, offset = 0; position < count; position++, offset += INSTANCE_STRIDE) {
       const index = activeIndices ? activeIndices[position] : position;
-      result[offset] = samples[index].mercator[0]; result[offset + 1] = samples[index].mercator[1];
+      const anchorIndex = index * 2;
+      result[offset] = levelData.canonicalAnchors[anchorIndex]; result[offset + 1] = levelData.canonicalAnchors[anchorIndex + 1];
       result[offset + 2] = state0.rainWetMeanMmh[index]; result[offset + 3] = state0.rainCoverage[index];
       result[offset + 4] = state0.stormCoverage[index]; result[offset + 5] = state0.stormMeanSeverity[index]; result[offset + 6] = state0.stormMaxSeverity[index];
       result[offset + 7] = state0.hailCoverage[index]; result[offset + 8] = state0.hailMeanSeverity[index]; result[offset + 9] = state0.hailMaxSeverity[index];
@@ -293,10 +294,10 @@ export class GeographicSquaresLayer {
   }
 
   rebuildInstances(changedLevels = null) {
-    if (!this.temporal || !this.samples.length) return;
+    if (!this.temporal || !this.levelData) return;
     const groups = this.transition
-      ? [[this.transition.fromGroup, this.transition.fromSamples[0].level], [this.transition.toGroup, this.transition.toSamples[0].level]]
-      : [[this.stableGroup, this.samples[0].level]];
+      ? [[this.transition.fromGroup, this.transition.fromLevelData.level], [this.transition.toGroup, this.transition.toLevelData.level]]
+      : [[this.stableGroup, this.levelData.level]];
     for (const [group, level] of groups) {
       if (changedLevels && !changedLevels.has(level)) continue;
       const temporalState = this.temporal.levels.get(level);
@@ -307,7 +308,7 @@ export class GeographicSquaresLayer {
   }
 
   updateWeather(time) {
-    if (!this.samples.length) return;
+    if (!this.levelData) return;
     const frame = geographicTemporalFrameAt(time);
     if (!this.temporal || frame.index !== this.temporal.index) {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
@@ -337,8 +338,8 @@ export class GeographicSquaresLayer {
     setGeographicProjection(gl, { matrix: locations.u_matrix, fallbackMatrix: locations.u_projection_fallback_matrix, projectionMatrix: locations.u_projection_matrix, tileMercatorCoords: locations.u_projection_tile_mercator_coords, clippingPlane: locations.u_projection_clipping_plane, projectionTransition: locations.u_projection_transition }, projection);
     gl.uniform1f(locations.u_temporalProgress, this.temporalProgress);
     const level = this.transition
-      ? (group === this.transition.fromGroup ? this.transition.fromSamples[0].level : this.transition.toSamples[0].level)
-      : this.samples[0].level;
+      ? (group === this.transition.fromGroup ? this.transition.fromLevelData.level : this.transition.toLevelData.level)
+      : this.levelData.level;
     gl.uniform1f(locations.u_spacing, 1 / 2 ** level);
     gl.uniform1f(locations.u_opacity, opacity);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);

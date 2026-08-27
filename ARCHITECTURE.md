@@ -239,9 +239,13 @@ does not advance with playback: it intentionally shows only source frame 0.
 The discrete topology is a globally anchored dyadic grid in normalized
 Web-Mercator coordinates. A sample identity is its integer L15 canonical
 coordinate pair, so inherited vertices retain identity through LOD refinement.
-`selectMercatorGridSamples()` is the canonical spatial authority: every
-selected sample's `mercator` coordinate is the world-space position used by
-discrete representations.
+`selectMercatorGridLevel()` is the canonical spatial authority. Each selected
+level is a compact descriptor (`level`, `spacing`, `identityScale`, integer
+`minI/maxI/minJ/maxJ`, `width`, `height`, `count`, and the canonical window)
+plus one row-major `Float64Array` of Mercator anchors. Sample identity and
+indexing are implicit arithmetic conversions between `(index)`, `(i,j)`, and
+the global L15 canonical coordinate pair; no per-sample JS objects, geographic
+coordinate arrays, or string IDs are retained.
 The camera never reseats the grid. Canonical identity resolution and the
 maximum displayed Dots/Squares level are both L15. Logical sampling zoom is
 application-owned and latitude-corrected for Globe camera behavior. An explicit
@@ -258,7 +262,7 @@ not allocate unnecessary L14/L15 topology.
 
 The application owns one `GeographicWeatherPyramid` and passes it to both Dots
 and Squares. It is representation-independent and uses the canonical samples from
-`selectMercatorGridSamples()` but has no dependency on Dots radii, Squares
+`selectMercatorGridLevel()` but has no dependency on Dots radii, Squares
 opacity/color, glyph geometry, WebGL, UI state, presentation mappings, or
 hazard-renderer functions. The parsed provider grid is anisotropic geographic
 data; near `WEATHER_REGION.center` its roughly 0.04° longitude/latitude source
@@ -395,8 +399,17 @@ glyph is visible. Direct L13/L14/L15 hazards retain the existing
 `GeographicLodTopology` in `geographic-lod.js` owns canonical anchors and the
 deterministic one-parent child ownership used only for Dots geometric morphing.
 That mapping is deliberately separate from the centered multi-parent weather
-contribution topology. LOD transitions therefore keep canonical child/parent
-positions and no-grid-jump behavior.
+contribution topology. Parent ownership is packed as CSR
+`childOffsets/childIndices` plus `parentIndexByChild`, preserving parent-major
+and fine-row-major iteration without an array of child arrays. Direct adjacent
+LOD pairs are packed `Int32Array` index pairs derived arithmetically. LOD
+transitions therefore keep canonical child/parent positions and no-grid-jump
+behavior.
+
+The application and Dots/Squares retain compact level descriptors rather than
+sample arrays. Provider sampling geometry derives longitude/latitude directly
+from the packed Mercator anchors into temporary typed batches; it does not
+materialize one geographic coordinate array per canonical sample in topology.
 
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD

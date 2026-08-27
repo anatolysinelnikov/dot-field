@@ -135,7 +135,7 @@ function legacyEvaluateDirect(levelData, frame, reusable, geometry) {
   const summary = createWeatherSummary(levelData, reusable, Float32Array);
   zeroLegacySummary(summary);
   const value = { rainMmh: 0, storm: 0, hail: 0 };
-  for (let index = 0; index < levelData.samples.length; index++) {
+  for (let index = 0; index < levelData.count; index++) {
     geographicPreparedIntensityAtGeometry(frame, geometry, index, value);
     summary.totalWeight[index] = 1;
     summary.rainWeightedSumMmh[index] = value.rainMmh;
@@ -195,7 +195,7 @@ function sparseUncachedEvaluateDirect(levelData, frame, reusable, geometry, acti
 function legacyAggregate(parentLevel, childSummary, contributions, reusable) {
   const summary = createWeatherSummary(parentLevel, reusable, Float32Array);
   zeroLegacySummary(summary);
-  for (let childIndex = 0; childIndex < childSummary.samples.length; childIndex++) {
+  for (let childIndex = 0; childIndex < childSummary.levelData.count; childIndex++) {
     const start = contributions.offsets[childIndex];
     const end = contributions.offsets[childIndex + 1];
     for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
@@ -332,7 +332,7 @@ function benchmarkFusedKeyframe(pyramid, frame, level) {
 function buildDotsInstances(pyramid, level, mapped) {
   const layer = new GeographicDotsLayer(pyramid);
   layer.active = true;
-  layer.samples = pyramid.samplesFor(level);
+  layer.levelData = pyramid.levelDataFor(level);
   layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped } }, frames1: { mapped: { [level]: mapped } } }]]) };
   layer.rebuildInstances();
   return {
@@ -343,7 +343,7 @@ function buildDotsInstances(pyramid, level, mapped) {
 
 function buildSquaresInstances(pyramid, level, mapped) {
   const layer = new GeographicSquaresLayer(pyramid);
-  layer.samples = pyramid.samplesFor(level);
+  layer.levelData = pyramid.levelDataFor(level);
   layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped } }, frames1: { mapped: { [level]: mapped } } }]]) };
   layer.rebuildInstances();
   return {
@@ -456,16 +456,16 @@ for (const stableLevel of LEVELS) {
   const denseSquaresMetrics = buildSquaresInstances(legacyPyramid, stableLevel, denseMappedSquares);
   const sparseSquaresMetrics = buildSquaresInstances(pyramid, stableLevel, oldMappedSquares);
   const fusedSquaresMetrics = buildSquaresInstances(fusedPyramid, stableLevel, fusedMappedSquares);
-  const totalSamples = [...pyramid.levels.values()].reduce((sum, levelData) => sum + levelData.samples.length, 0);
+  const totalSamples = [...pyramid.levels.values()].reduce((sum, levelData) => sum + levelData.count, 0);
   const summaryBytes = totalSamples * pyramid.summaryMemoryBytesPerSample();
-  const l13SummaryBytes = pyramid.samplesFor(13).length * pyramid.summaryMemoryBytesPerSample();
+  const l13SummaryBytes = pyramid.levelDataFor(13).count * pyramid.summaryMemoryBytesPerSample();
   const fusedSummaryBytes = summaryBytes - l13SummaryBytes;
   const activeCount = geometry.potentialActiveIndices?.length ?? geometry.baseIndex.length;
   const activeSummaryIndices = optimizedSummary[stableLevel].potentialActiveIndices;
-  const activeSummaryCount = activeSummaryIndices?.length ?? pyramid.samplesFor(stableLevel).length;
+  const activeSummaryCount = activeSummaryIndices?.length ?? pyramid.levelDataFor(stableLevel).count;
   const activeIndexBytes = Object.values(optimizedSummary).filter(Boolean).reduce((sum, summary) => sum + (summary.potentialActiveIndices?.byteLength || 0), 0);
-  console.log(`L${stableLevel}: topology=${[...pyramid.levels.values()].map((levelData) => `L${levelData.level}:${levelData.samples.length}`).join(',')}`);
-  console.log(`L${stableLevel}: samples canonical=${pyramid.samplesFor(stableLevel).length} potential-active=${activeSummaryCount}; ratio=${pyramid.samplesFor(stableLevel).length}:${activeSummaryCount}; L13 direct samples dense=${pyramid.samplesFor(13).length} optimized=${activeCount}`);
+  console.log(`L${stableLevel}: topology=${[...pyramid.levels.values()].map((levelData) => `L${levelData.level}:${levelData.count}`).join(',')}`);
+  console.log(`L${stableLevel}: samples canonical=${pyramid.levelDataFor(stableLevel).count} potential-active=${activeSummaryCount}; ratio=${pyramid.levelDataFor(stableLevel).count}:${activeSummaryCount}; L13 direct samples dense=${pyramid.levelDataFor(13).count} optimized=${activeCount}`);
   console.log(`L${stableLevel}: L13 direct ms dense=${directDenseMs.toFixed(3)} sparse-uncached=${sparseUncachedDirectMs.toFixed(3)} optimized=${directOptimizedMs.toFixed(3)}; old L13→L12=${oldL13ToL12Ms.toFixed(3)}; fused L13→L12=${fusedL13ToL12Ms.toFixed(3)}; old L12→L11=${oldL12ToL11Ms === null ? 'n/a' : oldL12ToL11Ms.toFixed(3)} fused=${fusedL12ToL11Ms === null ? 'n/a' : fusedL12ToL11Ms.toFixed(3)}; old L11→L10=${oldL11ToL10Ms === null ? 'n/a' : oldL11ToL10Ms.toFixed(3)} fused=${fusedL11ToL10Ms === null ? 'n/a' : fusedL11ToL10Ms.toFixed(3)}`);
   console.log(`L${stableLevel}: weather keyframe ms dense=${legacyResult.keyframeMs.toFixed(3)} sparse-old=${optimized.keyframeMs.toFixed(3)} fused=${fused.keyframeMs.toFixed(3)}; old aggregate-all=${aggregateOptimizedMs.toFixed(3)} dense-aggregate=${aggregateDenseMs.toFixed(3)}`);
   const denseTotalPreparationMs = legacyResult.keyframeMs + legacyDotsMappingMs + legacyDotsInstanceMs + legacySquaresMappingMs + legacySquaresInstanceMs;
@@ -474,6 +474,6 @@ for (const stableLevel of LEVELS) {
   console.log(`L${stableLevel}: Dots mapping ms dense=${legacyDotsMappingMs.toFixed(3)} sparse-old=${dotsMappingMs.toFixed(3)} fused=${fusedDotsMappingMs.toFixed(3)}; instances dense=${legacyDotsInstanceMs.toFixed(3)} sparse-old=${dotsInstanceMs.toFixed(3)} fused=${fusedDotsInstanceMs.toFixed(3)}; counts dense=${JSON.stringify(denseDotsMetrics.counts)} sparse-old=${JSON.stringify(sparseDotsMetrics.counts)} fused=${JSON.stringify(fusedDotsMetrics.counts)}; bytes dense=${denseDotsMetrics.bytes} sparse-old=${sparseDotsMetrics.bytes} fused=${fusedDotsMetrics.bytes}`);
   console.log(`L${stableLevel}: Squares mapping ms dense=${legacySquaresMappingMs.toFixed(3)} sparse-old=${squaresMappingMs.toFixed(3)} fused=${fusedSquaresMappingMs.toFixed(3)}; instances dense=${legacySquaresInstanceMs.toFixed(3)} sparse-old=${squaresInstanceMs.toFixed(3)} fused=${fusedSquaresInstanceMs.toFixed(3)}; count dense=${denseSquaresMetrics.count} sparse-old=${sparseSquaresMetrics.count} fused=${fusedSquaresMetrics.count}; packedBytes dense=${denseSquaresMetrics.packedBytes} sparse-old=${sparseSquaresMetrics.packedBytes} fused=${fusedSquaresMetrics.packedBytes}; allocatedBytes dense=${denseSquaresMetrics.allocatedBytes} sparse-old=${sparseSquaresMetrics.allocatedBytes} fused=${fusedSquaresMetrics.allocatedBytes}`);
   console.log(`L${stableLevel}: total weather-to-instance-preparation ms dense=${denseTotalPreparationMs.toFixed(3)} sparse-old=${sparseTotalPreparationMs.toFixed(3)} fused=${fusedTotalPreparationMs.toFixed(3)}`);
-  console.log(`L${stableLevel}: physical summary memory one-keyframe old=${mib(summaryBytes)} fused=${mib(fusedSummaryBytes)}; normal two-keyframe old=${mib(summaryBytes * 2)} fused=${mib(fusedSummaryBytes * 2)}; eliminated L13=${mib(l13SummaryBytes)} per keyframe; active-index list=${mib(activeIndexBytes)} source union mask=${mib(weather.potentialWeatherMask?.byteLength || 0)} Dots/Squares mapped=${mib(pyramid.samplesFor(stableLevel).length * (4 + 8) * Float32Array.BYTES_PER_ELEMENT)}`);
+  console.log(`L${stableLevel}: physical summary memory one-keyframe old=${mib(summaryBytes)} fused=${mib(fusedSummaryBytes)}; normal two-keyframe old=${mib(summaryBytes * 2)} fused=${mib(fusedSummaryBytes * 2)}; eliminated L13=${mib(l13SummaryBytes)} per keyframe; active-index list=${mib(activeIndexBytes)} source union mask=${mib(weather.potentialWeatherMask?.byteLength || 0)} Dots/Squares mapped=${mib(pyramid.levelDataFor(stableLevel).count * (4 + 8) * Float32Array.BYTES_PER_ELEMENT)}`);
   if (stableLevel === 10) console.log(`L${stableLevel}: dense-vs-optimized sample check=${denseSummary[stableLevel].rainWeightedSumMmh[0] === optimizedSummary[stableLevel].rainWeightedSumMmh[0]}`);
 }
