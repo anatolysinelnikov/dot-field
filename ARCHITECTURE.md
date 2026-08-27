@@ -235,6 +235,13 @@ continue to use the full contract. Renderers resolve each profile-supported
 rain coverage array once before their sample loop; temporal reconstruction
 remains provider-owned.
 
+During an active L12/L13 transition, a temporal keyframe that must rebuild both
+levels is evaluated as one multi-level pyramid request, then mapped into the
+separate per-level renderer states. This preserves per-level temporal promotion
+and transition ownership while allowing L12 to aggregate from the same retained
+L13 physical summary. Other transitions retain their existing independent
+sampling behavior.
+
 `geography.js` is the renderer-facing adapter. It loads and activates the
 sequence before map initialization and converts the shared point interface to
 geographic longitude/latitude. It falls back to the checked-in

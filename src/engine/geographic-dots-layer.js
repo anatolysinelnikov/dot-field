@@ -371,7 +371,7 @@ export class GeographicDotsLayer {
     this.active = true;
     this.hazardsVisible = true;
     this.lifecycleDiagnostics = {
-      evaluateKeyframeCalls: 0, weatherEvaluationMs: 0, mappingMs: 0,
+      evaluateKeyframeCalls: 0, evaluateTransitionKeyframeCalls: 0, weatherEvaluationMs: 0, mappingMs: 0,
       instanceRebuildCalls: 0, instanceRebuildMs: 0, preservedTopologyStates: 0
     };
   }
@@ -462,6 +462,21 @@ export class GeographicDotsLayer {
     return { index, summaries, mapped };
   }
 
+  evaluateTransitionKeyframes(levels, index, reusableStates = null) {
+    this.lifecycleDiagnostics.evaluateTransitionKeyframeCalls++;
+    this.lifecycleDiagnostics.evaluateKeyframeCalls += levels.length;
+    const reusableSummaries = new Array(MAX_GRID_LEVEL + 1);
+    for (const level of levels) reusableSummaries[level] = reusableStates?.get(level)?.summaries?.[level] || null;
+    const weatherStarted = now();
+    const summaries = this.weatherPyramid.evaluate(levels, prepareGeographicFieldFrame(index / TEMPORAL_FRAME_COUNT), reusableSummaries);
+    this.lifecycleDiagnostics.weatherEvaluationMs += now() - weatherStarted;
+    const mapped = new Array(MAX_GRID_LEVEL + 1);
+    const mappingStarted = now();
+    for (const level of levels) mapped[level] = mapDotsWeatherSummary(summaries[level], reusableStates?.get(level)?.mapped?.[level]);
+    this.lifecycleDiagnostics.mappingMs += now() - mappingStarted;
+    return new Map(levels.map((level) => [level, { index, summaries, mapped }]));
+  }
+
   createLevelTemporalState(level, index, nextIndex) {
     return {
       frames0: this.evaluateKeyframe(level, index),
@@ -473,10 +488,15 @@ export class GeographicDotsLayer {
     const frame = geographicTemporalFrameAt(time);
     const nextIndex = frame.nextIndex;
     const levels = this.activeLevels();
+    const joint = levels.length === 2 && levels.includes(12) && levels.includes(13);
+    const frames0 = joint ? this.evaluateTransitionKeyframes(levels, frame.index) : null;
+    const frames1 = joint ? this.evaluateTransitionKeyframes(levels, nextIndex) : null;
     this.temporal = {
       index: frame.index,
       nextIndex,
-      levels: new Map(levels.map((level) => [level, this.createLevelTemporalState(level, frame.index, nextIndex)]))
+      levels: new Map(levels.map((level) => [level, joint
+        ? { frames0: frames0.get(level), frames1: frames1.get(level) }
+        : this.createLevelTemporalState(level, frame.index, nextIndex)]))
     };
     this.temporalProgress = frame.progress;
     this.rebuildInstances();
@@ -562,7 +582,16 @@ export class GeographicDotsLayer {
       if (this.temporal && frame.index === this.temporal.nextIndex) {
         this.temporal.index = frame.index;
         this.temporal.nextIndex = frame.nextIndex;
-        for (const [level, temporalState] of this.temporal.levels) {
+        const levels = [...this.temporal.levels.keys()];
+        if (levels.length === 2 && levels.includes(12) && levels.includes(13)) {
+          const reusableStates = new Map(levels.map((level) => [level, this.temporal.levels.get(level).frames0]));
+          const nextFrames = this.evaluateTransitionKeyframes(levels, this.temporal.nextIndex, reusableStates);
+          for (const level of levels) {
+            const temporalState = this.temporal.levels.get(level);
+            temporalState.frames0 = temporalState.frames1;
+            temporalState.frames1 = nextFrames.get(level);
+          }
+        } else for (const [level, temporalState] of this.temporal.levels) {
           const reusableState = temporalState.frames0;
           temporalState.frames0 = temporalState.frames1;
           temporalState.frames1 = this.evaluateKeyframe(level, this.temporal.nextIndex, reusableState);

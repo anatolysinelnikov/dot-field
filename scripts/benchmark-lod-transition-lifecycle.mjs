@@ -99,6 +99,10 @@ function runCase(sequence, window, fromLevel, toLevel, Layer, optimized) {
   layer.setTransition(initialTopology.levelDataFor(fromLevel), initialTopology.levelDataFor(toLevel), time, 0);
   const transitionStartMs = phase(startStarted);
   const startEvalCount = delta(layer.lifecycleDiagnostics.evaluateKeyframeCalls, startDiagnostics.evaluateKeyframeCalls);
+  const startJointEvalCount = delta(layer.lifecycleDiagnostics.evaluateTransitionKeyframeCalls, startDiagnostics.evaluateTransitionKeyframeCalls);
+  const startPyramidEvalCount = delta(pyramid.diagnostics.evaluateCalls, startPyramidDiagnostics.evaluateCalls);
+  const startWeatherEvaluationMs = delta(layer.lifecycleDiagnostics.weatherEvaluationMs, startDiagnostics.weatherEvaluationMs);
+  const startMappingMs = delta(layer.lifecycleDiagnostics.mappingMs, startDiagnostics.mappingMs);
   const startGeometryCount = delta(pyramid.diagnostics.samplingGeometryPreparations, startPyramidDiagnostics.samplingGeometryPreparations);
   const startEvaluationRecords = evaluationRecords.slice();
   const startInstanceMs = delta(layer.lifecycleDiagnostics.instanceRebuildMs, startDiagnostics.instanceRebuildMs);
@@ -159,6 +163,10 @@ function runCase(sequence, window, fromLevel, toLevel, Layer, optimized) {
     destinationFrame0: startEvaluationRecords.find((record) => record.index === Math.floor(time * 180))?.ms ?? 0,
     destinationFrame1: startEvaluationRecords.find((record) => record.index === Math.min(180, Math.floor(time * 180) + 1))?.ms ?? 0,
     destinationEvaluationCalls: startEvalCount,
+    destinationJointEvaluationCalls: startJointEvalCount,
+    destinationPyramidEvaluationCalls: startPyramidEvalCount,
+    transitionWeatherEvaluationMs: startWeatherEvaluationMs,
+    transitionMappingMs: startMappingMs,
     transitionInstancePreparationMs: startInstanceMs,
     morphFrameMedianMs: median(morphTimings),
     morphFrameP95Ms: percentile(morphTimings, 0.95),
