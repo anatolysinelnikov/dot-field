@@ -199,9 +199,11 @@ exactly. Geographic axes are constructed deterministically from metadata.
 the existing bilinear spatial sampler and presents temporal frames that
 linearly blend source frames; prepared geometry remains a `Uint32Array`
 source-cell index plus two `Float64Array` interpolation fractions (20
-bytes/sample), reusable across all 19 frames. Sequence geometry lazily owns
-Float64 spatial rain arrays aligned with its potentially-active canonical
-indices, one array per provider frame requested by playback. Regular row-major
+bytes/sample), reusable across all 19 frames. Sequence geometry lazily owns a
+bounded four-entry LRU of Float64 spatial rain arrays aligned with its
+potentially-active canonical indices, keeping the adjacent source-frame pair
+needed by playback while allowing old frames to be recomputed after wide
+scrubs. Regular row-major
 canonical levels prepare this geometry axis-separably: one longitude
 conversion and source-axis lookup per column, and one latitude conversion and
 source-axis lookup per row, followed by packed lookup-array filling. Providers

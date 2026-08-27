@@ -41,6 +41,8 @@ const WARMUP = 2;
 const LEVELS = [10, 11, 12];
 const median = (values) => [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)];
 const mib = (bytes) => `${(bytes / 1024 / 1024).toFixed(3)} MiB`;
+const spatialCacheBytes = (geometry) => [...geometry.spatialRainCache.values()]
+  .reduce((total, values) => total + values.byteLength, 0);
 const measure = (callback) => {
   for (let run = 0; run < WARMUP; run++) callback();
   const values = [];
@@ -83,6 +85,38 @@ function denseGeometry(geometry) {
   const copy = { ...geometry };
   delete copy.potentialActiveIndices;
   return copy;
+}
+
+function benchmarkSpatialCachePattern(geometry, name, positions) {
+  let misses = 0;
+  let maxEntries = 0;
+  let maxBytes = 0;
+  const run = () => {
+    geometry.spatialRainCache.clear();
+    misses = 0;
+    for (const position of positions) {
+      const frame = weather.prepareFrame(position / (weather.frameCount - 1));
+      const requiredFrames = frame.frame0 === frame.frame1
+        ? [frame.frame0]
+        : [frame.frame0, frame.frame1];
+      for (const frameIndex of requiredFrames) {
+        if (!geometry.spatialRainCache.has(frameIndex)) misses++;
+      }
+      frame.samplePreparedBatch(geometry);
+      maxEntries = Math.max(maxEntries, geometry.spatialRainCache.size);
+      maxBytes = Math.max(maxBytes, spatialCacheBytes(geometry));
+    }
+  };
+  const medianMs = measure(run);
+  return {
+    name,
+    entries: geometry.spatialRainCache.size,
+    bytes: spatialCacheBytes(geometry),
+    maxEntries,
+    maxBytes,
+    misses,
+    medianMs
+  };
 }
 
 function evaluateChain(pyramid, frame, level, geometry, reusable = null) {
@@ -411,7 +445,21 @@ for (let frameIndex = 0; frameIndex < weather.frameCount; frameIndex++) {
 }
 const cacheBytesPerFrame = directProbeGeometry.potentialActiveIndices.length * Float64Array.BYTES_PER_ELEMENT;
 console.log(`direct L13 cache probe: active=${directProbeGeometry.potentialActiveIndices.length}; sparse uncached=${sparseUncachedDirectMs.toFixed(3)}ms; source-pair cache build=${sourcePairCacheBuildMs.toFixed(3)}ms; cold direct=${coldDirectMs.toFixed(3)}ms; steady cached direct=${steadyDirectMs.toFixed(3)}ms; one-new-frame boundary=${providerBoundaryMs.toFixed(3)}ms`);
-console.log(`direct L13 cache memory: per-source-frame=${mib(cacheBytesPerFrame)}; representative pair=${mib(cacheBytesPerFrame * 2)}; all ${weather.frameCount} source frames=${mib(cacheBytesPerFrame * weather.frameCount)} (${directProbeGeometry.spatialRainCache.size} cached frames)`);
+console.log(`direct L13 cache memory: per-source-frame=${mib(cacheBytesPerFrame)}; representative pair=${mib(cacheBytesPerFrame * 2)}; retained=${mib(spatialCacheBytes(directProbeGeometry))} (${directProbeGeometry.spatialRainCache.size} cached frames); unbounded-reference-all-${weather.frameCount}=${mib(cacheBytesPerFrame * weather.frameCount)}`);
+console.log(`direct L13 non-cache memory: provider-binary=${mib(rainFramesMmh.byteLength)}; prepared-geometry-base=${mib(weather.samplingGeometryBytes(directProbeGeometry))}; temporal-rain-scratch=${mib(directProbeGeometry.temporalRainMmh.byteLength)}`);
+const forwardPositions = [...Array.from({ length: weather.frameCount - 1 }, (_, index) => index + 0.25), weather.frameCount - 1];
+const reversePositions = [...Array.from({ length: weather.frameCount - 1 }, (_, index) => weather.frameCount - 1.25 - index), 0];
+const adjacentScrubPositions = [0.25, 1.25, 0.25, 1.25, 2.25, 1.25, 2.25, 3.25, 2.25, 3.25, 4.25, 3.25, 4.25, 5.25, 4.25, 5.25, 6.25, 5.25, 6.25, 7.25];
+const wideJumpPositions = [0, 9, 18, 1, 17, 2, 16, 3, 15, 4, 14];
+for (const result of [
+  benchmarkSpatialCachePattern(directProbeGeometry, 'all-exact-forward', Array.from({ length: weather.frameCount }, (_, index) => index)),
+  benchmarkSpatialCachePattern(directProbeGeometry, 'normal-forward-playback', forwardPositions),
+  benchmarkSpatialCachePattern(directProbeGeometry, 'reverse-playback', reversePositions),
+  benchmarkSpatialCachePattern(directProbeGeometry, 'adjacent-back-and-forth-scrub', adjacentScrubPositions),
+  benchmarkSpatialCachePattern(directProbeGeometry, 'wide-jump-scrub', wideJumpPositions)
+]) {
+  console.log(`spatial cache ${result.name}: entries=${result.entries}; bytes=${mib(result.bytes)}; maxEntries=${result.maxEntries}; maxBytes=${mib(result.maxBytes)}; sourceFrameMisses=${result.misses}; medianPatternMs=${result.medianMs.toFixed(3)}`);
+}
 
 for (const stableLevel of LEVELS) {
   const topology = makeTopology(stableLevel);

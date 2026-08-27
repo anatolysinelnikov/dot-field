@@ -54,4 +54,41 @@ if (endpoint.index !== 180 || endpoint.nextIndex !== 180 || endpoint.progress !=
 const finalSourceFrame = sequence.prepareFrame(1);
 if (finalSourceFrame.frame0 !== 18 || finalSourceFrame.frame1 !== 18 || finalSourceFrame.progress !== 0) throw new Error('terminal source frame is cyclic.');
 
+const firstWetSourceIndex = rainFramesMmh.findIndex((value) => value > 0);
+const wetLongitudeIndex = firstWetSourceIndex % width;
+const wetLatitudeIndex = Math.floor(firstWetSourceIndex / width);
+const cacheGeometry = sequence.prepareSamplingGeometry(
+  Float64Array.of(longitudes[wetLongitudeIndex]),
+  Float64Array.of(latitudes[wetLatitudeIndex])
+);
+const expectedSpatialFrames = new Array(sequence.frameCount);
+for (let frameIndex = 0; frameIndex < sequence.frameCount; frameIndex++) {
+  expectedSpatialFrames[frameIndex] = Float64Array.from(
+    sequence.prepareFrame(frameIndex / (sequence.frameCount - 1)).preparedSourceFrame(cacheGeometry, frameIndex)
+  );
+}
+if (cacheGeometry.spatialRainCache.size > 4) throw new Error('spatial rain cache exceeded its four-frame bound.');
+if (cacheGeometry.spatialRainCache.size !== 4) throw new Error('full source-frame traversal did not retain the four most recent spatial frames.');
+const cachedFrame = sequence.prepareFrame(7 / 18).preparedSourceFrame(cacheGeometry, 7);
+const refreshedCachedFrame = sequence.prepareFrame(7 / 18).preparedSourceFrame(cacheGeometry, 7);
+if (cachedFrame !== refreshedCachedFrame) throw new Error('spatial rain cache hit did not return the exact existing Float64Array.');
+cacheGeometry.spatialRainCache.clear();
+for (const frameIndex of [0, 1, 2, 3]) sequence.prepareFrame(frameIndex / 18).preparedSourceFrame(cacheGeometry, frameIndex);
+const refreshedFirstFrame = sequence.prepareFrame(0).preparedSourceFrame(cacheGeometry, 0);
+sequence.prepareFrame(4 / 18).preparedSourceFrame(cacheGeometry, 4);
+if (!cacheGeometry.spatialRainCache.has(0) || cacheGeometry.spatialRainCache.has(1) || refreshedFirstFrame !== cacheGeometry.spatialRainCache.get(0)) {
+  throw new Error('spatial rain cache hit did not refresh LRU recency.');
+}
+for (const frameIndex of [0, 9, 18, 1, 17, 2, 16, 3, 15, 4, 14]) {
+  sequence.prepareFrame(frameIndex / 18).preparedSourceFrame(cacheGeometry, frameIndex);
+}
+const recomputedFrame = sequence.prepareFrame(0).preparedSourceFrame(cacheGeometry, 0);
+if (!recomputedFrame.every((value, index) => value === expectedSpatialFrames[0][index])) {
+  throw new Error('evicted spatial source frame did not reproduce exact Float64 values.');
+}
+if (cacheGeometry.spatialRainCache.size > 4) throw new Error('wide scrub exceeded the spatial rain cache bound.');
+const terminalBatch = finalSourceFrame.samplePreparedBatch(cacheGeometry);
+const terminalFrame = finalSourceFrame.preparedSourceFrame(cacheGeometry, 18);
+if (terminalBatch[0] !== terminalFrame[0]) throw new Error('terminal frame did not use the identical source-frame cache value.');
+
 console.log('Real weather sequence verification passed.');

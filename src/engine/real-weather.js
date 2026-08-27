@@ -8,6 +8,7 @@ const OUTSIDE_SOURCE_INDEX = 0xffffffff;
 const SEQUENCE_SCHEMA_VERSION = 'dot-field-netcdf-sequence-v1';
 const SEQUENCE_DIMENSIONS = Object.freeze(['time', 'latitude', 'longitude']);
 const SEQUENCE_BINARY_FILENAME = 'rain.f32';
+const SPATIAL_RAIN_CACHE_LIMIT = 4;
 
 function fail(message) {
   throw new Error(`Real weather CSV validation failed: ${message}`);
@@ -443,7 +444,11 @@ export class RealWeatherSequence extends RealWeatherField {
   preparedSourceFrame(geometry, frameIndex) {
     if (!geometry.spatialRainCache) geometry.spatialRainCache = new Map();
     const cached = geometry.spatialRainCache.get(frameIndex);
-    if (cached) return cached;
+    if (cached !== undefined) {
+      geometry.spatialRainCache.delete(frameIndex);
+      geometry.spatialRainCache.set(frameIndex, cached);
+      return cached;
+    }
     const activeIndices = geometry.potentialActiveIndices || new Uint32Array(0);
     const values = new Float64Array(activeIndices.length);
     for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
@@ -456,6 +461,10 @@ export class RealWeatherSequence extends RealWeatherField {
         geometry.longitudeFraction[index], geometry.latitudeFraction[index]);
     }
     geometry.spatialRainCache.set(frameIndex, values);
+    while (geometry.spatialRainCache.size > SPATIAL_RAIN_CACHE_LIMIT) {
+      const oldestFrameIndex = geometry.spatialRainCache.keys().next().value;
+      geometry.spatialRainCache.delete(oldestFrameIndex);
+    }
     return values;
   }
 
