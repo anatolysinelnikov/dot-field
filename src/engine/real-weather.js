@@ -122,7 +122,8 @@ export class RealWeatherField {
       && geometry.longitudeStart === this.longitudes[0]
       && geometry.longitudeSpacing === this.longitudeSpacing
       && geometry.latitudeStart === this.latitudes[0]
-      && geometry.latitudeSpacing === this.latitudeSpacing;
+      && geometry.latitudeSpacing === this.latitudeSpacing
+      && !geometry.potentialWeatherMask;
   }
 
   prepareSamplingGeometry(longitudes, latitudes, reusable = null) {
@@ -253,6 +254,17 @@ export class RealWeatherSequence extends RealWeatherField {
     this.frameCount = frameCount;
     this.frameSize = frameSize;
     this.timestamps = Object.freeze([...timestamps]);
+    // A source node can only contribute positive reconstructed rain when at
+    // least one of the four nodes in its bilinear stencil is positive. This
+    // sequence-wide union is immutable and is shared by every prepared
+    // geometry and temporal frame.
+    this.potentialWeatherMask = new Uint8Array(frameSize);
+    for (let frame = 0; frame < frameCount; frame++) {
+      const offset = frame * frameSize;
+      for (let index = 0; index < frameSize; index++) {
+        if (rainFramesMmh[offset + index] > 0) this.potentialWeatherMask[index] = 1;
+      }
+    }
     // RAW is intentionally a static diagnostic of the initial source frame.
     this.rawFrame = new RealWeatherField({
       longitudes,
@@ -267,6 +279,34 @@ export class RealWeatherSequence extends RealWeatherField {
       longitudeSpacing,
       latitudeSpacing
     });
+  }
+
+  isSamplingGeometryCompatible(geometry) {
+    return geometry?.sourceWidth === this.longitudes.length
+      && geometry.sourceHeight === this.latitudes.length
+      && geometry.longitudeStart === this.longitudes[0]
+      && geometry.longitudeSpacing === this.longitudeSpacing
+      && geometry.latitudeStart === this.latitudes[0]
+      && geometry.latitudeSpacing === this.latitudeSpacing
+      && geometry.potentialWeatherMask === this.potentialWeatherMask;
+  }
+
+  prepareSamplingGeometry(longitudes, latitudes, reusable = null) {
+    const geometry = super.prepareSamplingGeometry(longitudes, latitudes, reusable);
+    if (geometry.potentialWeatherMask === this.potentialWeatherMask) return geometry;
+    const activeIndices = [];
+    for (let index = 0; index < geometry.baseIndex.length; index++) {
+      const baseIndex = geometry.baseIndex[index];
+      if (baseIndex === OUTSIDE_SOURCE_INDEX) continue;
+      const x1y0 = baseIndex + 1;
+      const x0y1 = baseIndex + geometry.sourceWidth;
+      const x1y1 = x0y1 + 1;
+      if (this.potentialWeatherMask[baseIndex] || this.potentialWeatherMask[x1y0]
+        || this.potentialWeatherMask[x0y1] || this.potentialWeatherMask[x1y1]) activeIndices.push(index);
+    }
+    geometry.potentialActiveIndices = Uint32Array.from(activeIndices);
+    geometry.potentialWeatherMask = this.potentialWeatherMask;
+    return geometry;
   }
 
   prepareFrame(time) {

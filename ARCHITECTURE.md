@@ -283,6 +283,18 @@ use this state: they remain implemented but inactive on the existing fixed
 support-derived L14 scalar lattice until viewport-windowed scalar
 reconstruction is implemented.
 
+For a multi-frame sequence, `RealWeatherSequence` builds one immutable
+sequence-wide positive source-node union mask while the loaded frames are
+already resident. Each prepared canonical geometry derives a reusable sorted
+set of samples whose four-node bilinear stencil intersects that union. Direct
+weather evaluation visits only that potentially-active set; samples guaranteed
+dry for the entire sequence remain zero. The pyramid propagates the static set
+through its centered aggregate topology, while topology-derived `totalWeight`
+arrays are computed once per topology and retained across temporal keyframes.
+Aggregation therefore skips guaranteed-dry child statistics but preserves every
+dry child in the cached denominators and retains the same summary API and
+representation-independent physical semantics.
+
 ```text
 provider source grid
         ↓

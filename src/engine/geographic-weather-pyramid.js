@@ -35,24 +35,40 @@ function summaryMatchesLevel(summary, levelData, ArrayType) {
     && summary.rainCoverageWeight[0]?.constructor === ArrayType;
 }
 
-function zeroSummary(summary) {
-  summary.totalWeight.fill(0);
-  summary.rainWeightedSumMmh.fill(0);
-  summary.rainMaxMmh.fill(0);
-  for (const coverage of summary.rainCoverageWeight) coverage.fill(0);
-  summary.stormCoverageWeight.fill(0);
-  summary.stormWeightedSeverity.fill(0);
-  summary.stormMaxSeverity.fill(0);
-  summary.hailCoverageWeight.fill(0);
-  summary.hailWeightedSeverity.fill(0);
-  summary.hailMaxSeverity.fill(0);
+function zeroWeatherFields(summary, activeIndices = null) {
+  if (!activeIndices) {
+    summary.rainWeightedSumMmh.fill(0);
+    summary.rainMaxMmh.fill(0);
+    for (const coverage of summary.rainCoverageWeight) coverage.fill(0);
+    summary.stormCoverageWeight.fill(0);
+    summary.stormWeightedSeverity.fill(0);
+    summary.stormMaxSeverity.fill(0);
+    summary.hailCoverageWeight.fill(0);
+    summary.hailWeightedSeverity.fill(0);
+    summary.hailMaxSeverity.fill(0);
+    return;
+  }
+  for (const index of activeIndices) {
+    summary.rainWeightedSumMmh[index] = 0;
+    summary.rainMaxMmh[index] = 0;
+    for (const coverage of summary.rainCoverageWeight) coverage[index] = 0;
+    summary.stormCoverageWeight[index] = 0;
+    summary.stormWeightedSeverity[index] = 0;
+    summary.stormMaxSeverity[index] = 0;
+    summary.hailCoverageWeight[index] = 0;
+    summary.hailWeightedSeverity[index] = 0;
+    summary.hailMaxSeverity[index] = 0;
+  }
 }
 
-export function createWeatherSummary(levelData, reusable = null, ArrayType = Float32Array) {
+export function createWeatherSummary(levelData, reusable = null, ArrayType = Float32Array, totalWeight = null) {
   if (summaryMatchesLevel(reusable, levelData, ArrayType)) {
     reusable.level = levelData.level;
     reusable.samples = levelData.samples;
-    zeroSummary(reusable);
+    if (totalWeight) {
+      reusable.totalWeight = totalWeight;
+      reusable.totalWeightInitialized = true;
+    }
     return reusable;
   }
 
@@ -60,7 +76,10 @@ export function createWeatherSummary(levelData, reusable = null, ArrayType = Flo
   return {
     level: levelData.level,
     samples: levelData.samples,
-    totalWeight: new ArrayType(length),
+    totalWeight: totalWeight || new ArrayType(length),
+    totalWeightInitialized: Boolean(totalWeight),
+    potentialActiveIndices: undefined,
+    potentialActiveIndicesInitialized: false,
     rainWeightedSumMmh: new ArrayType(length),
     rainMaxMmh: new ArrayType(length),
     rainCoverageWeight: RAIN_COVERAGE_THRESHOLDS_MMH.map(() => new ArrayType(length)),
@@ -71,6 +90,49 @@ export function createWeatherSummary(levelData, reusable = null, ArrayType = Flo
     hailWeightedSeverity: new ArrayType(length),
     hailMaxSeverity: new ArrayType(length)
   };
+}
+
+function initializeDirectTotalWeight(summary) {
+  if (summary.totalWeightInitialized) return;
+  summary.totalWeight.fill(1);
+  summary.totalWeightInitialized = true;
+}
+
+function initializeAggregateTotalWeight(summary, childSummary, contributions) {
+  if (summary.totalWeightInitialized) return;
+  summary.totalWeight.fill(0);
+  for (let childIndex = 0; childIndex < childSummary.samples.length; childIndex++) {
+    const start = contributions.offsets[childIndex];
+    const end = contributions.offsets[childIndex + 1];
+    for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+      const parentIndex = contributions.parentIndices[contributionIndex];
+      summary.totalWeight[parentIndex] += contributions.weights[contributionIndex] * childSummary.totalWeight[childIndex];
+    }
+  }
+  summary.totalWeightInitialized = true;
+}
+
+function activeIndicesForAggregate(summary, childSummary, contributions) {
+  if (summary.potentialActiveIndicesInitialized) return summary.potentialActiveIndices;
+  const childActiveIndices = childSummary.potentialActiveIndices;
+  if (!childActiveIndices) {
+    summary.potentialActiveIndices = null;
+    summary.potentialActiveIndicesInitialized = true;
+    return null;
+  }
+  const active = new Uint8Array(summary.samples.length);
+  for (const childIndex of childActiveIndices) {
+    const start = contributions.offsets[childIndex];
+    const end = contributions.offsets[childIndex + 1];
+    for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+      active[contributions.parentIndices[contributionIndex]] = 1;
+    }
+  }
+  const activeIndices = [];
+  for (let index = 0; index < active.length; index++) if (active[index]) activeIndices.push(index);
+  summary.potentialActiveIndices = Uint32Array.from(activeIndices);
+  summary.potentialActiveIndicesInitialized = true;
+  return summary.potentialActiveIndices;
 }
 
 function centeredAxisCandidates(coordinate, parentStep) {
@@ -115,17 +177,23 @@ export function buildCenteredContributions(fineLevel, coarseLevel) {
   };
 }
 
-export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, ArrayType = Float32Array, samplingGeometry = null) {
-  const summary = createWeatherSummary(levelData, reusable, ArrayType);
+export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, ArrayType = Float32Array, samplingGeometry = null, totalWeight = null) {
+  const summary = createWeatherSummary(levelData, reusable, ArrayType, totalWeight);
+  initializeDirectTotalWeight(summary);
+  const activeIndices = samplingGeometry?.potentialActiveIndices ?? null;
+  summary.potentialActiveIndices = activeIndices;
+  summary.potentialActiveIndicesInitialized = true;
+  zeroWeatherFields(summary, activeIndices);
   const value = { rainMmh: 0, storm: 0, hail: 0 };
-  for (let index = 0; index < levelData.samples.length; index++) {
+  const count = activeIndices ? activeIndices.length : levelData.samples.length;
+  for (let activeIndex = 0; activeIndex < count; activeIndex++) {
+    const index = activeIndices ? activeIndices[activeIndex] : activeIndex;
     if (samplingGeometry) geographicPreparedIntensityAtGeometry(frame, samplingGeometry, index, value);
     else geographicPreparedIntensityAtXY(frame, levelData.samples[index].lngLat[0], levelData.samples[index].lngLat[1], value);
     const rainMmh = value.rainMmh;
     const storm = value.storm;
     const hail = value.hail;
 
-    summary.totalWeight[index] = 1;
     summary.rainWeightedSumMmh[index] = rainMmh;
     summary.rainMaxMmh[index] = rainMmh;
     for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
@@ -141,17 +209,21 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
   return summary;
 }
 
-export function aggregateWeatherSummary(parentLevel, childSummary, contributions, reusable = null, ArrayType = Float32Array) {
-  const summary = createWeatherSummary(parentLevel, reusable, ArrayType);
+export function aggregateWeatherSummary(parentLevel, childSummary, contributions, reusable = null, ArrayType = Float32Array, totalWeight = null) {
+  const summary = createWeatherSummary(parentLevel, reusable, ArrayType, totalWeight);
+  initializeAggregateTotalWeight(summary, childSummary, contributions);
+  const activeIndices = activeIndicesForAggregate(summary, childSummary, contributions);
+  zeroWeatherFields(summary, activeIndices);
   const childCount = childSummary.samples.length;
-  for (let childIndex = 0; childIndex < childCount; childIndex++) {
+  const activeChildren = childSummary.potentialActiveIndices;
+  for (let activeChild = 0; activeChild < (activeChildren ? activeChildren.length : childCount); activeChild++) {
+    const childIndex = activeChildren ? activeChildren[activeChild] : activeChild;
     const start = contributions.offsets[childIndex];
     const end = contributions.offsets[childIndex + 1];
     for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
       const parentIndex = contributions.parentIndices[contributionIndex];
       const weight = contributions.weights[contributionIndex];
       const effectiveWeight = weight * childSummary.totalWeight[childIndex];
-      summary.totalWeight[parentIndex] += effectiveWeight;
       summary.rainWeightedSumMmh[parentIndex] += weight * childSummary.rainWeightedSumMmh[childIndex];
       for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
         summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight * childSummary.rainCoverageWeight[thresholdIndex][childIndex];
@@ -183,6 +255,26 @@ export class GeographicWeatherPyramid {
     for (let level = Math.max(MIN_GRID_LEVEL + 1, topology.levelRange.minLevel + 1); level <= Math.min(WEATHER_REFERENCE_LEVEL, topology.levelRange.maxLevel); level++) {
       if (!this.levels.has(level - 1)) continue;
       this.contributions.set(level, buildCenteredContributions(this.levels.get(level), this.levels.get(level - 1)));
+    }
+    this.totalWeights = new Map();
+    if (this.levels.has(WEATHER_REFERENCE_LEVEL)) {
+      const referenceWeights = new this.summaryArrayType(this.levels.get(WEATHER_REFERENCE_LEVEL).samples.length);
+      referenceWeights.fill(1);
+      this.totalWeights.set(WEATHER_REFERENCE_LEVEL, referenceWeights);
+      for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= topology.levelRange.minLevel; level--) {
+        const childWeights = this.totalWeights.get(level + 1);
+        const contributions = this.contributions.get(level + 1);
+        if (!childWeights || !contributions || !this.levels.has(level)) continue;
+        const weights = new this.summaryArrayType(this.levels.get(level).samples.length);
+        for (let childIndex = 0; childIndex < childWeights.length; childIndex++) {
+          const start = contributions.offsets[childIndex];
+          const end = contributions.offsets[childIndex + 1];
+          for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+            weights[contributions.parentIndices[contributionIndex]] += contributions.weights[contributionIndex] * childWeights[childIndex];
+          }
+        }
+        this.totalWeights.set(level, weights);
+      }
     }
     this.samplingGeometries = new Map();
   }
@@ -252,7 +344,8 @@ export class GeographicWeatherPyramid {
         frame,
         reusableStates?.[WEATHER_REFERENCE_LEVEL],
         this.summaryArrayType,
-        this.prepareSamplingGeometry(WEATHER_REFERENCE_LEVEL, frame)
+        this.prepareSamplingGeometry(WEATHER_REFERENCE_LEVEL, frame),
+        this.totalWeights.get(WEATHER_REFERENCE_LEVEL)
       );
       summaries[WEATHER_REFERENCE_LEVEL] = summary;
       for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= minimumAggregateLevel; level--) {
@@ -263,7 +356,8 @@ export class GeographicWeatherPyramid {
           summary,
           contributions,
           reusableStates?.[level],
-          this.summaryArrayType
+          this.summaryArrayType,
+          this.totalWeights.get(level)
         );
         summaries[level] = summary;
       }
@@ -276,7 +370,8 @@ export class GeographicWeatherPyramid {
           frame,
           reusableStates?.[level],
           this.summaryArrayType,
-          this.prepareSamplingGeometry(level, frame)
+          this.prepareSamplingGeometry(level, frame),
+          this.totalWeights.get(level)
         );
       }
     }
