@@ -125,6 +125,16 @@ export function canonicalWindowsEqual(left, right) {
     && left.minY === right.minY && left.maxY === right.maxY;
 }
 
+// A retained overscanned window is safe while it contains the newly computed
+// overscanned target. Since that target already includes the viewport and its
+// centered-aggregation margin, this containment check is a deterministic
+// hysteresis boundary rather than a correctness deferral.
+export function canonicalWindowContains(container, candidate) {
+  return Boolean(container && candidate)
+    && container.minX <= candidate.minX && container.maxX >= candidate.maxX
+    && container.minY <= candidate.minY && container.maxY >= candidate.maxY;
+}
+
 export function normalizeLodRange(range = { minLevel: DEFAULT_TOPOLOGY_MIN_LEVEL, maxLevel: DEFAULT_TOPOLOGY_MAX_LEVEL }) {
   const minLevel = Number(range.minLevel);
   const maxLevel = Number(range.maxLevel);

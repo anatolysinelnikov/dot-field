@@ -148,6 +148,8 @@ export class RealWeatherField {
       latitudeFraction: new Float64Array(length)
     };
     geometry.baseIndex.fill(OUTSIDE_SOURCE_INDEX);
+    this.setSamplingGeometryMetadata(geometry);
+    const activeIndices = this.potentialWeatherMask ? [] : null;
     for (let index = 0; index < length; index++) {
       const longitude = longitudes[index];
       const latitude = latitudes[index];
@@ -158,14 +160,85 @@ export class RealWeatherField {
       geometry.baseIndex[index] = this.index(longitudePosition.index, latitudePosition.index);
       geometry.longitudeFraction[index] = longitudePosition.fraction;
       geometry.latitudeFraction[index] = latitudePosition.fraction;
+      if (activeIndices && this.isPotentialWeatherSample(geometry, index)) activeIndices.push(index);
     }
+    this.finishSamplingGeometry(geometry, activeIndices);
+    this.setSamplingGeometryMetadata(geometry);
+    return geometry;
+  }
+
+  // Regular packed geographic levels are row-major rectangles. Resolve each
+  // source-axis position once, then fill the packed lookup arrays by product.
+  // This preserves locate() edge/clamping semantics while avoiding per-sample
+  // axis searches and Mercator-to-latitude conversions.
+  prepareRectangularSamplingGeometry(longitudes, latitudes, width, height, reusable = null) {
+    if (width !== longitudes.length || height !== latitudes.length) {
+      throw new Error('Rectangular sampling geometry dimensions must match the packed axis lengths.');
+    }
+    const length = width * height;
+    const geometry = reusable?.baseIndex?.length === length ? reusable : {
+      baseIndex: new Uint32Array(length),
+      longitudeFraction: new Float64Array(length),
+      latitudeFraction: new Float64Array(length)
+    };
+    geometry.baseIndex.fill(OUTSIDE_SOURCE_INDEX);
+    this.setSamplingGeometryMetadata(geometry);
+    const longitudePositions = new Array(width);
+    const latitudePositions = new Array(height);
+    for (let column = 0; column < width; column++) {
+      const longitude = longitudes[column];
+      longitudePositions[column] = longitude < this.bounds.west || longitude > this.bounds.east
+        ? null : this.locate(this.longitudes, longitude);
+    }
+    for (let row = 0; row < height; row++) {
+      const latitude = latitudes[row];
+      latitudePositions[row] = latitude < this.bounds.south || latitude > this.bounds.north
+        ? null : this.locate(this.latitudes, latitude);
+    }
+    const activeIndices = this.potentialWeatherMask ? [] : null;
+    for (let row = 0; row < height; row++) {
+      const latitudePosition = latitudePositions[row];
+      if (!latitudePosition) continue;
+      for (let column = 0; column < width; column++) {
+        const longitudePosition = longitudePositions[column];
+        if (!longitudePosition) continue;
+        const index = row * width + column;
+        geometry.baseIndex[index] = this.index(longitudePosition.index, latitudePosition.index);
+        geometry.longitudeFraction[index] = longitudePosition.fraction;
+        geometry.latitudeFraction[index] = latitudePosition.fraction;
+        if (activeIndices && this.isPotentialWeatherSample(geometry, index)) activeIndices.push(index);
+      }
+    }
+    this.finishSamplingGeometry(geometry, activeIndices);
+    this.setSamplingGeometryMetadata(geometry);
+    return geometry;
+  }
+
+  isPotentialWeatherSample(geometry, index) {
+    const baseIndex = geometry.baseIndex[index];
+    if (baseIndex === OUTSIDE_SOURCE_INDEX) return false;
+    const x1y0 = baseIndex + 1;
+    const x0y1 = baseIndex + geometry.sourceWidth;
+    const x1y1 = x0y1 + 1;
+    return this.potentialWeatherMask[baseIndex] || this.potentialWeatherMask[x1y0]
+      || this.potentialWeatherMask[x0y1] || this.potentialWeatherMask[x1y1];
+  }
+
+  finishSamplingGeometry(geometry, activeIndices) {
+    if (!activeIndices) return;
+    geometry.potentialActiveIndices = Uint32Array.from(activeIndices);
+    geometry.potentialWeatherMask = this.potentialWeatherMask;
+    geometry.spatialRainCache = new Map();
+    geometry.temporalRainMmh = new Float64Array(geometry.potentialActiveIndices.length);
+  }
+
+  setSamplingGeometryMetadata(geometry) {
     geometry.sourceWidth = this.longitudes.length;
     geometry.sourceHeight = this.latitudes.length;
     geometry.longitudeStart = this.longitudes[0];
     geometry.longitudeSpacing = this.longitudeSpacing;
     geometry.latitudeStart = this.latitudes[0];
     geometry.latitudeSpacing = this.latitudeSpacing;
-    return geometry;
   }
 
   samplingGeometryBytes(geometry) {
@@ -237,6 +310,10 @@ export class RealWeatherSequenceFrame {
 
   prepareSamplingGeometry(longitudes, latitudes, reusable = null) {
     return this.sequence.prepareSamplingGeometry(longitudes, latitudes, reusable);
+  }
+
+  prepareRectangularSamplingGeometry(longitudes, latitudes, width, height, reusable = null) {
+    return this.sequence.prepareRectangularSamplingGeometry(longitudes, latitudes, width, height, reusable);
   }
 
   samplePrepared(geometry, index, output = {}) {
@@ -316,23 +393,7 @@ export class RealWeatherSequence extends RealWeatherField {
   }
 
   prepareSamplingGeometry(longitudes, latitudes, reusable = null) {
-    const geometry = super.prepareSamplingGeometry(longitudes, latitudes, reusable);
-    if (geometry.potentialWeatherMask === this.potentialWeatherMask) return geometry;
-    const activeIndices = [];
-    for (let index = 0; index < geometry.baseIndex.length; index++) {
-      const baseIndex = geometry.baseIndex[index];
-      if (baseIndex === OUTSIDE_SOURCE_INDEX) continue;
-      const x1y0 = baseIndex + 1;
-      const x0y1 = baseIndex + geometry.sourceWidth;
-      const x1y1 = x0y1 + 1;
-      if (this.potentialWeatherMask[baseIndex] || this.potentialWeatherMask[x1y0]
-        || this.potentialWeatherMask[x0y1] || this.potentialWeatherMask[x1y1]) activeIndices.push(index);
-    }
-    geometry.potentialActiveIndices = Uint32Array.from(activeIndices);
-    geometry.potentialWeatherMask = this.potentialWeatherMask;
-    geometry.spatialRainCache = new Map();
-    geometry.temporalRainMmh = new Float64Array(geometry.potentialActiveIndices.length);
-    return geometry;
+    return super.prepareSamplingGeometry(longitudes, latitudes, reusable);
   }
 
   prepareFrame(time) {

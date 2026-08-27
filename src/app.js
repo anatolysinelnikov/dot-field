@@ -4,6 +4,7 @@ import { loadActiveWeatherField, WEATHER_REGION } from './engine/geography.js';
 import {
   MAX_LOGICAL_SAMPLING_ZOOM,
   canonicalWindowFromMercatorBounds,
+  canonicalWindowContains,
   canonicalWindowsEqual,
   GeographicLodTopology,
   lngLatToMercator,
@@ -125,6 +126,8 @@ const state = {
   canonicalWindow: null,
   pendingCanonicalWindow: null,
   canonicalWindowRebuilds: 0,
+  canonicalWindowRebuildLastMs: 0,
+  canonicalWindowRebuildSamples: [],
   rawMaxZoom: INITIAL_RAW_MAX_ZOOM,
   resettingView: false,
   mapReady: false,
@@ -195,6 +198,7 @@ function applyCanonicalWindow(canonicalWindow) {
     state.pendingCanonicalWindow = canonicalWindow;
     return false;
   }
+  const started = performance.now();
   if (!geographicWeatherPyramid.setCanonicalWindow(canonicalWindow)) {
     // The initial camera envelope may equal the fixed-support topology. Record
     // that resolved window even when no topology allocation was necessary.
@@ -209,6 +213,9 @@ function applyCanonicalWindow(canonicalWindow) {
   squaresLayer.setTopology(geographicWeatherPyramid.topology);
   if (state.lod.level === null) return true;
   commitLevelData(state.lod.level, geographicWeatherPyramid.levelDataFor(state.lod.level));
+  state.canonicalWindowRebuildLastMs = performance.now() - started;
+  state.canonicalWindowRebuildSamples.push(state.canonicalWindowRebuildLastMs);
+  if (state.canonicalWindowRebuildSamples.length > 120) state.canonicalWindowRebuildSamples.shift();
   updateLodDiagnostics();
   return true;
 }
@@ -228,6 +235,10 @@ function updateCanonicalWindow() {
   if (!bounds) return;
   const candidate = canonicalWindowFromMercatorBounds(bounds);
   if (canonicalWindowsEqual(candidate, state.canonicalWindow)) {
+    state.pendingCanonicalWindow = null;
+    return;
+  }
+  if (canonicalWindowContains(state.canonicalWindow, candidate)) {
     state.pendingCanonicalWindow = null;
     return;
   }

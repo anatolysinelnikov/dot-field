@@ -151,9 +151,13 @@ Mercator envelope using the map bounds plus a deterministic 5 × 5 screen
 unprojection lattice. The envelope expands by 25% of its span on every side,
 adds at least one L10 interval of topology/aggregation safety margin, and is
 snapped outward to L10-compatible boundaries in the global L15 integer
-coordinate system. A move only rebuilds the shared topology when those snapped
-coordinates change. A pending window update is applied after an active 0.2 s
-LOD morph completes, so a window shift is never represented as an LOD morph.
+coordinate system. A move computes a new snapped target on every camera
+update, but retains the current overscanned topology while it contains that
+target. This deterministic window hysteresis keeps the visible viewport and
+centered-aggregation margin covered; a target that exits the retained window
+triggers the existing replacement. A pending window update is applied after an
+active 0.2 s LOD morph completes, so a window shift is never represented as an
+LOD morph.
 
 The application-owned RAF runs only while playback advances or a 0.2 s LOD
 transition is active. Paused map navigation and static updates use MapLibre's
@@ -187,9 +191,14 @@ linearly blend source frames; prepared geometry remains a `Uint32Array`
 source-cell index plus two `Float64Array` interpolation fractions (20
 bytes/sample), reusable across all 19 frames. Sequence geometry lazily owns
 Float64 spatial rain arrays aligned with its potentially-active canonical
-indices, one array per provider frame requested by playback. These arrays are
-computation caches rather than a new weather representation; the single-point
-sampler remains the semantic reference path.
+indices, one array per provider frame requested by playback. Regular row-major
+canonical levels prepare this geometry axis-separably: one longitude
+conversion and source-axis lookup per column, and one latitude conversion and
+source-axis lookup per row, followed by packed lookup-array filling. Providers
+that cannot accept this rectangular contract retain the dense generic fallback.
+The sequence derives its potential-active set during the same packed fill.
+These arrays are computation caches rather than a new weather representation;
+the single-point sampler remains the semantic reference path.
 
 `geography.js` is the renderer-facing adapter. It loads and activates the
 sequence before map initialization and converts the shared point interface to
@@ -281,10 +290,16 @@ Only L12 through L10 are recursively aggregated spatial summaries from L13;
 they are never direct field samples or values from an existing renderer pyramid.
 
 The shared pyramid can replace its active canonical topology or contiguous LOD
-range when the snapped camera window or stable display level changes.
-Replacement rebuilds only the available centered contribution maps, drops
-prepared provider sampling geometry from the old configuration, and fails
-clearly if a requested summary level is not materialized. Dots and Squares
+range when the retained camera window or stable display level changes.
+Replacement drops prepared provider sampling geometry from the old
+configuration and fails clearly if a requested summary level is not
+materialized. Centered contribution plans and geometric `totalWeight` arrays
+use a bounded cache keyed by relative dyadic structure (level pair, dimensions,
+origins/parity, and clipping shape), never absolute geographic position.
+Before a plan is reused, an exact verifier checks every contribution offset,
+parent index, and Float64 weight against the new packed topology; equal
+structural keys then prove the derived total weights are translation invariant.
+Differently shaped support-edge windows rebuild their plans. Dots and Squares
 receive the same replacement topology and clear incompatible temporal
 summaries, mapped arrays, and packed instances before evaluating the new
 configuration at the current weather time. Blur and Areas intentionally do not

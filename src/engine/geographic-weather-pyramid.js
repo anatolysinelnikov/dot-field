@@ -34,6 +34,33 @@ export const RAIN_COVERAGE_THRESHOLDS_MMH = Object.freeze([
   50.0
 ]);
 const now = () => globalThis.performance?.now?.() ?? Date.now();
+const AGGREGATION_PLAN_CACHE_LIMIT = 12;
+const centeredContributionPlanCache = new Map();
+const totalWeightPlanCache = new Map();
+const aggregationPlanCacheCounters = { contributionHits: 0, contributionMisses: 0, totalWeightHits: 0, totalWeightMisses: 0 };
+
+function boundedCacheSet(cache, key, value) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > AGGREGATION_PLAN_CACHE_LIMIT) cache.delete(cache.keys().next().value);
+}
+
+export function resetAggregationPlanCache() {
+  centeredContributionPlanCache.clear();
+  totalWeightPlanCache.clear();
+  aggregationPlanCacheCounters.contributionHits = 0;
+  aggregationPlanCacheCounters.contributionMisses = 0;
+  aggregationPlanCacheCounters.totalWeightHits = 0;
+  aggregationPlanCacheCounters.totalWeightMisses = 0;
+}
+
+export function aggregationPlanCacheStats() {
+  return {
+    ...aggregationPlanCacheCounters,
+    contributionEntries: centeredContributionPlanCache.size,
+    totalWeightEntries: totalWeightPlanCache.size
+  };
+}
 
 function summaryMatchesLevel(summary, levelData, ArrayType) {
   return summary?.totalWeight?.length === levelData.count
@@ -199,6 +226,168 @@ export function buildCenteredContributions(fineLevel, coarseLevel) {
   return { offsets, parentIndices, weights };
 }
 
+// For adjacent dyadic levels, local contribution indices depend only on the
+// relative origins, dimensions, and edge clipping of the two rectangular
+// selections. Absolute geographic position is intentionally absent. The
+// origin deltas encode both parity and which side of an edge is clipped.
+export function centeredContributionStructuralKey(fineLevel, coarseLevel) {
+  const originX = fineLevel.minI - coarseLevel.minI * 2;
+  const originY = fineLevel.minJ - coarseLevel.minJ * 2;
+  const endX = fineLevel.maxI - coarseLevel.maxI * 2;
+  const endY = fineLevel.maxJ - coarseLevel.maxJ * 2;
+  return [
+    fineLevel.level, coarseLevel.level,
+    fineLevel.width, fineLevel.height,
+    coarseLevel.width, coarseLevel.height,
+    fineLevel.minI & 1, fineLevel.minJ & 1,
+    originX, originY, endX, endY
+  ].join(':');
+}
+
+// This verifier proves the cached plan against the new topology without
+// allocating a second contribution graph. Every offset, local parent index,
+// and Float64 weight is checked using the same canonical arithmetic as the
+// uncached builder. A matching structural key then proves translation
+// invariance for the plan and its derived total weights.
+export function verifyCenteredContributionPlan(fineLevel, coarseLevel, contributions) {
+  if (!contributions || contributions.offsets.length !== fineLevel.count + 1) return false;
+  const parentStep = 2 ** (MAX_GRID_LEVEL - coarseLevel.level);
+  let expectedOffset = 0;
+  for (let childIndex = 0; childIndex < fineLevel.count; childIndex++) {
+    const canonicalX = canonicalXForIndex(fineLevel, childIndex);
+    const canonicalY = canonicalYForIndex(fineLevel, childIndex);
+    const xRemainder = canonicalX % parentStep;
+    const yRemainder = canonicalY % parentStep;
+    if ((xRemainder !== 0 && xRemainder !== parentStep / 2)
+      || (yRemainder !== 0 && yRemainder !== parentStep / 2)) return false;
+    const xCount = xRemainder === 0 ? 1 : 2;
+    const yCount = yRemainder === 0 ? 1 : 2;
+    const xStart = xRemainder === 0 ? canonicalX : canonicalX - parentStep / 2;
+    const yStart = yRemainder === 0 ? canonicalY : canonicalY - parentStep / 2;
+    const totalCandidateWeight = (xCount === 1 ? 1 : 0.5) * (yCount === 1 ? 1 : 0.5);
+    let candidateCount = 0;
+    for (let xOffset = 0; xOffset < xCount; xOffset++) {
+      for (let yOffset = 0; yOffset < yCount; yOffset++) {
+        if (canonicalIndexForCoordinates(coarseLevel, xStart + xOffset * parentStep, yStart + yOffset * parentStep) >= 0) candidateCount++;
+      }
+    }
+    if (contributions.offsets[childIndex] !== expectedOffset
+      || contributions.offsets[childIndex + 1] !== expectedOffset + candidateCount) return false;
+    let contributionIndex = expectedOffset;
+    for (let xOffset = 0; xOffset < xCount; xOffset++) {
+      for (let yOffset = 0; yOffset < yCount; yOffset++) {
+        const parentIndex = canonicalIndexForCoordinates(coarseLevel, xStart + xOffset * parentStep, yStart + yOffset * parentStep);
+        if (parentIndex < 0) continue;
+        const weight = ((xCount === 1 ? 1 : 0.5) * (yCount === 1 ? 1 : 0.5)) / (totalCandidateWeight * candidateCount);
+        if (contributions.parentIndices[contributionIndex] !== parentIndex
+          || contributions.weights[contributionIndex] !== weight) return false;
+        contributionIndex++;
+      }
+    }
+    expectedOffset += candidateCount;
+  }
+  return contributions.parentIndices.length === expectedOffset;
+}
+
+function getCenteredContributionPlan(fineLevel, coarseLevel, reuse) {
+  const key = centeredContributionStructuralKey(fineLevel, coarseLevel);
+  if (reuse) {
+    const cached = centeredContributionPlanCache.get(key);
+    if (cached && verifyCenteredContributionPlan(fineLevel, coarseLevel, cached)) {
+      aggregationPlanCacheCounters.contributionHits++;
+      return { key, plan: cached, reused: true };
+    }
+  }
+  aggregationPlanCacheCounters.contributionMisses++;
+  const plan = buildCenteredContributions(fineLevel, coarseLevel);
+  if (!verifyCenteredContributionPlan(fineLevel, coarseLevel, plan)) throw new Error('Centered contribution verifier rejected a freshly built plan.');
+  if (reuse) boundedCacheSet(centeredContributionPlanCache, key, plan);
+  return { key, plan, reused: false };
+}
+
+function totalWeightStructuralKey(level, levelData, contributionKeys) {
+  return [level, levelData.width, levelData.height, ...contributionKeys].join(':');
+}
+
+function buildTotalWeight(levelData, childWeights, contributions, ArrayType) {
+  const weights = new ArrayType(levelData.count);
+  for (let childIndex = 0; childIndex < childWeights.length; childIndex++) {
+    const start = contributions.offsets[childIndex];
+    const end = contributions.offsets[childIndex + 1];
+    for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+      weights[contributions.parentIndices[contributionIndex]] += contributions.weights[contributionIndex] * childWeights[childIndex];
+    }
+  }
+  return weights;
+}
+
+export function buildAggregationSetup(topology, ArrayType = Float32Array, reuse = true) {
+  const started = now();
+  const contributionsStarted = now();
+  const contributions = new Map();
+  const contributionKeys = new Map();
+  let contributionHits = 0;
+  for (let level = Math.max(MIN_GRID_LEVEL + 1, topology.levelRange.minLevel + 1); level <= Math.min(WEATHER_REFERENCE_LEVEL, topology.levelRange.maxLevel); level++) {
+    if (!topology.levels.has(level - 1)) continue;
+    const result = getCenteredContributionPlan(topology.levels.get(level), topology.levels.get(level - 1), reuse);
+    contributions.set(level, result.plan);
+    contributionKeys.set(level, result.key);
+    if (result.reused) contributionHits++;
+  }
+  const contributionsMs = now() - contributionsStarted;
+  const totalWeightsStarted = now();
+  const totalWeights = new Map();
+  const totalWeightKeys = new Map();
+  let totalWeightHits = 0;
+  if (topology.levels.has(WEATHER_REFERENCE_LEVEL)) {
+    const referenceLevelData = topology.levels.get(WEATHER_REFERENCE_LEVEL);
+    const referenceKey = totalWeightStructuralKey(WEATHER_REFERENCE_LEVEL, referenceLevelData, []);
+    let referenceWeights = reuse ? totalWeightPlanCache.get(referenceKey) : null;
+    if (referenceWeights?.length === referenceLevelData.count && referenceWeights.constructor === ArrayType) {
+      aggregationPlanCacheCounters.totalWeightHits++;
+      totalWeightHits++;
+    } else {
+      aggregationPlanCacheCounters.totalWeightMisses++;
+      referenceWeights = new ArrayType(referenceLevelData.count);
+      referenceWeights.fill(1);
+      if (reuse) boundedCacheSet(totalWeightPlanCache, referenceKey, referenceWeights);
+    }
+    totalWeights.set(WEATHER_REFERENCE_LEVEL, referenceWeights);
+    totalWeightKeys.set(WEATHER_REFERENCE_LEVEL, referenceKey);
+    for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= topology.levelRange.minLevel; level--) {
+      const childWeights = totalWeights.get(level + 1);
+      const levelContributions = contributions.get(level + 1);
+      if (!childWeights || !levelContributions || !topology.levels.has(level)) continue;
+      const key = totalWeightStructuralKey(level, topology.levels.get(level), [
+        contributionKeys.get(level + 1),
+        totalWeightKeys.get(level + 1)
+      ]);
+      let weights = reuse ? totalWeightPlanCache.get(key) : null;
+      if (weights?.length === topology.levels.get(level).count && weights.constructor === ArrayType) {
+        aggregationPlanCacheCounters.totalWeightHits++;
+        totalWeightHits++;
+      } else {
+        aggregationPlanCacheCounters.totalWeightMisses++;
+        weights = buildTotalWeight(topology.levels.get(level), childWeights, levelContributions, ArrayType);
+        if (reuse) boundedCacheSet(totalWeightPlanCache, key, weights);
+      }
+      totalWeights.set(level, weights);
+      totalWeightKeys.set(level, key);
+    }
+  }
+  return {
+    contributions,
+    totalWeights,
+    timings: {
+      contributionsMs,
+      totalWeightsMs: now() - totalWeightsStarted,
+      totalMs: now() - started,
+      contributionHits,
+      totalWeightHits
+    }
+  };
+}
+
 export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, ArrayType = Float32Array, samplingGeometry = null, totalWeight = null) {
   const summary = createWeatherSummary(levelData, reusable, ArrayType, totalWeight);
   initializeDirectTotalWeight(summary);
@@ -316,48 +505,18 @@ export function evaluateFusedRainAggregateSummary(parentLevel, frame, samplingGe
 }
 
 export class GeographicWeatherPyramid {
-  constructor(summaryArrayType = Float32Array, topology = new GeographicLodTopology()) {
+  constructor(summaryArrayType = Float32Array, topology = new GeographicLodTopology(), options = {}) {
     this.summaryArrayType = summaryArrayType;
-    this.setTopology(topology);
+    this.setTopology(topology, options);
   }
 
-  setTopology(topology) {
-    const started = now();
-    const contributionsStarted = now();
+  setTopology(topology, options = {}) {
     this.topology = topology;
     this.levels = topology.levels;
-    this.contributions = new Map();
-    for (let level = Math.max(MIN_GRID_LEVEL + 1, topology.levelRange.minLevel + 1); level <= Math.min(WEATHER_REFERENCE_LEVEL, topology.levelRange.maxLevel); level++) {
-      if (!this.levels.has(level - 1)) continue;
-      this.contributions.set(level, buildCenteredContributions(this.levels.get(level), this.levels.get(level - 1)));
-    }
-    const contributionsMs = now() - contributionsStarted;
-    this.totalWeights = new Map();
-    const totalWeightsStarted = now();
-    if (this.levels.has(WEATHER_REFERENCE_LEVEL)) {
-      const referenceWeights = new this.summaryArrayType(this.levels.get(WEATHER_REFERENCE_LEVEL).count);
-      referenceWeights.fill(1);
-      this.totalWeights.set(WEATHER_REFERENCE_LEVEL, referenceWeights);
-      for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= topology.levelRange.minLevel; level--) {
-        const childWeights = this.totalWeights.get(level + 1);
-        const contributions = this.contributions.get(level + 1);
-        if (!childWeights || !contributions || !this.levels.has(level)) continue;
-        const weights = new this.summaryArrayType(this.levels.get(level).count);
-        for (let childIndex = 0; childIndex < childWeights.length; childIndex++) {
-          const start = contributions.offsets[childIndex];
-          const end = contributions.offsets[childIndex + 1];
-          for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
-            weights[contributions.parentIndices[contributionIndex]] += contributions.weights[contributionIndex] * childWeights[childIndex];
-          }
-        }
-        this.totalWeights.set(level, weights);
-      }
-    }
-    this.topologySetupTimings = {
-      contributionsMs,
-      totalWeightsMs: now() - totalWeightsStarted,
-      totalMs: now() - started
-    };
+    const setup = buildAggregationSetup(topology, this.summaryArrayType, options.reuse !== false);
+    this.contributions = setup.contributions;
+    this.totalWeights = setup.totalWeights;
+    this.topologySetupTimings = setup.timings;
     this.samplingGeometries = new Map();
   }
 

@@ -50,6 +50,20 @@ export function geographicPreparedIntensityAt(frame, point, output) {
 }
 
 export function prepareGeographicSamplingGeometry(frame, levelData, reusable = null) {
+  if (typeof frame.prepareRectangularSamplingGeometry === 'function'
+    && levelData.width > 0 && levelData.height > 0 && levelData.width * levelData.height === levelData.count) {
+    const longitudes = new Float64Array(levelData.width);
+    const latitudes = new Float64Array(levelData.height);
+    for (let column = 0; column < levelData.width; column++) {
+      longitudes[column] = mercatorXToLongitude(levelData.canonicalAnchors[column * 2]);
+    }
+    for (let row = 0; row < levelData.height; row++) {
+      latitudes[row] = mercatorYToLatitude(levelData.canonicalAnchors[row * levelData.width * 2 + 1]);
+    }
+    return frame.prepareRectangularSamplingGeometry(longitudes, latitudes, levelData.width, levelData.height, reusable);
+  }
+
+  // Generic provider fallback for non-rectangular or legacy provider frames.
   const longitudes = new Float64Array(levelData.count);
   const latitudes = new Float64Array(levelData.count);
   for (let index = 0; index < levelData.count; index++) {
