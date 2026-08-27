@@ -733,6 +733,7 @@ function updateTimelineFromPointer(clientX) {
   const min = Number(timeSlider.min);
   const max = Number(timeSlider.max);
   const value = clamp(min + (clientX - rect.left) / rect.width * (max - min), min, max);
+  timeSlider.value = String(value);
   updateTimeFromTimelineValue(value);
 }
 
