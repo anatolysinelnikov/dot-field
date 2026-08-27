@@ -284,7 +284,10 @@ function buildDotsInstances(pyramid, level, mapped) {
   layer.samples = pyramid.samplesFor(level);
   layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped } }, frames1: { mapped: { [level]: mapped } } }]]) };
   layer.rebuildInstances();
-  return Object.values(layer.instances).reduce((sum, values) => sum + values.byteLength, 0);
+  return {
+    counts: { ...layer.counts },
+    bytes: Object.values(layer.instances).reduce((sum, values) => sum + values.byteLength, 0)
+  };
 }
 
 function buildSquaresInstances(pyramid, level, mapped) {
@@ -292,7 +295,11 @@ function buildSquaresInstances(pyramid, level, mapped) {
   layer.samples = pyramid.samplesFor(level);
   layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped } }, frames1: { mapped: { [level]: mapped } } }]]) };
   layer.rebuildInstances();
-  return layer.instanceData[0].byteLength;
+  return {
+    count: layer.instanceCounts[0],
+    packedBytes: layer.instanceCounts[0] * 18 * Float32Array.BYTES_PER_ELEMENT,
+    allocatedBytes: layer.instanceData[0].byteLength
+  };
 }
 
 console.log('Full-domain weather performance benchmark');
@@ -373,14 +380,24 @@ for (const stableLevel of LEVELS) {
   const squaresMappingMs = measure(() => mapSquaresWeatherSummary(optimizedSummary[stableLevel]));
   const dotsInstanceMs = measure(() => buildDotsInstances(pyramid, stableLevel, mapDotsWeatherSummary(optimizedSummary[stableLevel])));
   const squaresInstanceMs = measure(() => buildSquaresInstances(pyramid, stableLevel, mapSquaresWeatherSummary(optimizedSummary[stableLevel])));
+  const denseDotsMetrics = buildDotsInstances(legacyPyramid, stableLevel, mapDotsWeatherSummary(denseSummary[stableLevel]));
+  const sparseDotsMetrics = buildDotsInstances(pyramid, stableLevel, mapDotsWeatherSummary(optimizedSummary[stableLevel]));
+  const denseSquaresMetrics = buildSquaresInstances(legacyPyramid, stableLevel, mapSquaresWeatherSummary(denseSummary[stableLevel]));
+  const sparseSquaresMetrics = buildSquaresInstances(pyramid, stableLevel, mapSquaresWeatherSummary(optimizedSummary[stableLevel]));
   const totalSamples = [...pyramid.levels.values()].reduce((sum, levelData) => sum + levelData.samples.length, 0);
   const summaryBytes = totalSamples * pyramid.summaryMemoryBytesPerSample();
   const activeCount = geometry.potentialActiveIndices?.length ?? geometry.baseIndex.length;
+  const activeSummaryIndices = optimizedSummary[stableLevel].potentialActiveIndices;
+  const activeSummaryCount = activeSummaryIndices?.length ?? pyramid.samplesFor(stableLevel).length;
   const activeIndexBytes = Object.values(optimizedSummary).filter(Boolean).reduce((sum, summary) => sum + (summary.potentialActiveIndices?.byteLength || 0), 0);
   console.log(`L${stableLevel}: topology=${[...pyramid.levels.values()].map((levelData) => `L${levelData.level}:${levelData.samples.length}`).join(',')}`);
-  console.log(`L${stableLevel}: L13 direct samples dense=${pyramid.samplesFor(13).length} optimized=${activeCount}`);
+  console.log(`L${stableLevel}: samples canonical=${pyramid.samplesFor(stableLevel).length} potential-active=${activeSummaryCount}; ratio=${pyramid.samplesFor(stableLevel).length}:${activeSummaryCount}; L13 direct samples dense=${pyramid.samplesFor(13).length} optimized=${activeCount}`);
   console.log(`L${stableLevel}: L13 direct ms dense=${directDenseMs.toFixed(3)} sparse-uncached=${sparseUncachedDirectMs.toFixed(3)} optimized=${directOptimizedMs.toFixed(3)}; aggregation ms dense=${aggregateDenseMs.toFixed(3)} optimized=${aggregateOptimizedMs.toFixed(3)}; total keyframe ms dense=${legacyResult.keyframeMs.toFixed(3)} sparse-uncached=${sparseUncached.keyframeMs.toFixed(3)} optimized=${optimized.keyframeMs.toFixed(3)}`);
-  console.log(`L${stableLevel}: Dots mapping ms dense=${legacyDotsMappingMs.toFixed(3)} optimized=${dotsMappingMs.toFixed(3)}; instances dense=${legacyDotsInstanceMs.toFixed(3)} optimized=${dotsInstanceMs.toFixed(3)}; Squares mapping ms dense=${legacySquaresMappingMs.toFixed(3)} optimized=${squaresMappingMs.toFixed(3)}; instances dense=${legacySquaresInstanceMs.toFixed(3)} optimized=${squaresInstanceMs.toFixed(3)}`);
+  const denseTotalPreparationMs = legacyResult.keyframeMs + legacyDotsMappingMs + legacyDotsInstanceMs + legacySquaresMappingMs + legacySquaresInstanceMs;
+  const sparseTotalPreparationMs = optimized.keyframeMs + dotsMappingMs + dotsInstanceMs + squaresMappingMs + squaresInstanceMs;
+  console.log(`L${stableLevel}: Dots mapping ms dense=${legacyDotsMappingMs.toFixed(3)} optimized=${dotsMappingMs.toFixed(3)}; instances dense=${legacyDotsInstanceMs.toFixed(3)} optimized=${dotsInstanceMs.toFixed(3)}; counts dense=${JSON.stringify(denseDotsMetrics.counts)} optimized=${JSON.stringify(sparseDotsMetrics.counts)}; bytes dense=${denseDotsMetrics.bytes} optimized=${sparseDotsMetrics.bytes}`);
+  console.log(`L${stableLevel}: Squares mapping ms dense=${legacySquaresMappingMs.toFixed(3)} optimized=${squaresMappingMs.toFixed(3)}; instances dense=${legacySquaresInstanceMs.toFixed(3)} optimized=${squaresInstanceMs.toFixed(3)}; count dense=${denseSquaresMetrics.count} optimized=${sparseSquaresMetrics.count}; packedBytes dense=${denseSquaresMetrics.packedBytes} optimized=${sparseSquaresMetrics.packedBytes}; allocatedBytes dense=${denseSquaresMetrics.allocatedBytes} optimized=${sparseSquaresMetrics.allocatedBytes}`);
+  console.log(`L${stableLevel}: total weather-to-instance-preparation ms dense=${denseTotalPreparationMs.toFixed(3)} optimized=${sparseTotalPreparationMs.toFixed(3)}`);
   console.log(`L${stableLevel}: reusable summary arrays=${mib(summaryBytes)} active-index list=${mib(activeIndexBytes)} source union mask=${mib(weather.potentialWeatherMask?.byteLength || 0)} Dots/Squares mapped=${mib(pyramid.samplesFor(stableLevel).length * (4 + 8) * Float32Array.BYTES_PER_ELEMENT)}`);
   if (stableLevel === 10) console.log(`L${stableLevel}: dense-vs-optimized sample check=${denseSummary[stableLevel].rainWeightedSumMmh[0] === optimizedSummary[stableLevel].rainWeightedSumMmh[0]}`);
 }

@@ -23,10 +23,50 @@ function makeMappedState(length, reusable) {
   };
 }
 
+function samePotentialActiveIndices(left, right) {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) if (left[index] !== right[index]) return false;
+  return true;
+}
+
+function prepareMappedActiveSet(state, activeIndices) {
+  const previous = state.potentialActiveIndices;
+  if (activeIndices && !samePotentialActiveIndices(previous, activeIndices)) {
+    if (previous) {
+      for (const index of previous) {
+        state.rainWetMeanMmh[index] = 0;
+        state.rainCoverage[index] = 0;
+        state.stormCoverage[index] = 0;
+        state.stormMeanSeverity[index] = 0;
+        state.stormMaxSeverity[index] = 0;
+        state.hailCoverage[index] = 0;
+        state.hailMeanSeverity[index] = 0;
+        state.hailMaxSeverity[index] = 0;
+      }
+    } else if (state.mappingInitialized) {
+      state.rainWetMeanMmh.fill(0);
+      state.rainCoverage.fill(0);
+      state.stormCoverage.fill(0);
+      state.stormMeanSeverity.fill(0);
+      state.stormMaxSeverity.fill(0);
+      state.hailCoverage.fill(0);
+      state.hailMeanSeverity.fill(0);
+      state.hailMaxSeverity.fill(0);
+    }
+  }
+  state.potentialActiveIndices = activeIndices || null;
+  state.mappingInitialized = true;
+}
+
 // Pure renderer mapping. Coverage remains separate from wet/positive severity.
 export function mapSquaresWeatherSummary(summary, reusable = null) {
   const state = makeMappedState(summary.samples.length, reusable);
-  for (let index = 0; index < summary.samples.length; index++) {
+  const activeIndices = summary.potentialActiveIndices;
+  prepareMappedActiveSet(state, activeIndices);
+  const count = activeIndices ? activeIndices.length : summary.samples.length;
+  for (let position = 0; position < count; position++) {
+    const index = activeIndices ? activeIndices[position] : position;
     const total = summary.totalWeight[index];
     const rainWeight = summary.rainCoverageWeight[RAIN_COVERAGE_INDEX][index];
     const stormWeight = summary.stormCoverageWeight[index];
@@ -230,10 +270,16 @@ export class GeographicSquaresLayer {
 
   buildGroup(group, level, state0, state1) {
     const samples = this.weatherPyramid.topology.levels.get(level).samples;
-    const length = samples.length * INSTANCE_STRIDE;
+    const activeIndices = state0.potentialActiveIndices && state1.potentialActiveIndices
+      && samePotentialActiveIndices(state0.potentialActiveIndices, state1.potentialActiveIndices)
+      ? state0.potentialActiveIndices
+      : null;
+    const count = activeIndices ? activeIndices.length : samples.length;
+    const length = count * INSTANCE_STRIDE;
     let result = this.instanceData[group];
     if (result.length < length) result = new Float32Array(Math.max(length, result.length * 2, INSTANCE_STRIDE * 256));
-    for (let index = 0, offset = 0; index < samples.length; index++, offset += INSTANCE_STRIDE) {
+    for (let position = 0, offset = 0; position < count; position++, offset += INSTANCE_STRIDE) {
+      const index = activeIndices ? activeIndices[position] : position;
       result[offset] = samples[index].mercator[0]; result[offset + 1] = samples[index].mercator[1];
       result[offset + 2] = state0.rainWetMeanMmh[index]; result[offset + 3] = state0.rainCoverage[index];
       result[offset + 4] = state0.stormCoverage[index]; result[offset + 5] = state0.stormMeanSeverity[index]; result[offset + 6] = state0.stormMaxSeverity[index];
@@ -243,7 +289,7 @@ export class GeographicSquaresLayer {
       result[offset + 15] = state1.hailCoverage[index]; result[offset + 16] = state1.hailMeanSeverity[index]; result[offset + 17] = state1.hailMaxSeverity[index];
     }
     this.instanceData[group] = result;
-    this.instanceCounts[group] = samples.length;
+    this.instanceCounts[group] = count;
   }
 
   rebuildInstances(changedLevels = null) {

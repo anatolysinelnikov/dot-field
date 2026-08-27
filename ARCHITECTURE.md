@@ -345,7 +345,10 @@ Storm and hail are zero throughout the active rain-only sequence and are never
 inferred from precipitation. Dots and Squares map these same summaries into
 renderer-owned compact presentation buffers;
 neither renderer recursively aggregates radii, colors, opacity, or hazard
-glyph values. L14 and L15 sample the reconstructed field directly and
+glyph values. For sequence summaries, the mapped buffers retain canonical
+indexing but evaluate only `potentialActiveIndices`; guaranteed-dry entries
+remain zero and stable/transition instance builders skip permanently invisible
+samples. L14 and L15 sample the reconstructed field directly and
 independently; neither interpolates a lower discrete summary.
 
 Only the active discrete renderer retains temporal summary/mapping buffers;
@@ -403,7 +406,10 @@ This fixed presentation setting does not affect other renderers.
 
 Squares use the same active globally anchored L10–L15 Mercator topology and
 shared physical summaries as Dots, but map them into square color and opacity.
-Each active sample instantiates a square centered on its Mercator grid point;
+Mapped arrays retain canonical indexing, while sequence summaries pack only
+their static `potentialActiveIndices` into GPU instances; every retained sample
+instantiates a square centered on its Mercator grid point and guaranteed-dry
+canonical samples have no instance because their weather alpha is always zero.
 the cell side equals the active grid spacing. Geometry is projected by the same
 MapLibre custom-layer shader path, so it follows Globe curvature, pitch,
 bearing, perspective, pan, and depth. Rain color/strength uses wet-area mean

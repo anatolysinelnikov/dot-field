@@ -74,13 +74,56 @@ function makeMappedState(length, reusable) {
   };
 }
 
+// A sequence active set is static for a prepared topology. Aggregate summaries
+// may materialize equivalent typed arrays independently, so compare values when
+// the references differ instead of forcing a dense renderer pass.
+function samePotentialActiveIndices(left, right) {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) if (left[index] !== right[index]) return false;
+  return true;
+}
+
+function sharedPotentialActiveIndices(left, right) {
+  const first = left.potentialActiveIndices;
+  const second = right.potentialActiveIndices;
+  return first && second && samePotentialActiveIndices(first, second) ? first : null;
+}
+
+function prepareMappedActiveSet(state, activeIndices) {
+  const previous = state.potentialActiveIndices;
+  if (activeIndices) {
+    if (!samePotentialActiveIndices(previous, activeIndices)) {
+      if (previous) {
+        for (const index of previous) {
+          state.rainRadius[index] = 0;
+          state.strongRadius[index] = 0;
+          state.stormRadius[index] = 0;
+          state.hailRadius[index] = 0;
+        }
+      } else if (state.mappingInitialized) {
+        state.rainRadius.fill(0);
+        state.strongRadius.fill(0);
+        state.stormRadius.fill(0);
+        state.hailRadius.fill(0);
+      }
+    }
+  }
+  state.potentialActiveIndices = activeIndices || null;
+  state.mappingInitialized = true;
+}
+
 // Pure presentation mapping: physical summary values never feed a coarser LOD.
 export function mapDotsWeatherSummary(summary, reusable = null) {
   const state = makeMappedState(summary.samples.length, reusable);
+  const activeIndices = summary.potentialActiveIndices;
+  prepareMappedActiveSet(state, activeIndices);
   const isDirectPointSummary = summary.level >= REFERENCE_GRID_LEVEL;
   const directHazardValue = { storm: 0, hail: 0 };
   const directHazard = { stormRadius: 0, hailRadius: 0 };
-  for (let index = 0; index < summary.samples.length; index++) {
+  const count = activeIndices ? activeIndices.length : summary.samples.length;
+  for (let position = 0; position < count; position++) {
+    const index = activeIndices ? activeIndices[position] : position;
     const sample = summary.samples[index];
     const total = summary.totalWeight[index];
     const rainCoverageWeight = summary.rainCoverageWeight[RAIN_COVERAGE_INDEX][index];
@@ -165,7 +208,10 @@ function hasTemporalRadius(radius0, radius1, radius2 = 0, radius3 = 0) {
 
 function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, coarseAnchors, fineAnchors, childIndices, radiusKey, refining, writer) {
   writer.reset();
-  for (let parentIndex = 0; parentIndex < coarseTime0[radiusKey].length; parentIndex++) {
+  const activeParents = sharedPotentialActiveIndices(coarseTime0, coarseTime1);
+  const parentCount = activeParents ? activeParents.length : coarseTime0[radiusKey].length;
+  for (let parentPosition = 0; parentPosition < parentCount; parentPosition++) {
+    const parentIndex = activeParents ? activeParents[parentPosition] : parentPosition;
     const parentRadius0 = coarseTime0[radiusKey][parentIndex];
     const parentRadius1 = coarseTime1[radiusKey][parentIndex];
     const parentAnchorIndex = parentIndex * 2;
@@ -190,7 +236,10 @@ function buildSameLevelTemporalInstances(time0, time1, anchors, radiusKey, write
   writer.reset();
   const radii0 = time0[radiusKey];
   const radii1 = time1[radiusKey];
-  for (let index = 0; index < radii0.length; index++) {
+  const activeIndices = sharedPotentialActiveIndices(time0, time1);
+  const count = activeIndices ? activeIndices.length : radii0.length;
+  for (let position = 0; position < count; position++) {
+    const index = activeIndices ? activeIndices[position] : position;
     const radius0 = radii0[index];
     const radius1 = radii1[index];
     if (!hasTemporalRadius(radius0, radius1)) continue;
