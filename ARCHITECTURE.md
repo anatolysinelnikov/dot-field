@@ -141,8 +141,10 @@ runtime routing here.
 The first Dots/Squares pyramid is created only after the initial camera-derived
 window is available; it is never bootstrapped with a complete support topology.
 Its materialized range is bounded by the stable display level: L10/L11 use
-L10..L13, L12 uses L11..L13, L13 uses L12..L14, L14 uses L13..L15, and L15 uses
-L14..L15. After an adjacent LOD morph completes, a changed range is rebuilt at
+L10..L13, L12 uses L11..L13, L13 uses L12..L14, and L14 uses L13..L14.
+L14 is currently the highest stable display level; L15 remains an explicit
+engine/canonical level but is disabled from the normal application path. After
+an adjacent LOD morph completes, a changed range is rebuilt at
 the same window before any subsequent morph begins; range replacement is not a
 visual LOD transition.
 
@@ -255,9 +257,11 @@ plus one row-major `Float64Array` of Mercator anchors. Sample identity and
 indexing are implicit arithmetic conversions between `(index)`, `(i,j)`, and
 the global L15 canonical coordinate pair; no per-sample JS objects, geographic
 coordinate arrays, or string IDs are retained.
-The camera never reseats the grid. Canonical identity resolution and the
-maximum displayed Dots/Squares level are both L15. Logical sampling zoom is
-application-owned and latitude-corrected for Globe camera behavior. An explicit
+The camera never reseats the grid. Canonical identity resolution remains L15,
+while the current maximum displayed Dots/Squares level is L14. L15 is
+intentionally disabled from the active application path for now; the engine
+retains its explicit L15-capable topology and summary algorithms. Logical
+sampling zoom is application-owned and latitude-corrected for Globe camera behavior. An explicit
 active window is represented by inclusive L15 integer bounds, snapped outward
 to the coarsest L10 interval. A topology also has an explicit contiguous LOD
 range; it builds only the requested levels and only the transition parents,
@@ -265,7 +269,8 @@ direct pairs, and centered aggregate contributions whose endpoints exist.
 When lower levels are requested, the complete L13→L12→L11→L10 dependency chain
 is required; missing levels fail clearly. Thus panning and rotating do not
 alter displayed weather density or sample identity, while low display LODs do
-not allocate unnecessary L14/L15 topology.
+not allocate unnecessary finer-level topology beyond their active dependency
+range.
 
 ## Shared physical weather summaries — `src/engine/geographic-weather-pyramid.js`
 
@@ -278,14 +283,15 @@ data; near `WEATHER_REGION.center` its roughly 0.04° longitude/latitude source
 spacing is closest to canonical L13. `WEATHER_REFERENCE_LEVEL = 13` is thus the
 effective direct/aggregate boundary. L13, L14, and L15 independently evaluate
 their own canonical geographic coordinates through the bilinearly reconstructed
-physical field. The pyramid lazily owns one reusable provider sampling geometry
+physical field. The active application evaluates through L14; explicit engine
+verifiers retain L15 coverage. The pyramid lazily owns one reusable provider sampling geometry
 for each direct canonical level, so source-cell lookup is not repeated for each
 weather frame. For sequence data, that geometry also owns the lazy sparse
 provider-frame spatial cache described above; it is invalidated with the
-geometry/configuration and is not renderer state. L13/L14/L15 remain
-independent direct samples of the reconstructed field; the cache does not
-couple temporal summaries or renderers. L14/L15 add sampling resolution, not
-meteorological information.
+geometry/configuration and is not renderer state. L13/L14 and explicit engine
+L15 remain independent direct samples of the reconstructed field; the cache does not
+couple temporal summaries or renderers. L14 and explicit engine L15 add
+sampling resolution, not meteorological information.
 Only L12 through L10 are recursively aggregated spatial summaries from L13;
 they are never direct field samples or values from an existing renderer pyramid.
 
@@ -345,7 +351,7 @@ retains the cached L12 total weights, tests coverage thresholds against the
 unrounded physical values, and applies the existing Float32 L13 storage
 boundary before weighted sums and maxima are accumulated. L12→L11→L10 then
 uses the existing recursive aggregation. Requests that include L13, direct
-L14/L15 requests, and providers without this explicit rain-only capability
+L14/L15 engine requests, and providers without this explicit rain-only capability
 retain the direct-summary fallback, including storm and hail channels.
 
 ```text
@@ -442,14 +448,18 @@ transitions therefore keep canonical child/parent positions and no-grid-jump
 behavior.
 
 The application and Dots/Squares retain compact level descriptors rather than
-sample arrays. Provider sampling geometry derives longitude/latitude directly
-from the packed Mercator anchors into temporary typed batches; it does not
-materialize one geographic coordinate array per canonical sample in topology.
+sample arrays. Provider sampling geometry derives the regular packed grid axes
+separately: longitude and source-column lookup are prepared once per column,
+latitude and source-row lookup once per row, and packed per-sample lookup data
+is filled from those results. It does not materialize dense geographic
+coordinate batches or one geographic coordinate array per canonical sample in
+topology.
 
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
 transitions use deterministic parent/child topology below/equal to L13 and
-direct-pair refinement for L13↔L14 and L14↔L15.
+direct-pair refinement for the active L13↔L14 transition. The engine retains
+the direct L14↔L15 relation for explicit future configurations.
 Dots retain the stable same-level temporal/mapped state for a source LOD while
 a transition builds the required pair representation; promoting a destination
 therefore only performs the unavoidable same-level instance pass. A subsequent
@@ -465,8 +475,10 @@ This fixed presentation setting does not affect other renderers.
 
 ## Squares — `src/engine/geographic-squares-layer.js`
 
-Squares use the same active globally anchored L10–L15 Mercator topology and
+Squares use the same active globally anchored L10–L14 Mercator topology and
 shared physical summaries as Dots, but map them into square color and opacity.
+The canonical topology and renderer algorithms remain capable of explicit L15
+evaluation, but the normal application path stops at L14.
 Mapped arrays retain canonical indexing, while sequence summaries pack only
 their static `potentialActiveIndices` into GPU instances; every retained sample
 instantiates a square centered on its Mercator grid point and guaranteed-dry

@@ -8,12 +8,14 @@ import { GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
 
 const FRAME_TIME = 0.347;
-const TRANSITIONS = [[13, 14], [14, 15]];
+// Active product transition coverage ends at L14. Explicit engine-level L15
+// sampling remains covered by the lower-level weather verifiers.
+const TRANSITIONS = [[13, 14]];
 const weather = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
 setActiveWeatherField(weather);
 const [centerX, centerY] = lngLatToMercator(...WEATHER_REGION.center);
 const testWindow = canonicalWindowFromMercatorBounds({ minX: centerX - 0.004, maxX: centerX + 0.004, minY: centerY - 0.004, maxY: centerY + 0.004 });
-const testTopology = new GeographicLodTopology(testWindow, { minLevel: 13, maxLevel: 15 });
+const testTopology = new GeographicLodTopology(testWindow, { minLevel: 13, maxLevel: 14 });
 
 function median(values) {
   const sorted = [...values].sort((left, right) => left - right);
@@ -54,7 +56,7 @@ function benchmarkDirectLevel(level) {
 }
 
 console.log('Direct physical sampling benchmark (median of 3 warmed runs; Float64 summaries)');
-for (const level of [13, 14, 15]) {
+for (const level of [13, 14]) {
   const result = benchmarkDirectLevel(level);
   console.log(`L${level}: samples=${result.samples} normal=${result.normalMs.toFixed(3)}ms prepared=${result.preparedMs.toFixed(3)}ms speedup=${result.speedup.toFixed(2)}x stencilPrep=${result.stencilPreparationMs.toFixed(3)}ms stencilBytes=${result.stencilBytes}`);
 }

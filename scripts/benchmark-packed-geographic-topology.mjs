@@ -14,13 +14,14 @@ import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } fr
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
 
 const FULL_RANGE = { minLevel: MIN_GRID_LEVEL, maxLevel: MAX_GRID_LEVEL };
+// The full range intentionally keeps explicit canonical L15 coverage. These
+// are the active product/display ranges, which stop at L14.
 const CONFIGURATIONS = [
   ['L10', { minLevel: 10, maxLevel: 13 }],
   ['L11', { minLevel: 10, maxLevel: 13 }],
   ['L12', { minLevel: 11, maxLevel: 13 }],
   ['L13', { minLevel: 12, maxLevel: 14 }],
-  ['L14', { minLevel: 13, maxLevel: 15 }],
-  ['L15', { minLevel: 14, maxLevel: 15 }]
+  ['L14', { minLevel: 13, maxLevel: 14 }]
 ];
 
 const field = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
@@ -401,7 +402,7 @@ for (const [label, range] of CONFIGURATIONS) {
   // Full-support L10..L13 is the practical large-domain before/after baseline.
   // Higher full-support ranges are intentionally omitted because the legacy
   // object topology exceeds normal desktop heap budgets; viewport cases cover
-  // all six stable LOD contracts.
+  // all five active stable LOD contracts.
   if (range.maxLevel <= 13 && process.env.PACKED_TOPOLOGY_SKIP_FULL !== '1') console.log(JSON.stringify(runFullSupportCase(label, range)));
   console.log(JSON.stringify(runCase(`viewport ${label}`, viewportWindow, range, false)));
 }

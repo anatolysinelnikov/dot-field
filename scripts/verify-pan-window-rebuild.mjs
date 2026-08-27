@@ -16,6 +16,7 @@ import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyram
 
 const TEMPORAL_FRAME_COUNT = 180;
 const LEVELS = [10, 11, 12, 13, 14, 15];
+const ACTIVE_STABLE_LEVELS = [10, 11, 12, 13, 14];
 const L10_STEP = 2 ** (MAX_GRID_LEVEL - MIN_GRID_LEVEL);
 let failures = 0;
 
@@ -172,7 +173,7 @@ const frame1 = prepareGeographicFieldFrame(63 / TEMPORAL_FRAME_COUNT);
 
 for (let windowIndex = 0; windowIndex < testWindows.length; windowIndex++) {
   const window = testWindows[windowIndex];
-  for (const stableLevel of LEVELS) {
+  for (const stableLevel of ACTIVE_STABLE_LEVELS) {
     const range = lodRangeForStableLevel(stableLevel);
     const oldTopology = new GeographicLodTopology(window, range);
     const optimizedTopology = new GeographicLodTopology(window, range);

@@ -5,7 +5,6 @@ import {
   prepareGeographicSamplingGeometry
 } from './geography.js';
 import {
-  MAX_DISPLAY_GRID_LEVEL,
   MIN_GRID_LEVEL,
   MAX_GRID_LEVEL,
   GeographicLodTopology,
@@ -581,11 +580,11 @@ export class GeographicWeatherPyramid {
     if (!requestedLevels.length) return [];
     this.diagnostics.evaluateCalls++;
     const minimumRequested = Math.min(...requestedLevels);
-    if (minimumRequested < MIN_GRID_LEVEL || Math.max(...requestedLevels) > MAX_DISPLAY_GRID_LEVEL) {
-      throw new Error(`Weather summary levels must be between L${MIN_GRID_LEVEL} and L${MAX_DISPLAY_GRID_LEVEL}.`);
+    if (minimumRequested < MIN_GRID_LEVEL || Math.max(...requestedLevels) > MAX_GRID_LEVEL) {
+      throw new Error(`Weather summary levels must be between L${MIN_GRID_LEVEL} and L${MAX_GRID_LEVEL}.`);
     }
 
-    const summaries = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
+    const summaries = new Array(MAX_GRID_LEVEL + 1);
     const uniqueRequested = [...new Set(requestedLevels)];
     const aggregateRequested = uniqueRequested.filter((level) => level <= WEATHER_REFERENCE_LEVEL);
     if (aggregateRequested.length) {

@@ -1,7 +1,7 @@
 import { prepareGeographicFieldFrame } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH } from './geographic-weather-pyramid.js';
-import { canonicalWindowsEqual, MAX_DISPLAY_GRID_LEVEL } from './geographic-lod.js';
+import { canonicalWindowsEqual, MAX_GRID_LEVEL } from './geographic-lod.js';
 import { RAIN_VISIBILITY_SHADER, STRONG_RAIN_SHADER } from './precipitation-mapping.js';
 
 const INSTANCE_STRIDE = 18;
@@ -330,7 +330,7 @@ export class GeographicSquaresLayer {
     const weatherStarted = now();
     const summaries = this.weatherPyramid.evaluate([level], prepareGeographicFieldFrame(index / TEMPORAL_FRAME_COUNT), reusable?.summaries);
     this.lifecycleDiagnostics.weatherEvaluationMs += now() - weatherStarted;
-    const mapped = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
+    const mapped = new Array(MAX_GRID_LEVEL + 1);
     const mappingStarted = now();
     mapped[level] = mapSquaresWeatherSummary(summaries[level], reusable?.mapped?.[level]);
     this.lifecycleDiagnostics.mappingMs += now() - mappingStarted;

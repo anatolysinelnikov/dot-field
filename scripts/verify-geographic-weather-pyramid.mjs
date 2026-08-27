@@ -6,7 +6,7 @@ import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geogra
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { DOTS_STRONG_RAIN_FULL_MMH, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadii } from '../src/engine/hazard-renderer.js';
-import { canonicalCoordinatesForIndex, canonicalIndexForCoordinates, canonicalWindowFromMercatorBounds, GeographicLodTopology, MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, mercatorToLngLat, lngLatToMercator, mercatorXToLongitude, mercatorYToLatitude } from '../src/engine/geographic-lod.js';
+import { canonicalCoordinatesForIndex, canonicalIndexForCoordinates, canonicalWindowFromMercatorBounds, GeographicLodTopology, MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MAX_LOGICAL_SAMPLING_ZOOM, MIN_GRID_LEVEL, mercatorToLngLat, lngLatToMercator, mercatorXToLongitude, mercatorYToLatitude, lodRangeForStableLevel, zoomToMercatorGridLevel } from '../src/engine/geographic-lod.js';
 import { SCALAR_GRID_LEVEL } from '../src/engine/geographic-scalar-lattice.js';
 
 const LEVELS = [10, 11, 12, 13, 14, 15];
@@ -77,7 +77,9 @@ console.log(`source ground spacing near ${referenceLongitude},${referenceLatitud
 for (const level of [12, 13, 14, 15]) { const spacing = localGridSpacingKm(level, referenceLatitude); console.log(`L${level} local Mercator spacing: east-west=${spacing.eastWest.toFixed(4)} km, north-south=${spacing.northSouth.toFixed(4)} km`); }
 console.log(`WEATHER_REFERENCE_LEVEL=L${WEATHER_REFERENCE_LEVEL}; parsed source spacing supports L13 as the closest practical dyadic canonical scale.`);
 check(WEATHER_REFERENCE_LEVEL === 13, 'L13 is the explicit weather reference level');
-check(MAX_DISPLAY_GRID_LEVEL === 15 && MAX_GRID_LEVEL === 15, 'display and canonical identity both stop at L15');
+check(MAX_DISPLAY_GRID_LEVEL === 14 && MAX_GRID_LEVEL === 15, 'display cap is L14 while canonical identity remains L15');
+check(zoomToMercatorGridLevel(MAX_LOGICAL_SAMPLING_ZOOM) === MAX_DISPLAY_GRID_LEVEL, 'maximum logical sampling zoom selects the highest displayed level');
+check(JSON.stringify(lodRangeForStableLevel(14)) === JSON.stringify({ minLevel: 13, maxLevel: 14 }), 'stable L14 materializes only L13..L14');
 check(SCALAR_GRID_LEVEL === 14, 'scalar lattice remains explicitly fixed at L14');
 
 let sourceNodeError = 0;
@@ -87,7 +89,9 @@ for (const longitudeIndex of [0, Math.floor(field.longitudes.length / 2), field.
 }
 console.log(`representative exact source-node error: ${sourceNodeError}`); check(sourceNodeError <= FLOAT64_TOLERANCE, 'source nodes preserve rain, storm, and hail values');
 
-const fullTopology = new GeographicLodTopology(testWindow, { minLevel: MIN_GRID_LEVEL, maxLevel: MAX_DISPLAY_GRID_LEVEL });
+// This verifier deliberately exercises the canonical engine through L15. The
+// active product range is checked above and by the lifecycle/window verifiers.
+const fullTopology = new GeographicLodTopology(testWindow, { minLevel: MIN_GRID_LEVEL, maxLevel: MAX_GRID_LEVEL });
 const pyramid = new GeographicWeatherPyramid(Float32Array, fullTopology); const referencePyramid = new GeographicWeatherPyramid(Float64Array, fullTopology);
 const summaries = referencePyramid.evaluate(LEVELS, frame); const float32Summaries = pyramid.evaluate(LEVELS, frame);
 check(float32Summaries[15].rainWeightedSumMmh instanceof Float32Array, 'production summaries use Float32 storage at L15');

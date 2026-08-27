@@ -9,7 +9,9 @@ export const MIN_GRID_LEVEL = 10;
 export const MAX_GRID_LEVEL = 15;
 // The discrete renderers materialize only the active canonical window. This is
 // independent from the physical weather reference level.
-export const MAX_DISPLAY_GRID_LEVEL = 15;
+// Product/display ceiling. MAX_GRID_LEVEL remains the canonical identity
+// resolution and the engine can still be exercised explicitly through L15.
+export const MAX_DISPLAY_GRID_LEVEL = 14;
 
 const LOD_LEVEL_OFFSET = Math.log2(MERCATOR_WORLD_SIZE / TARGET_GRID_SPACING);
 // The rounded zoom mapping first reaches the next level at N + 0.5.
@@ -138,9 +140,11 @@ export function canonicalWindowContains(container, candidate) {
 export function normalizeLodRange(range = { minLevel: DEFAULT_TOPOLOGY_MIN_LEVEL, maxLevel: DEFAULT_TOPOLOGY_MAX_LEVEL }) {
   const minLevel = Number(range.minLevel);
   const maxLevel = Number(range.maxLevel);
+  // This is the engine topology contract, so explicit canonical L15 ranges
+  // remain valid even while the application display cap is L14.
   if (!Number.isInteger(minLevel) || !Number.isInteger(maxLevel)
-    || minLevel < MIN_GRID_LEVEL || maxLevel > MAX_DISPLAY_GRID_LEVEL || maxLevel < minLevel) {
-    throw new Error(`LOD range must be contiguous and between L${MIN_GRID_LEVEL} and L${MAX_DISPLAY_GRID_LEVEL}.`);
+    || minLevel < MIN_GRID_LEVEL || maxLevel > MAX_GRID_LEVEL || maxLevel < minLevel) {
+    throw new Error(`LOD range must be contiguous and between L${MIN_GRID_LEVEL} and L${MAX_GRID_LEVEL}.`);
   }
   return Object.freeze({ minLevel, maxLevel });
 }
@@ -156,7 +160,7 @@ export function lodRangesEqual(left, right) {
 // array lengths alone as a compatibility test in renderer lifecycle code.
 export function levelDataCompatibleForReuse(levelData, level, canonicalWindow) {
   if (!levelData || levelData.level !== level || !canonicalWindowsEqual(levelData.canonicalWindow, canonicalWindow)) return false;
-  const identityScale = 2 ** (MAX_DISPLAY_GRID_LEVEL - level);
+  const identityScale = 2 ** (MAX_GRID_LEVEL - level);
   const minI = Math.ceil(canonicalWindow.minX / identityScale);
   const maxI = Math.floor(canonicalWindow.maxX / identityScale);
   const minJ = Math.ceil(canonicalWindow.minY / identityScale);
@@ -181,8 +185,7 @@ export function lodRangeForStableLevel(level) {
   if (stableLevel <= 11) return normalizeLodRange({ minLevel: 10, maxLevel: 13 });
   if (stableLevel === 12) return normalizeLodRange({ minLevel: 11, maxLevel: 13 });
   if (stableLevel === 13) return normalizeLodRange({ minLevel: 12, maxLevel: 14 });
-  if (stableLevel === 14) return normalizeLodRange({ minLevel: 13, maxLevel: 15 });
-  return normalizeLodRange({ minLevel: 14, maxLevel: 15 });
+  return normalizeLodRange({ minLevel: 13, maxLevel: 14 });
 }
 
 // Convert an application-owned visible Mercator envelope to a deterministic

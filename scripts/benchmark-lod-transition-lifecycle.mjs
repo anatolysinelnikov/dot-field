@@ -14,7 +14,9 @@ import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.j
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 const repeats = Number.parseInt(process.argv.find((value) => value.startsWith('--repeats='))?.split('=')[1] || '3', 10);
 const playing = process.argv.includes('--playing');
-const levels = [10, 11, 12, 13, 14, 15];
+// Benchmark the active product lifecycle. Explicit L15 engine coverage remains
+// available in the canonical weather/topology verifiers.
+const levels = [10, 11, 12, 13, 14];
 const pairCases = levels.slice(0, -1).flatMap((level) => [[level, level + 1], [level + 1, level]]);
 
 function loadSequence() {

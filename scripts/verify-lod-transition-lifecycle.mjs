@@ -12,7 +12,9 @@ import { GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
 
 const TEMPORAL_FRAME_COUNT = 180;
-const levels = [10, 11, 12, 13, 14, 15];
+// Active product lifecycle coverage ends at the L14 display cap. Engine-level
+// L15 lifecycle behavior remains covered by the explicit weather verifier.
+const levels = [10, 11, 12, 13, 14];
 const time = 0.37;
 let failures = 0;
 

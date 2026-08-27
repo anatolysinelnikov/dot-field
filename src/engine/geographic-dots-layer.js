@@ -6,7 +6,7 @@ import {
   rainMmhToRadiusFraction
 } from './precipitation-mapping.js';
 import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH, WEATHER_REFERENCE_LEVEL } from './geographic-weather-pyramid.js';
-import { canonicalWindowsEqual, MAX_DISPLAY_GRID_LEVEL } from './geographic-lod.js';
+import { canonicalWindowsEqual, MAX_GRID_LEVEL } from './geographic-lod.js';
 import { geographicHazardRadii, geographicHazardRadiusForSeverity } from './hazard-renderer.js';
 
 const REFERENCE_GRID_LEVEL = WEATHER_REFERENCE_LEVEL;
@@ -447,7 +447,7 @@ export class GeographicDotsLayer {
     const weatherStarted = now();
     const summaries = this.weatherPyramid.evaluate([level], prepareGeographicFieldFrame(time), reusableState?.summaries);
     this.lifecycleDiagnostics.weatherEvaluationMs += now() - weatherStarted;
-    const mapped = new Array(MAX_DISPLAY_GRID_LEVEL + 1);
+    const mapped = new Array(MAX_GRID_LEVEL + 1);
     const mappingStarted = now();
     mapped[level] = mapDotsWeatherSummary(summaries[level], reusableState?.mapped?.[level]);
     this.lifecycleDiagnostics.mappingMs += now() - mappingStarted;

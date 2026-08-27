@@ -18,6 +18,7 @@ import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
 import { geographicTemporalFrameAt } from '../src/engine/geographic-layer-utils.js';
 
 const LEVELS = [10, 11, 12, 13, 14, 15];
+const ACTIVE_STABLE_LEVELS = [10, 11, 12, 13, 14];
 const L10_STEP = 2 ** (MAX_GRID_LEVEL - MIN_GRID_LEVEL);
 const SUMMARY_BYTES_PER_SAMPLE = (3 + 7 + 6) * Float64Array.BYTES_PER_ELEMENT;
 const ANCHOR_BYTES_PER_SAMPLE = 2 * Float64Array.BYTES_PER_ELEMENT;
@@ -152,7 +153,7 @@ function verifyWeatherInvariance(window, name) {
   const fullRange = normalizeLodRange({ minLevel: 10, maxLevel: 15 });
   const fullReference = new GeographicWeatherPyramid(Float64Array, new GeographicLodTopology(window, fullRange));
   const times = [0, 0.173, 0.5, 0.923, 1];
-  for (const stableLevel of LEVELS) {
+  for (const stableLevel of ACTIVE_STABLE_LEVELS) {
     const range = lodRangeForStableLevel(stableLevel);
     const bounded = new GeographicWeatherPyramid(Float64Array, new GeographicLodTopology(window, range));
     let maximumSummaryError = 0;
@@ -219,7 +220,7 @@ const originalTopology = unchangedTopology.topology;
 check(unchangedTopology.setCanonicalWindow(topologyA.canonicalWindow) === false && unchangedTopology.topology === originalTopology, 'unchanged snapped window does not rebuild the topology');
 for (const [name, topology] of [['A', topologyA], ['B', topologyB], ['C', topologyC]]) verifyHierarchy(topology, `window ${name}`);
 
-for (const stableLevel of LEVELS) {
+for (const stableLevel of ACTIVE_STABLE_LEVELS) {
   const range = lodRangeForStableLevel(stableLevel);
   const topology = new GeographicLodTopology(topologyA.canonicalWindow, range);
   const expectedLevels = LEVELS.filter((level) => level >= range.minLevel && level <= range.maxLevel);
@@ -227,7 +228,7 @@ for (const stableLevel of LEVELS) {
   check(JSON.stringify(actualLevels) === JSON.stringify(expectedLevels), `stable L${stableLevel} materializes exactly ${range.minLevel}..${range.maxLevel}`);
   check(topology.levels.has(stableLevel), `stable L${stableLevel} current level is materialized`);
   check(stableLevel === MIN_GRID_LEVEL || topology.levels.has(stableLevel - 1), `stable L${stableLevel} lower adjacent target is available when valid`);
-  check(stableLevel === MAX_GRID_LEVEL || topology.levels.has(stableLevel + 1), `stable L${stableLevel} upper adjacent target is available when valid`);
+  check(stableLevel === ACTIVE_STABLE_LEVELS.at(-1) || topology.levels.has(stableLevel + 1), `stable L${stableLevel} upper adjacent target is available when valid`);
   check(stableLevel <= 13 ? topology.levels.has(13) : true, `stable L${stableLevel} retains the L13 reference when required`);
   verifyHierarchy(topology, `stable L${stableLevel}`);
 }
