@@ -425,6 +425,7 @@ export class RealWeatherSequence extends RealWeatherField {
     const sourceRowBases = geometry.sourceRowBase;
     const longitudeFractions = geometry.longitudeFraction;
     const latitudeFractions = geometry.latitudeFraction;
+    const potentialWeatherMask = this.potentialWeatherMask;
 
     for (let column = 0; column < width; column++) {
       const longitude = longitudes[column];
@@ -451,10 +452,10 @@ export class RealWeatherSequence extends RealWeatherField {
         if (sourceColumn === OUTSIDE_SOURCE_INDEX) continue;
         const baseIndex = sourceRowBase + sourceColumn;
         const x1y0 = baseIndex + 1;
-        const x0y1 = baseIndex + this.longitudes.length;
+        const x0y1 = baseIndex + sourceWidth;
         const x1y1 = x0y1 + 1;
-        if (activeIndices && (this.potentialWeatherMask[baseIndex] || this.potentialWeatherMask[x1y0]
-          || this.potentialWeatherMask[x0y1] || this.potentialWeatherMask[x1y1])) {
+        if (activeIndices && (potentialWeatherMask[baseIndex] || potentialWeatherMask[x1y0]
+          || potentialWeatherMask[x0y1] || potentialWeatherMask[x1y1])) {
           activeIndices.push(rowOffset + column);
         }
       }
