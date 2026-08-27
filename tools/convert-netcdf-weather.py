@@ -39,7 +39,7 @@ CSV_COLUMNS = ("lon", "lat", "mmh", "thunderstorm", "hail")
 REGULAR_SPACING_TOLERANCE = 2e-5
 FLOAT_FORMAT = ".9g"
 COORDINATE_FORMAT = ".17g"
-SEQUENCE_SCHEMA_VERSION = "dot-field-netcdf-sequence-v1"
+SEQUENCE_SCHEMA_VERSION = "dot-field-weather-transport-v2"
 SEQUENCE_HALO_CELLS = 1
 DEFAULT_AVAILABILITY_PATH = Path("data/availability/available_region_latest.json")
 
@@ -62,7 +62,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--sequence",
         action="store_true",
-        help="export all source timesteps as rain.f32 plus metadata.json",
+        help="export independently addressable exact Float32 rain frames, packed support.mask, and metadata.json",
     )
     result.add_argument(
         "--availability",
@@ -547,7 +547,8 @@ def sequence_metadata(
     per_frame_coverage: list[dict[str, Any]],
 ) -> dict[str, Any]:
     union_y, union_x = np.nonzero(union_nonzero)
-    element_count = len(timestamps) * crop["node_count"]
+    frame_node_count = crop["node_count"]
+    frame_byte_length = frame_node_count * 4
     union_bounds = {
         "west": float(crop_longitudes[union_x].min()),
         "east": float(crop_longitudes[union_x].max()),
@@ -624,25 +625,45 @@ def sequence_metadata(
             },
             "halo_source_grid_cells": SEQUENCE_HALO_CELLS,
         },
-        "binary": {
-            "filename": "rain.f32",
-            "dtype": "Float32",
-            "byte_order": "little-endian",
-            "logical_dimensions": ["time", "latitude", "longitude"],
-            "shape": [len(timestamps), crop["height"], crop["width"]],
-            "element_count": element_count,
-            "byte_count": element_count * 4,
+        "support_mask": {
+            "asset": "support.mask",
+            "encoding": "bitset-lsb0",
+            "node_count": frame_node_count,
+            "byte_length": (frame_node_count + 7) // 8,
+            "positive_condition": "rain > 0",
+            "trailing_unused_bits": "zero",
         },
         "rain": {
             "available": True,
+            "dtype": "Float32",
+            "byte_order": "little-endian",
+            "physical_units": "mm/h",
+            "logical_dimensions": ["latitude", "longitude"],
+            "frame_node_count": frame_node_count,
+            "frame_byte_length": frame_byte_length,
+            "frame_assets": [f"rain/frame-{index:03d}.f32" for index in range(len(timestamps))],
             "union_nonzero_bounds": union_bounds,
             "union_distinct_nonzero_nodes": int(union_nonzero.sum()),
             "per_frame_statistics": frame_statistics,
         },
         "channels": {
             "rain": True,
-            "storm": False,
-            "hail": False,
+            "phenomena": False,
+        },
+        "phenomena": {
+            "available": False,
+            "dtype": "Uint8",
+            "enum": {
+                "none": 0,
+                "thunderstorm_1": 1,
+                "thunderstorm_2": 2,
+                "thunderstorm_3": 3,
+                "hail_1": 4,
+                "hail_2": 5,
+                "hail_3": 6,
+                "reserved": 7,
+            },
+            "frame_assets": [],
         },
         "observation_coverage_diagnostic": {
             **observation,
@@ -700,26 +721,44 @@ def convert_sequence(args: argparse.Namespace) -> int:
         per_frame_coverage = []
         output_dir = args.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
-        rain_path = output_dir / "rain.f32"
+        rain_dir = output_dir / "rain"
+        support_path = output_dir / "support.mask"
         metadata_path = output_dir / "metadata.json"
-        with NamedTemporaryFile(dir=output_dir, prefix=".rain.", suffix=".f32.tmp", delete=False) as temporary:
-            temporary_rain_path = Path(temporary.name)
+        rain_dir.mkdir(parents=True, exist_ok=True)
         try:
-            with temporary_rain_path.open("wb") as rain_handle:
-                for time_index, timestamp in enumerate(timestamps):
-                    values = read_validated_source_frame(precipitation, time_index)
-                    normalized = values * factor
-                    crop_values = normalized[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1]
-                    np.asarray(crop_values, dtype="<f4", order="C").tofile(rain_handle)
-                    nonzero = crop_values > 0
-                    nonzero_y, nonzero_x = np.nonzero(nonzero)
-                    inside = crop_availability[nonzero_y, nonzero_x]
-                    per_frame_coverage.append({
-                        "timestamp": timestamp,
-                        "non_zero_nodes": int(nonzero.sum()),
-                        "inside_observation": int(inside.sum()),
-                        "outside_observation": int((~inside).sum()),
-                    })
+            for time_index, timestamp in enumerate(timestamps):
+                values = read_validated_source_frame(precipitation, time_index)
+                normalized = values * factor
+                crop_values = normalized[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1]
+                frame_path = rain_dir / f"frame-{time_index:03d}.f32"
+                with NamedTemporaryFile(dir=rain_dir, prefix=f".frame-{time_index:03d}.", suffix=".f32.tmp", delete=False) as temporary:
+                    temporary_frame_path = Path(temporary.name)
+                try:
+                    np.asarray(crop_values, dtype="<f4", order="C").tofile(temporary_frame_path)
+                    temporary_frame_path.replace(frame_path)
+                finally:
+                    temporary_frame_path.unlink(missing_ok=True)
+                nonzero = crop_values > 0
+                nonzero_y, nonzero_x = np.nonzero(nonzero)
+                inside = crop_availability[nonzero_y, nonzero_x]
+                per_frame_coverage.append({
+                    "timestamp": timestamp,
+                    "non_zero_nodes": int(nonzero.sum()),
+                    "inside_observation": int(inside.sum()),
+                    "outside_observation": int((~inside).sum()),
+                })
+
+            packed_support = np.packbits(
+                np.asarray(union_nonzero[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1], dtype=np.uint8).ravel(order="C"),
+                bitorder="little",
+            )
+            with NamedTemporaryFile(dir=output_dir, prefix=".support.", suffix=".mask.tmp", delete=False) as temporary:
+                temporary_support_path = Path(temporary.name)
+            try:
+                packed_support.tofile(temporary_support_path)
+                temporary_support_path.replace(support_path)
+            finally:
+                temporary_support_path.unlink(missing_ok=True)
 
             metadata = sequence_metadata(
                 source,
@@ -742,14 +781,16 @@ def convert_sequence(args: argparse.Namespace) -> int:
                 per_frame_coverage[0],
                 per_frame_coverage,
             )
-            temporary_rain_path.replace(rain_path)
             with metadata_path.open("w", encoding="utf-8") as handle:
                 json.dump(metadata, handle, indent=2, sort_keys=True)
                 handle.write("\n")
         finally:
-            temporary_rain_path.unlink(missing_ok=True)
+            # The v1 aggregate file is no longer a transport artifact. Keep
+            # any manually retained reference copy outside this output folder.
+            (output_dir / "rain.f32").unlink(missing_ok=True)
 
-    print(f"wrote {rain_path} ({metadata['binary']['byte_count']} bytes)")
+    print(f"wrote {rain_dir} ({len(timestamps)} x {metadata['rain']['frame_byte_length']} bytes)")
+    print(f"wrote {support_path} ({metadata['support_mask']['byte_length']} bytes)")
     print(f"wrote {metadata_path}")
     print(
         f"sequence {timestamps[0]}..{timestamps[-1]}: "

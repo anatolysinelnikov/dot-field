@@ -38,11 +38,10 @@ real geographic weather sequence
 The scalar branch remains implemented for later reintroduction but is not part
 of the current active application/runtime path.
 
-The current data/runtime sequence is: (1) the full positive-rain provider
-domain from the local 19-frame sequence, (2) viewport- and LOD-bounded
-Dots/Squares topology, (3) data chunking only if measured loading or memory
-requires it, and (4) reintroduction of Blur/Areas after viewport-windowed
-scalar reconstruction.
+The current data/runtime sequence is: (1) an immutable full-sequence support
+sidecar plus independently delivered exact source frames, (2) viewport- and
+LOD-bounded Dots/Squares topology, and (3) reintroduction of Blur/Areas after
+viewport-windowed scalar reconstruction.
 
 The spatial runtime separates provider/data bounds from the active render
 window and from sample identity:
@@ -103,16 +102,18 @@ app.js ----------------------> MapLibre GL JS / Globe camera and basemap
 logical weather zoom, MapLibre construction, active-layer routing, and readouts.
 At startup it begins the MapTiler configuration request and weather metadata
 load independently. MapLibre is constructed as soon as its configuration is
-available. The large weather binary is intentionally deferred until MapLibre
-has rendered a frame after `areTilesLoaded()` reports the current viewport's
-required tiles ready; weather custom layers are created only after the complete
-validated weather sequence is ready. This is a startup/network priority policy,
-not a renderer dependency: weather initialization always reads the current
-camera viewport at the time it runs. Before that point,
-weather-dependent controls are inactive while normal map navigation remains
-available. Startup diagnostics exposed at `window.__dotFieldStartup` record the
-major application, MapLibre, transfer, validation, topology, payload, render,
-and playback-ready milestones relative to module start.
+available. Metadata and the small immutable support sidecar may load while the
+basemap starts. After MapLibre renders the initial tiles, the application asks
+only for source frame 0; weather custom layers are created as soon as that
+frame is validated. The remaining frames prefetch sequentially in the
+background and playback enables after that full prefetch, while timeline jumps
+request their required source frames without blanking the last valid weather.
+The request generation guard prevents late frame loads from committing an older
+timeline target. This is a startup/network priority policy, not a renderer
+dependency: weather initialization always reads the current camera viewport at
+the time it runs. Startup diagnostics exposed at `window.__dotFieldStartup`
+record metadata, support, first-source-frame, first-weather, background,
+playback, topology, payload, and render milestones relative to module start.
 It creates the RAW, Dots, and Squares geographic custom layers once after the
 style loads and
 changes their active state instead of recreating the map or layers when the
@@ -189,9 +190,12 @@ application RAF so its progress still completes while paused.
 ## Real-data geographic adapter — `src/engine/real-weather.js`, `src/engine/geography.js`
 
 The active provider is the ignored local full-precipitation sequence at
-`data/generated/202608262200/metadata.json` plus `rain.f32`: 19 frames on the
-`1051 × 719` regular geographic crop, stored as little-endian Float32 in
-`[time][latitude][longitude]` order. Its support is derived from the exact
+`data/generated/202608262200/metadata.json`, `support.mask`, and 19 logical
+`rain/frame-###.f32` assets. The v2 manifest owns those addresses and declares
+little-endian physical Float32 `mm/h` rain frames of `1051 × 719` nodes; it is
+independent of HTTP content coding. Servers may return those logical resources
+identity, gzip, or Brotli encoded and normal browser `fetch()` exposes the
+same decompressed bytes. Its support is derived from the exact
 positive union across every source node and all 19 frames, without connected
 component selection: 28,018 union wet nodes in 61 diagnostic 8-connected
 components span source indices `x=744..1790`, `y=296..1010`. One source-grid
@@ -202,19 +206,14 @@ The source-grid geographic union bounds are 29.7600002289..71.5999984741°E
 and 41.8400001526..70.4000015259°N; support bounds are
 29.7199993134..71.6399993896°E and 41.7999992371..70.4400024414°N; crop
 bounds are 29.6800003052..71.6800003052°E and 41.7599983215..70.4800033569°N.
-Metadata begins immediately, but its validated result is retained by the
-provider-owned staged loader until the application requests the large binary
-after initial basemap readiness. Metadata remains authoritative for all shape
-and byte-count checks; 404/410 metadata or binary failures preserve the
-existing CSV fallback signal.
-Metadata validation requires the supported schema, metadata-driven dimensions
-with width/height/frame-count minimums, timestamps, binary layout/counts/byte
-count, positive regular axis spacing, mm/h normalized units, rain availability,
-and absent storm/hail channels; the fetched binary byte length must match
-exactly. The full binary validation scan checks every value for finiteness and
-non-negativity while constructing the exact sequence-wide positive-rain union
-mask, avoiding a second full traversal. Geographic axes are constructed
-deterministically from metadata.
+Metadata and the packed LSB-first support bitset begin immediately. The loader
+validates the mask node/byte count and its zero trailing unused bits before
+canonical topology initialization; it never rebuilds the support by downloading
+all frames. Each requested source frame is independently validated for exact
+byte count, Float32 alignment, finite non-negative values, and metadata
+compatibility. A 404/410 metadata/support/frame failure preserves the existing
+CSV fallback signal. Geographic axes are constructed deterministically from
+metadata.
 `RealWeatherSequence` keeps
 the existing bilinear spatial sampler and presents temporal frames that
 linearly blend source frames. For regular row-major rectangular canonical
@@ -231,7 +230,14 @@ allowing old frames to be recomputed after wide scrubs. Providers that cannot
 accept this rectangular contract, and the sequence's arbitrary point-batch
 API, retain the dense generic fallback.
 These arrays are computation caches rather than a new weather representation;
-the single-point sampler remains the semantic reference path.
+the single-point sampler remains the semantic reference path. The provider-grid
+source-frame cache is a separate six-entry deterministic LRU of Float32 arrays
+(roughly 17.3 MiB at this fixture), rather than the old fixed 54.77 MiB
+monolithic sequence. A source frame is never asynchronously evicted during a
+synchronous evaluation. Optional future phenomena are represented in metadata
+as one mutually-exclusive Uint8 node enum per source frame: 0 none, 1–3 storm,
+4–6 hail, 7 reserved. The current rain-only sequence declares this channel
+unavailable and fabricates no phenomenon data.
 
 ### Physical weather-summary profiles
 
@@ -279,7 +285,8 @@ sequence before map initialization and converts the shared point interface to
 geographic longitude/latitude. It falls back to the checked-in
 `data/mrl_z3_t+40min_376x239.csv` snapshot only when the local sequence assets
 are unavailable (such as HTTP 404), with one concise warning; malformed
-metadata, inconsistent values/geometry, or an incorrect binary length fail
+metadata, inconsistent values/geometry, incorrect support, or an incorrect
+source-frame length fail
 visibly instead. `WEATHER_SUPPORT` is the stable grid-aligned support rectangle
 described above. The availability GeoJSON is diagnostic observation coverage
 only, not a forecast-rain mask; later forecast frames may legitimately leave
