@@ -97,12 +97,13 @@ export function setActiveWeatherField(field) {
   activeWeatherField = field;
 }
 
-export async function loadActiveWeatherField() {
+export async function loadActiveWeatherField({ onTiming = null } = {}) {
   let field;
   try {
     field = await loadRealWeatherSequence(
       './data/generated/202608262200/metadata.json',
-      './data/generated/202608262200/rain.f32'
+      './data/generated/202608262200/rain.f32',
+      { onTiming }
     );
   } catch (error) {
     if (!(error instanceof RealWeatherSequenceAssetsUnavailableError)) throw error;

@@ -345,7 +345,7 @@ export class RealWeatherSequenceFrame {
 }
 
 export class RealWeatherSequence extends RealWeatherField {
-  constructor({ longitudes, latitudes, rainFramesMmh, frameCount, longitudeSpacing, latitudeSpacing, timestamps }) {
+  constructor({ longitudes, latitudes, rainFramesMmh, frameCount, longitudeSpacing, latitudeSpacing, timestamps, potentialWeatherMask = null }) {
     const frameSize = longitudes.length * latitudes.length;
     const emptyCodes = new Uint8Array(frameSize);
     const emptyChannel = new Float32Array(frameSize);
@@ -370,11 +370,16 @@ export class RealWeatherSequence extends RealWeatherField {
     // least one of the four nodes in its bilinear stencil is positive. This
     // sequence-wide union is immutable and is shared by every prepared
     // geometry and temporal frame.
-    this.potentialWeatherMask = new Uint8Array(frameSize);
-    for (let frame = 0; frame < frameCount; frame++) {
-      const offset = frame * frameSize;
-      for (let index = 0; index < frameSize; index++) {
-        if (rainFramesMmh[offset + index] > 0) this.potentialWeatherMask[index] = 1;
+    this.potentialWeatherMask = potentialWeatherMask || new Uint8Array(frameSize);
+    if (this.potentialWeatherMask.length !== frameSize) {
+      throw new Error('Real weather sequence potential-weather mask does not match the source frame size.');
+    }
+    if (!potentialWeatherMask) {
+      for (let frame = 0; frame < frameCount; frame++) {
+        const offset = frame * frameSize;
+        for (let index = 0; index < frameSize; index++) {
+          if (rainFramesMmh[offset + index] > 0) this.potentialWeatherMask[index] = 1;
+        }
       }
     }
     this.rawFrames = new Map();
@@ -815,40 +820,83 @@ function axesFromSequenceMetadata({ width, height, longitudeStart, latitudeStart
   return { longitudes, latitudes };
 }
 
-async function fetchSequenceAsset(url) {
-  const response = await fetch(url);
+async function fetchSequenceAsset(url, options = undefined) {
+  const response = await fetch(url, options);
   if (response.status === 404 || response.status === 410) throw new RealWeatherSequenceAssetsUnavailableError(url, response.status);
   if (!response.ok) throw new Error(`Unable to load real weather sequence asset ${url} (${response.status}).`);
   return response;
 }
 
-export async function loadRealWeatherSequence(metadataUrl, binaryUrl) {
-  const metadataResponse = await fetchSequenceAsset(metadataUrl);
-  let metadata;
-  try {
-    metadata = await metadataResponse.json();
-  } catch {
-    failSequence('metadata is not valid JSON.');
+function validateRainFramesAndBuildPotentialMask(rainFramesMmh, frameSize) {
+  const potentialWeatherMask = new Uint8Array(frameSize);
+  let spatialIndex = 0;
+  for (let index = 0; index < rainFramesMmh.length; index++) {
+    const value = rainFramesMmh[index];
+    if (!Number.isFinite(value) || value < 0) failSequence(`rain.f32 has an invalid value at element ${index}.`);
+    if (value > 0) potentialWeatherMask[spatialIndex] = 1;
+    spatialIndex++;
+    if (spatialIndex === frameSize) spatialIndex = 0;
   }
-  const validated = validateSequenceMetadata(metadata);
-  const binaryResponse = await fetchSequenceAsset(binaryUrl);
+  return potentialWeatherMask;
+}
+
+export async function loadRealWeatherSequence(metadataUrl, binaryUrl, { onTiming = null } = {}) {
+  const timing = typeof onTiming === 'function' ? onTiming : () => {};
+  const binaryController = new AbortController();
+  timing('weather-metadata-fetch-start');
+  const metadataPromise = fetchSequenceAsset(metadataUrl).then((response) => {
+    timing('weather-metadata-fetch-headers');
+    return response;
+  });
+  timing('weather-binary-fetch-start');
+  const binaryPromise = fetchSequenceAsset(binaryUrl, { signal: binaryController.signal }).then((response) => {
+    timing('weather-binary-fetch-headers');
+    return response;
+  });
+  // Keep an abort-triggered rejection observed when metadata makes the binary
+  // irrelevant; the awaited path below still propagates ordinary binary errors.
+  void binaryPromise.catch(() => {});
+
+  let validated;
+  try {
+    const metadataResponse = await metadataPromise;
+    let metadata;
+    try {
+      metadata = await metadataResponse.json();
+    } catch {
+      failSequence('metadata is not valid JSON.');
+    }
+    timing('weather-metadata-fetch-complete');
+    validated = validateSequenceMetadata(metadata);
+    timing('weather-metadata-validation-complete');
+  } catch (error) {
+    binaryController.abort();
+    await binaryPromise.catch(() => {});
+    throw error;
+  }
+
+  const binaryResponse = await binaryPromise;
   const binaryBuffer = await binaryResponse.arrayBuffer();
+  timing('weather-binary-body-complete');
   if (binaryBuffer.byteLength !== validated.expectedByteCount) {
     failSequence(`rain.f32 byte length is ${binaryBuffer.byteLength}, expected ${validated.expectedByteCount}.`);
   }
   const rainFramesMmh = new Float32Array(binaryBuffer);
   if (rainFramesMmh.length !== validated.expectedElementCount) failSequence('rain.f32 element count does not match metadata.');
-  for (let index = 0; index < rainFramesMmh.length; index++) {
-    if (!Number.isFinite(rainFramesMmh[index]) || rainFramesMmh[index] < 0) failSequence(`rain.f32 has an invalid value at element ${index}.`);
-  }
+  const potentialWeatherMask = validateRainFramesAndBuildPotentialMask(rainFramesMmh, validated.width * validated.height);
+  timing('weather-binary-validation-complete');
+  timing('weather-potential-weather-mask-complete');
   const { longitudes, latitudes } = axesFromSequenceMetadata(validated);
-  return new RealWeatherSequence({
+  const sequence = new RealWeatherSequence({
     longitudes,
     latitudes,
     rainFramesMmh,
     frameCount: validated.frameCount,
     longitudeSpacing: validated.longitudeSpacing,
     latitudeSpacing: validated.latitudeSpacing,
-    timestamps: validated.timestamps
+    timestamps: validated.timestamps,
+    potentialWeatherMask
   });
+  timing('weather-sequence-construction-complete');
+  return sequence;
 }

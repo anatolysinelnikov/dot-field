@@ -18,6 +18,19 @@ import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 
+const applicationStartupAt = performance.now();
+const startupTimings = Object.create(null);
+function markStartup(name) {
+  if (startupTimings[name] !== undefined) return startupTimings[name];
+  const elapsedMs = performance.now() - applicationStartupAt;
+  startupTimings[name] = elapsedMs;
+  performance.mark(`dot-field:${name}`);
+  console.info(`[dot-field startup] ${name}: ${elapsedMs.toFixed(1)}ms`);
+  return elapsedMs;
+}
+window.__dotFieldStartup = { startedAt: applicationStartupAt, timings: startupTimings };
+markStartup('app-module-start');
+
 const MAX_SAMPLING_LATITUDE = 85;
 const COMPACT_MAP_SHORT_SIDE = 680;
 const COMPACT_MIN_ZOOM = 1.5;
@@ -48,21 +61,21 @@ const initialMinZoom =
 
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 
-const activeWeatherField = await loadActiveWeatherField();
-const sourceFrameCount = Number.isInteger(activeWeatherField.frameCount) ? activeWeatherField.frameCount : 1;
-const rawWeatherField = typeof activeWeatherField.exactSourceFrameAt === 'function'
-  ? activeWeatherField.exactSourceFrameAt(0)
-  : activeWeatherField.rawFrame;
-const sourceTimestamps = Array.isArray(activeWeatherField.timestamps)
-  ? activeWeatherField.timestamps
-  : [];
+markStartup('weather-load-start');
+const weatherPromise = loadActiveWeatherField({ onTiming: markStartup });
+let activeWeatherField = null;
+let rawWeatherField = null;
+let sourceFrameCount = 1;
+let sourceTimestamps = [];
 
 async function loadMapTilerKey() {
   try {
+    markStartup('maptiler-config-fetch-start');
     const response = await fetch('./config.local.json', { cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const config = await response.json();
     if (typeof config.maptilerKey !== 'string' || !config.maptilerKey.trim()) throw new Error('maptilerKey is missing');
+    markStartup('maptiler-config-fetch-complete');
     return config.maptilerKey.trim();
   } catch {
     console.error('MapTiler local configuration is missing or invalid. Expected config.local.json with a non-empty maptilerKey.');
@@ -70,7 +83,8 @@ async function loadMapTilerKey() {
   }
 }
 
-const mapTilerKey = await loadMapTilerKey();
+const mapTilerKeyPromise = loadMapTilerKey();
+const mapTilerKey = await mapTilerKeyPromise;
 const MAP_STYLE = `https://api.maptiler.com/maps/dataviz-v4-dark/style.json?key=${encodeURIComponent(mapTilerKey)}`;
 
 const MAPTILER_GEOGRAPHIC_LABEL_IDS = [
@@ -105,6 +119,7 @@ const INITIAL_RAW_MAX_ZOOM = rawZoomForLogicalSamplingZoom(
   REFERENCE_LATITUDE
 );
 
+markStartup('maplibre-constructor');
 const map = new window.maplibregl.Map({
   container: 'map',
   style: MAP_STYLE,
@@ -137,6 +152,8 @@ const state = {
   rawMaxZoom: INITIAL_RAW_MAX_ZOOM,
   resettingView: false,
   mapReady: false,
+  styleReady: false,
+  weatherReady: false,
   weatherQueued: false,
   renderMode: 'raw',
   hazardsVisible: true,
@@ -146,10 +163,30 @@ const state = {
 let geographicWeatherPyramid = null;
 let weatherLayer = null;
 let squaresLayer = null;
-const rawLayer = new RawWeatherLayer(rawWeatherField);
-let geographicLayers = [rawLayer];
+let rawLayer = null;
+let geographicLayers = [];
 const VALID_RENDER_MODES = new Set(['raw', 'dots', 'squares']);
 let lastMapErrorSignature = '';
+
+for (const control of [...renderModeButtons, hazards, timeSlider]) control.disabled = true;
+
+function activateWeatherField(field) {
+  activeWeatherField = field;
+  sourceFrameCount = Number.isInteger(field.frameCount) ? field.frameCount : 1;
+  rawWeatherField = typeof field.exactSourceFrameAt === 'function'
+    ? field.exactSourceFrameAt(0)
+    : field.rawFrame;
+  sourceTimestamps = Array.isArray(field.timestamps) ? field.timestamps : [];
+  rawLayer = new RawWeatherLayer(rawWeatherField);
+  state.weatherReady = true;
+  for (const control of [...renderModeButtons, hazards, timeSlider]) control.disabled = false;
+  markStartup('playback-ready-full-sequence');
+  tryInitializeWeatherLayer();
+}
+
+void weatherPromise.then(activateWeatherField).catch((error) => {
+  console.error('Unable to load weather data.', error);
+});
 
 const TIMESTAMP_MONTHS = Object.freeze(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
 
@@ -372,8 +409,8 @@ function commitLevelData(level, levelData) {
   updateLodDiagnostics();
 }
 
-function initializeWeatherLayer() {
-  if (state.mapReady) return;
+function tryInitializeWeatherLayer() {
+  if (state.mapReady || !state.styleReady || !state.weatherReady) return;
   const initialBounds = visibleMercatorBounds();
   if (!initialBounds) throw new Error('Initial camera bounds are unavailable for weather topology initialization.');
   const initialLevel = zoomToMercatorGridLevel(state.logicalSamplingZoom);
@@ -486,6 +523,10 @@ function initializeWeatherLayer() {
   applyRenderMode();
   rebaseCamera();
   rebuildSamples(initialLevel);
+  markStartup('initial-weather-topology-ready');
+  markStartup('first-weather-keyframe-evaluated');
+  markStartup('first-renderer-instance-payload-ready');
+  map.triggerRepaint();
 }
 
 function startAdjacentTransition(level, now) {
@@ -571,6 +612,7 @@ function queueWeatherUpdate() {
 }
 
 function applyRenderMode() {
+  if (!state.mapReady) return;
   const mode = state.renderMode;
   const time = state.time / LOOP_SECONDS;
   const rawActive = mode === 'raw';
@@ -592,6 +634,7 @@ function applyRenderMode() {
 }
 
 function setRawFrame(frameIndex, commitTime = false) {
+  if (!activeWeatherField || !rawLayer) return;
   const nextFrameIndex = clamp(frameIndex, 0, sourceFrameCount - 1);
   state.rawFrameIndex = nextFrameIndex;
   const frame = typeof activeWeatherField.exactSourceFrameAt === 'function'
@@ -664,6 +707,7 @@ function updateRawTooltipContent(cell) {
 }
 
 function refreshHighlightedRawCell() {
+  if (!rawLayer) return;
   const cellKey = selectedRawCellKey || (rawLayer.highlightedCell && rawCellKey(rawLayer.highlightedCell));
   if (!cellKey) return;
   const [longitudeIndex, latitudeIndex] = cellKey.split(':').map(Number);
@@ -678,7 +722,7 @@ function refreshHighlightedRawCell() {
 function dismissRawTooltip() {
   selectedRawCell = null;
   selectedRawCellKey = null;
-  rawLayer.setHighlightedCell(null);
+  rawLayer?.setHighlightedCell(null);
   rawTooltip.hidden = true;
 }
 
@@ -688,7 +732,7 @@ function updateRawTooltipPosition() {
 }
 
 function updateRawHover(event) {
-  if (state.renderMode !== 'raw' || selectedRawCell || rawMapDragging) return;
+  if (!rawLayer || state.renderMode !== 'raw' || selectedRawCell || rawMapDragging) return;
   const cell = rawLayer.field.rawCellAt(event.lngLat.lng, event.lngLat.lat);
   if (!cell) {
     dismissRawTooltip();
@@ -698,7 +742,7 @@ function updateRawHover(event) {
 }
 
 function selectRawCell(event) {
-  if (state.renderMode !== 'raw') return;
+  if (!rawLayer || state.renderMode !== 'raw') return;
   if (selectedRawCell) return dismissRawTooltip();
   const cell = rawLayer.field.rawCellAt(event.lngLat.lng, event.lngLat.lat);
   if (!cell) return dismissRawTooltip();
@@ -797,8 +841,14 @@ for (const eventName of ['pointerup', 'pointercancel']) {
   });
 }
 map.on('style.load', () => {
-  if (!state.mapReady) map.setProjection({ type: 'globe' });
-  initializeWeatherLayer();
+  markStartup('maplibre-style-load');
+  if (!state.styleReady) map.setProjection({ type: 'globe' });
+  state.styleReady = true;
+  tryInitializeWeatherLayer();
+});
+map.on('render', () => {
+  if (state.styleReady) markStartup('first-basemap-render');
+  if (state.mapReady) markStartup('first-weather-layer-render');
 });
 map.on('mousemove', updateRawHover);
 map.on('click', selectRawCell);
@@ -837,7 +887,10 @@ map.on('moveend', () => {
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
   updateResetViewControl();
 });
-map.on('load', updateResetViewControl);
+map.on('load', () => {
+  markStartup('maplibre-load');
+  updateResetViewControl();
+});
 map.on('error', (event) => {
   const error = event?.error;
   const details = [];
