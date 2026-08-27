@@ -6,7 +6,7 @@ import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geogra
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { DOTS_STRONG_RAIN_FULL_MMH, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadii } from '../src/engine/hazard-renderer.js';
-import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, mercatorToLngLat } from '../src/engine/geographic-lod.js';
+import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, mercatorToLngLat, selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
 import { GeographicScalarLattice, SCALAR_GRID_LEVEL } from '../src/engine/geographic-scalar-lattice.js';
 
 const LEVELS = [10, 11, 12, 13, 14, 15];
@@ -185,7 +185,15 @@ for (const [lower, higher, hierarchical] of [[12, 13, true], [13, 14, false], [1
   console.log(`transition L${lower}<->L${higher}: ${hierarchical ? 'hierarchical' : 'direct pairs'}, inherited=${inheritedPairs}, introduced=${introducedPairs}, inherited position error=${inheritedPositionError}`); check(inheritedPositionError === 0 && (hierarchical ? pyramid.topology.transitionParentsFor(higher) : introducedPairs > 0), `L${lower}<->L${higher} transition topology`);
 }
 
-const scalar = new GeographicScalarLattice(); console.log(`scalar isolation: L${SCALAR_GRID_LEVEL}, ${scalar.width}x${scalar.height}, ${scalar.length} vertices`); check(scalar.width === 466 && scalar.height === 225 && scalar.length === 104850, 'Blur/Areas scalar lattice remains the pre-L15 fixed topology');
+const scalar = new GeographicScalarLattice();
+const scalarSelection = selectMercatorGridSamples(SCALAR_GRID_LEVEL);
+let expectedScalarWidth = 1;
+while (expectedScalarWidth < scalarSelection.samples.length
+  && scalarSelection.samples[expectedScalarWidth].canonicalY === scalarSelection.samples[0].canonicalY) expectedScalarWidth++;
+const expectedScalarHeight = scalarSelection.samples.length / expectedScalarWidth;
+console.log(`scalar isolation: L${SCALAR_GRID_LEVEL}, ${scalar.width}x${scalar.height}, ${scalar.length} vertices`);
+check(scalar.width === expectedScalarWidth && scalar.height === expectedScalarHeight
+  && scalar.length === scalarSelection.samples.length, 'Blur/Areas scalar lattice remains fixed at L14 with support-derived dimensions');
 
 const summaryBytesPerSample = pyramid.summaryMemoryBytesPerSample(); let topologyAnchorBytes = 0;
 for (const level of LEVELS) { const count = pyramid.samplesFor(level).length; topologyAnchorBytes += pyramid.topology.levels.get(level).canonicalAnchors.byteLength; console.log(`L${level}: ${count} samples; shared summary=${(count * summaryBytesPerSample / 1024 / 1024).toFixed(3)} MiB`); }

@@ -40,12 +40,14 @@ FLOAT_FORMAT = ".9g"
 COORDINATE_FORMAT = ".17g"
 SEQUENCE_SCHEMA_VERSION = "dot-field-netcdf-sequence-v1"
 SEQUENCE_HALO_CELLS = 1
-# Snapshot of the checked-in WEATHER_SUPPORT in src/engine/geography.js.
+# Exact source-grid-aligned WEATHER_SUPPORT in src/engine/geography.js.
+# Derived from the 8-connected union of all positive source values across the
+# 19-frame sequence, plus one full source-grid cell on every side.
 CURRENT_WEATHER_SUPPORT = {
-    "west": 39.93113,
-    "east": 50.12886,
-    "south": 41.57035,
-    "north": 45.12740,
+    "west": 46.720001220703125,
+    "east": 50.79999923706055,
+    "south": 41.79999923706055,
+    "north": 45.08000183105469,
 }
 DEFAULT_AVAILABILITY_PATH = Path("data/availability/available_region_latest.json")
 

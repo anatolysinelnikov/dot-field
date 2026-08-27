@@ -113,13 +113,23 @@ application RAF so its progress still completes while paused.
 ## Real-data geographic adapter — `src/engine/real-weather.js`, `src/engine/geography.js`
 
 The active provider is the ignored local compact sequence at
-`data/generated/202608262200/metadata.json` plus `rain.f32`: 19 frames on one
-fixed 259 × 93 regular geographic grid, stored as little-endian Float32 in
-`[time][latitude][longitude]` order. Metadata validation requires the supported
-schema, dimensions, timestamps, binary layout/counts/byte count, positive axis
-spacing, mm/h normalized units, rain availability, and absent storm/hail
-channels; the fetched binary byte length must match exactly. Geographic axes
-are constructed deterministically from metadata. `RealWeatherSequence` keeps
+`data/generated/202608262200/metadata.json` plus `rain.f32`: 19 frames on the
+current 105 × 85 regular geographic grid, stored as little-endian Float32 in
+`[time][latitude][longitude]` order. The support was derived from the full
+source NetCDF by taking the exact-positive union across all 19 frames,
+labeling deterministic 8-connected components, selecting every component
+with a wet node inside the prior experiment support, taking the combined
+selected extent, and adding one source-grid cell on every side for
+`WEATHER_SUPPORT`. The binary crop adds one further source-grid cell on every
+side as the bilinear interpolation halo, so its inclusive source indices are
+`x=1167..1271`, `y=294..378`; the support indices are `x=1168..1270`,
+`y=295..377`. The selected wet extent is `x=1169..1269`, `y=296..376`.
+Metadata validation requires the supported schema, metadata-driven dimensions
+with width/height/frame-count minimums, timestamps, binary layout/counts/byte
+count, positive regular axis spacing, mm/h normalized units, rain availability,
+and absent storm/hail channels; the fetched binary byte length must match
+exactly. Geographic axes are constructed deterministically from metadata.
+`RealWeatherSequence` keeps
 the existing bilinear spatial sampler and presents value-free temporal frames
 that linearly blend source frames; prepared geometry remains a `Uint32Array`
 source-cell index plus two `Float64Array` interpolation fractions (20
@@ -132,9 +142,12 @@ geographic longitude/latitude. It falls back to the checked-in
 `data/mrl_z3_t+40min_376x239.csv` snapshot only when the local sequence assets
 are unavailable (such as HTTP 404), with one concise warning; malformed
 metadata, inconsistent values/geometry, or an incorrect binary length fail
-visibly instead. `WEATHER_SUPPORT` remains the existing stable rectangle and is
-not expanded. The availability GeoJSON is diagnostic observation coverage only,
-not a forecast-rain mask.
+visibly instead. `WEATHER_SUPPORT` is the stable grid-aligned support rectangle
+described above. The availability GeoJSON is diagnostic observation coverage
+only, not a forecast-rain mask. The deterministic globally anchored Mercator
+topology still derives all L10–L15 identities from this support; changing its
+extent changes only the selected topology envelope, not grid anchoring,
+canonical identity, target spacing, LOD levels, or parent/child relationships.
 
 ## RAW source-grid diagnostic — `src/engine/raw-weather-layer.js`
 

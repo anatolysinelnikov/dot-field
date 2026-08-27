@@ -6,9 +6,6 @@ const EXPECTED_COLUMNS = ['lon', 'lat', 'mmh', 'thunderstorm', 'hail'];
 const REGULAR_SPACING_TOLERANCE = 2e-5;
 const OUTSIDE_SOURCE_INDEX = 0xffffffff;
 const SEQUENCE_SCHEMA_VERSION = 'dot-field-netcdf-sequence-v1';
-const SEQUENCE_WIDTH = 259;
-const SEQUENCE_HEIGHT = 93;
-const SEQUENCE_FRAME_COUNT = 19;
 const SEQUENCE_DIMENSIONS = Object.freeze(['time', 'latitude', 'longitude']);
 const SEQUENCE_BINARY_FILENAME = 'rain.f32';
 
@@ -445,9 +442,9 @@ function validateSequenceMetadata(metadata) {
   const width = sequenceInteger(grid.width, 'spatial_grid.width');
   const height = sequenceInteger(grid.height, 'spatial_grid.height');
   const frameCount = sequenceInteger(time.count, 'time.count');
-  assertSequenceEqual(width, SEQUENCE_WIDTH, 'spatial_grid.width');
-  assertSequenceEqual(height, SEQUENCE_HEIGHT, 'spatial_grid.height');
-  assertSequenceEqual(frameCount, SEQUENCE_FRAME_COUNT, 'time.count');
+  if (width < 2) failSequence('spatial_grid.width must be at least 2.');
+  if (height < 2) failSequence('spatial_grid.height must be at least 2.');
+  if (frameCount < 2) failSequence('time.count must be at least 2.');
   if (!Array.isArray(time.timestamps) || time.timestamps.length !== frameCount) failSequence('time.timestamps must contain one timestamp per frame.');
   for (const [index, timestamp] of time.timestamps.entries()) {
     sequenceString(timestamp, `time.timestamps[${index}]`);

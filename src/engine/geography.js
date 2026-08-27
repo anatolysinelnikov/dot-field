@@ -9,13 +9,14 @@ export const WEATHER_REGION = Object.freeze({
   initialZoom: 5.8
 });
 
-// Nonzero snapshot envelope plus one source-grid cell on every side. The
-// complete CSV field remains available to the provider sampler.
+// The selected 8-connected positive-rain union across all 19 source frames
+// plus one full source-grid cell on every side. The binary sequence adds one
+// further source-grid cell as its bilinear interpolation halo.
 export const WEATHER_SUPPORT = Object.freeze({
-  west: 39.93113,
-  east: 50.12886,
-  south: 41.57035,
-  north: 45.12740
+  west: 46.720001220703125,
+  east: 50.79999923706055,
+  south: 41.79999923706055,
+  north: 45.08000183105469
 });
 
 let activeWeatherField = null;
