@@ -11,8 +11,10 @@
 This is a browser-native geographic weather prototype. It uses MapLibre GL JS in
 Globe projection, a validated compact real-data precipitation sequence, a globally
 anchored Mercator sampling topology, and projection-aware MapLibre custom WebGL
-layers. The active modes are **RAW**, **Dots**, **Squares**, **Blur**, and
-**Areas**; RAW is the initial mode and Dots remains available as a selectable mode.
+layers. The current active prototype exposes **RAW**, **Dots**, and **Squares**;
+RAW is the initial mode and Dots remains available as a selectable mode. Blur
+and Areas remain implemented in the repository but are intentionally inactive
+pending future viewport-windowed scalar reconstruction.
 
 The weather channels are always independent data channels:
 
@@ -32,6 +34,9 @@ real geographic weather sequence
         |
         +-- fixed L14 scalar lattice --> Blur / Areas (+ optional Smooth)
 ```
+
+The scalar branch remains implemented for later reintroduction but is not part
+of the current active application/runtime path.
 
 The spatial runtime separates provider/data bounds from the active render
 window and from sample identity:
@@ -84,18 +89,20 @@ app.js ----------------------> MapLibre GL JS / Globe camera and basemap
  +-> geographic-lod.js ------------------> geographic-weather-pyramid.js
  |                                           +-> geographic-dots-layer.js
  |                                           +-> geographic-squares-layer.js
- +-> geographic-scalar-lattice.js --------> geographic-scalar-layer.js
+ +-> retained scalar engine (inactive) ----> geographic-scalar-layer.js
 ```
 
 ### Application orchestration — `src/app.js`
 
 `app.js` owns UI state, playback, timeline scrubbing, custom camera controls,
 logical weather zoom, MapLibre construction, active-layer routing, and readouts.
-It creates all four geographic custom layers once after the style loads and
+It creates the RAW, Dots, and Squares geographic custom layers once after the
+style loads and
 changes their active state instead of recreating the map or layers when the
 render mode changes. RAW is the initial mode and playback starts paused; the
-selector order is RAW, Dots, Squares, Blur, Areas. The `Явления` control is visible only in RAW mode;
-the Smooth control is visible only in Areas mode.
+selector order is RAW, Dots, Squares. The `Явления` control is visible only in
+RAW mode. `GeographicScalarLayer` is deliberately not instantiated or added to
+MapLibre in this temporary active-mode configuration.
 
 The MapTiler Dataviz Dark Globe basemap, native label and
 administrative-boundary ordering, water tint/boundary context, camera controls,
@@ -122,8 +129,9 @@ next repaint, while preserving time, play/pause state, camera state, and
 logical weather zoom. Inactive layers retain lightweight topology/LOD state but
 do not evaluate weather, rebuild instance data, or upload temporal GPU data.
 RAW is intentionally static and never participates in temporal evaluation.
-Dots and Squares read out their active LOD/sample count. Blur and Areas report
-their fixed L14 reconstruction lattice instead of camera LOD.
+Dots and Squares read out their active LOD/sample count. Blur and Areas retain
+their fixed-support implementation for a later task but have no active UI or
+runtime routing here.
 
 For Dots and Squares, each MapLibre camera move is converted to a conservative
 Mercator envelope using the map bounds plus a deterministic 5 × 5 screen

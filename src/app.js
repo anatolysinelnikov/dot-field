@@ -13,7 +13,6 @@ import {
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
-import { GeographicScalarLayer } from './engine/geographic-scalar-layer.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 
 const MAX_SAMPLING_LATITUDE = 85;
@@ -29,8 +28,6 @@ const renderModeSelector = document.querySelector('#renderModeSelector');
 const renderModeButtons = [...renderModeSelector.querySelectorAll('[data-render-mode]')];
 const rawPhenomenaControl = document.querySelector('#rawPhenomenaControl');
 const rawPhenomena = document.querySelector('#rawPhenomena');
-const areaSmoothControl = document.querySelector('#areaSmoothControl');
-const areaSmooth = document.querySelector('#areaSmooth');
 const lodDiagnostics = document.querySelector('#lodDiagnostics');
 const rawTooltip = document.querySelector('#rawTooltip');
 const rawTooltipContent = document.querySelector('#rawTooltipContent');
@@ -135,9 +132,9 @@ const state = {
 const geographicWeatherPyramid = new GeographicWeatherPyramid();
 const weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid);
 const squaresLayer = new GeographicSquaresLayer(geographicWeatherPyramid);
-const scalarLayer = new GeographicScalarLayer();
 const rawLayer = new RawWeatherLayer(rawWeatherField);
-const geographicLayers = [rawLayer, scalarLayer, squaresLayer, weatherLayer];
+const geographicLayers = [rawLayer, squaresLayer, weatherLayer];
+const VALID_RENDER_MODES = new Set(['raw', 'dots', 'squares']);
 let lastMapErrorSignature = '';
 
 function cameraState() {
@@ -464,7 +461,6 @@ function queueWeatherUpdate() {
     if (state.renderMode === 'raw') return;
     if (state.renderMode === 'dots') weatherLayer.updateWeather(time);
     else if (state.renderMode === 'squares') squaresLayer.updateWeather(time);
-    else scalarLayer.updateWeather(time);
   });
 }
 
@@ -472,28 +468,22 @@ function applyRenderMode() {
   const mode = state.renderMode;
   const time = state.time / LOOP_SECONDS;
   const rawActive = mode === 'raw';
-  const scalarActive = mode === 'blur' || mode === 'areas';
   rawLayer.setActive(rawActive);
   rawLayer.setPhenomena(rawPhenomena.checked);
   weatherLayer.setActive(mode === 'dots');
   squaresLayer.setActive(mode === 'squares');
-  scalarLayer.setActive(scalarActive);
   if (rawActive) return;
   if (mode === 'dots') {
     weatherLayer.updateWeather(time);
   }
   else if (mode === 'squares') squaresLayer.updateWeather(time);
-  else {
-    scalarLayer.setPresentation(mode === 'areas' ? 'areas' : 'blur', mode === 'areas' && areaSmooth.checked, time);
-    scalarLayer.updateWeather(time);
-  }
 }
 
 function setRenderMode(mode) {
+  if (!VALID_RENDER_MODES.has(mode)) return;
   state.renderMode = mode;
   renderModeSelector.dataset.mode = mode;
   rawPhenomenaControl.hidden = mode !== 'raw';
-  areaSmoothControl.hidden = mode !== 'areas';
   if (mode !== 'raw') dismissRawTooltip();
   for (const button of renderModeButtons) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
@@ -605,9 +595,6 @@ resetView.addEventListener('click', resetMapView);
 for (const button of renderModeButtons) {
   button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
 }
-areaSmooth.addEventListener('change', () => {
-  if (state.renderMode === 'areas') applyRenderMode();
-});
 rawPhenomena.addEventListener('change', () => {
   if (state.renderMode === 'raw') rawLayer.setPhenomena(rawPhenomena.checked);
 });
@@ -728,7 +715,6 @@ function frame(now) {
       updateRawTooltipPosition();
     } else if (state.renderMode === 'dots') weatherLayer.updateWeather(normalizedTime);
     else if (state.renderMode === 'squares') squaresLayer.updateWeather(normalizedTime);
-    else scalarLayer.updateWeather(normalizedTime);
   }
   if (reachedEndpoint) setPlaying(false);
   updateLODTransition(now);
