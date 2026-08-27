@@ -49,6 +49,12 @@ function denseChain(pyramid, frame, minimumLevel) {
   return summaries;
 }
 
+function coarseAndDirect(pyramid, frame) {
+  const summaries = pyramid.evaluate([10], frame);
+  summaries[13] = pyramid.evaluate([13], frame)[13];
+  return summaries;
+}
+
 function difference(left, right) {
   if (left.length !== right.length) throw new Error(`Array length mismatch ${left.length} !== ${right.length}.`);
   let maximum = 0;
@@ -173,8 +179,8 @@ let stableChecks = 0;
 for (const normalizedTime of testTimes) {
   const frame = weather.prepareFrame(normalizedTime);
   const frameNext = weather.prepareFrame(Math.min(1, normalizedTime + 1 / 180));
-  const sparseSummaries = optimizedPyramid.evaluate([10], frame);
-  const sparseSummariesNext = optimizedPyramid.evaluate([10], frameNext);
+  const sparseSummaries = coarseAndDirect(optimizedPyramid, frame);
+  const sparseSummariesNext = coarseAndDirect(optimizedPyramid, frameNext);
   const denseSummaries = denseChain(densePyramid, frame, 10);
   const denseSummariesNext = denseChain(densePyramid, frameNext, 10);
   const sparseDotsByLevel = {};
@@ -211,7 +217,7 @@ for (const normalizedTime of testTimes) {
 
 const transitionTime = 0.347;
 const transitionFrame = weather.prepareFrame(transitionTime);
-const transitionSparse = optimizedPyramid.evaluate([10], transitionFrame);
+const transitionSparse = coarseAndDirect(optimizedPyramid, transitionFrame);
 const transitionDense = denseChain(densePyramid, transitionFrame, 10);
 for (const [fromLevel, toLevel] of [[10, 11], [11, 12]]) {
   const sparseMapped0 = {};

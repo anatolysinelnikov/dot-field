@@ -54,6 +54,12 @@ function denseChain(pyramid, frame, minimumLevel) {
   return summaries;
 }
 
+function coarseAndDirect(pyramid, frame) {
+  const summaries = pyramid.evaluate([10], frame);
+  summaries[13] = pyramid.evaluate([13], frame)[13];
+  return summaries;
+}
+
 function maxDifference(left, right) {
   let maximum = 0;
   let mismatches = 0;
@@ -95,7 +101,7 @@ const normalizedTimes = [...exactSourceFrameTimes, ...interpolatedTimes];
 let totalComparisons = 0;
 for (const normalizedTime of normalizedTimes) {
   const frame = weather.prepareFrame(normalizedTime);
-  const optimized = optimizedPyramid.evaluate([10], frame);
+  const optimized = coarseAndDirect(optimizedPyramid, frame);
   const dense = denseChain(densePyramid, frame, 10);
   for (const level of [10, 11, 12, 13]) {
     compareSummary(level, optimized[level], dense[level]);
@@ -106,7 +112,7 @@ for (const normalizedTime of normalizedTimes) {
 
 for (const normalizedTime of [...exactSourceFrameTimes].reverse()) {
   const frame = weather.prepareFrame(normalizedTime);
-  const optimized = optimizedPyramid.evaluate([10], frame);
+  const optimized = coarseAndDirect(optimizedPyramid, frame);
   const dense = denseChain(densePyramid, frame, 10);
   for (const level of [10, 11, 12, 13]) {
     compareSummary(level, optimized[level], dense[level]);

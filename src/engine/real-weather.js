@@ -226,6 +226,9 @@ export class RealWeatherSequenceFrame {
     this.frame0 = frame0;
     this.frame1 = frame1;
     this.progress = progress;
+    // This explicit capability is limited to the current rain-only sequence;
+    // generic fields must continue through the full channel-aware path.
+    this.supportsRainOnlyPreparedBatch = true;
   }
 
   isSamplingGeometryCompatible(geometry) {

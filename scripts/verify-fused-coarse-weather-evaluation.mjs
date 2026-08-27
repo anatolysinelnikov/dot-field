@@ -1,0 +1,185 @@
+import fs from 'node:fs';
+import { setActiveWeatherField } from '../src/engine/geography.js';
+import { RealWeatherSequence, parseRealWeatherCsv } from '../src/engine/real-weather.js';
+import {
+  aggregateWeatherSummary,
+  evaluateDirectWeatherSummary,
+  RAIN_COVERAGE_THRESHOLDS_MMH,
+  GeographicWeatherPyramid
+} from '../src/engine/geographic-weather-pyramid.js';
+import { GeographicLodTopology, lodRangeForStableLevel, canonicalWindowFromMercatorBounds, lngLatToMercator } from '../src/engine/geographic-lod.js';
+import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
+import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
+
+const metadata = JSON.parse(fs.readFileSync(new URL('../data/generated/202608262200/metadata.json', import.meta.url), 'utf8'));
+const grid = metadata.spatial_grid;
+const time = metadata.time;
+const binary = fs.readFileSync(new URL('../data/generated/202608262200/rain.f32', import.meta.url));
+const rainFramesMmh = new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / Float32Array.BYTES_PER_ELEMENT);
+const longitudes = Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing);
+const latitudes = Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing);
+const weather = new RealWeatherSequence({
+  longitudes,
+  latitudes,
+  rainFramesMmh,
+  frameCount: time.count,
+  longitudeSpacing: grid.longitude_spacing,
+  latitudeSpacing: grid.latitude_spacing,
+  timestamps: time.timestamps
+});
+setActiveWeatherField(weather);
+
+const levels = [10, 11, 12];
+const topology = new GeographicLodTopology(undefined, lodRangeForStableLevel(10));
+const fusedPyramid = new GeographicWeatherPyramid(Float32Array, topology);
+const oldPyramid = new GeographicWeatherPyramid(Float32Array, topology);
+const geometry = fusedPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
+const oldGeometry = oldPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
+
+function oldChain(frame, minimumLevel, reusable = null) {
+  let summary = evaluateDirectWeatherSummary(
+    oldPyramid.levels.get(13),
+    frame,
+    reusable?.[13] || null,
+    Float32Array,
+    oldGeometry,
+    oldPyramid.totalWeights.get(13)
+  );
+  const summaries = { 13: summary };
+  for (let level = 12; level >= minimumLevel; level--) {
+    summary = aggregateWeatherSummary(
+      oldPyramid.levels.get(level),
+      summary,
+      oldPyramid.contributions.get(level + 1),
+      reusable?.[level] || null,
+      Float32Array,
+      oldPyramid.totalWeights.get(level)
+    );
+    summaries[level] = summary;
+  }
+  return summaries;
+}
+
+function maximumDifference(left, right) {
+  if (left.length !== right.length) throw new Error(`array length mismatch ${left.length} !== ${right.length}`);
+  let result = 0;
+  for (let index = 0; index < left.length; index++) result = Math.max(result, Math.abs(left[index] - right[index]));
+  return result;
+}
+
+function compareSummary(level, fused, old) {
+  if (!fused || !old) throw new Error(`missing L${level} summary`);
+  const fields = [
+    'totalWeight', 'rainWeightedSumMmh', 'rainMaxMmh',
+    'stormCoverageWeight', 'stormWeightedSeverity', 'stormMaxSeverity',
+    'hailCoverageWeight', 'hailWeightedSeverity', 'hailMaxSeverity'
+  ];
+  let maximum = 0;
+  for (const field of fields) maximum = Math.max(maximum, maximumDifference(fused[field], old[field]));
+  let classificationChanges = 0;
+  for (let threshold = 0; threshold < RAIN_COVERAGE_THRESHOLDS_MMH.length; threshold++) {
+    maximum = Math.max(maximum, maximumDifference(fused.rainCoverageWeight[threshold], old.rainCoverageWeight[threshold]));
+    for (let index = 0; index < fused.samples.length; index++) {
+      if ((fused.rainCoverageWeight[threshold][index] > 0) !== (old.rainCoverageWeight[threshold][index] > 0)) classificationChanges++;
+    }
+  }
+  if (maximum > 1e-6 || classificationChanges) throw new Error(`L${level} fused summary differs: max=${maximum}, classifications=${classificationChanges}`);
+  return { maximum, classificationChanges };
+}
+
+function compareMapped(level, fusedDots, oldDots, fusedSquares, oldSquares) {
+  const dot = ['rainRadius', 'strongRadius', 'stormRadius', 'hailRadius'];
+  const square = ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMeanSeverity', 'stormMaxSeverity', 'hailCoverage', 'hailMeanSeverity', 'hailMaxSeverity'];
+  for (const field of dot) {
+    const error = maximumDifference(fusedDots[field], oldDots[field]);
+    if (error > 1e-6) throw new Error(`L${level} mapped ${field} differs by ${error}`);
+  }
+  for (const field of square) {
+    const error = maximumDifference(fusedSquares[field], oldSquares[field]);
+    if (error > 1e-6) throw new Error(`L${level} mapped ${field} differs by ${error}`);
+  }
+}
+
+function makeDots(pyramid, level, mapped0, mapped1) {
+  const layer = new GeographicDotsLayer(pyramid);
+  layer.samples = pyramid.samplesFor(level);
+  layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped0 } }, frames1: { mapped: { [level]: mapped1 } } }]]) };
+  layer.rebuildInstances();
+  return layer;
+}
+
+function makeSquares(pyramid, level, mapped0, mapped1) {
+  const layer = new GeographicSquaresLayer(pyramid);
+  layer.samples = pyramid.samplesFor(level);
+  layer.temporal = { levels: new Map([[level, { frames0: { mapped: { [level]: mapped0 } }, frames1: { mapped: { [level]: mapped1 } } }]]) };
+  layer.rebuildInstances();
+  return layer;
+}
+
+function comparePacked(level, fusedDots, oldDots, fusedSquares, oldSquares, summary) {
+  for (const type of ['rain', 'strong', 'storm', 'hail']) {
+    const error = maximumDifference(fusedDots.instances[type], oldDots.instances[type]);
+    if (error > 1e-6) throw new Error(`L${level} packed Dots ${type} differs by ${error}`);
+  }
+  const active = summary.potentialActiveIndices;
+  if (fusedSquares.instanceCounts[0] !== oldSquares.instanceCounts[0]) throw new Error(`L${level} packed Squares count differs`);
+  if (fusedSquares.instanceCounts[0] !== active.length) throw new Error(`L${level} packed Squares count is not the static active count`);
+  const fusedData = fusedSquares.instanceData[0];
+  const oldData = oldSquares.instanceData[0];
+  const length = fusedSquares.instanceCounts[0] * 18;
+  const error = maximumDifference(fusedData.subarray(0, length), oldData.subarray(0, length));
+  if (error > 1e-6) throw new Error(`L${level} packed Squares differs by ${error}`);
+}
+
+const testTimes = [...Array(time.count).keys()].map((index) => index / (time.count - 1)).concat([0.123, 0.347, 0.5, 0.777, 0.91]);
+const reverseTimes = [...testTimes].reverse();
+let summaryChecks = 0;
+let mappedChecks = 0;
+let packedChecks = 0;
+let maximumError = 0;
+
+for (const sequence of [testTimes, reverseTimes]) {
+  let oldReusable = null;
+  let fusedReusable = null;
+  for (const normalizedTime of sequence) {
+    const frame = weather.prepareFrame(normalizedTime);
+    const fused = fusedPyramid.evaluate(levels, frame, fusedReusable);
+    if (fused[13] !== undefined) throw new Error('coarse-only fused evaluation retained an L13 summary');
+    fusedReusable = fused;
+    const old = oldChain(frame, 10, oldReusable);
+    oldReusable = old;
+    for (const level of levels) {
+      const result = compareSummary(level, fused[level], old[level]);
+      maximumError = Math.max(maximumError, result.maximum);
+      summaryChecks++;
+      const fusedDots = mapDotsWeatherSummary(fused[level]);
+      const oldDots = mapDotsWeatherSummary(old[level]);
+      const fusedSquares = mapSquaresWeatherSummary(fused[level]);
+      const oldSquares = mapSquaresWeatherSummary(old[level]);
+      compareMapped(level, fusedDots, oldDots, fusedSquares, oldSquares);
+      mappedChecks++;
+      const fusedDotsLayer = makeDots(fusedPyramid, level, fusedDots, fusedDots);
+      const oldDotsLayer = makeDots(oldPyramid, level, oldDots, oldDots);
+      const fusedSquaresLayer = makeSquares(fusedPyramid, level, fusedSquares, fusedSquares);
+      const oldSquaresLayer = makeSquares(oldPyramid, level, oldSquares, oldSquares);
+      comparePacked(level, fusedDotsLayer, oldDotsLayer, fusedSquaresLayer, oldSquaresLayer, fused[level]);
+      packedChecks++;
+    }
+  }
+}
+
+// The active sets and reconstructed spatial geometry are shared by every temporal frame.
+if (geometry.potentialActiveIndices.length !== 53567) console.log(`observed L13 potential-active count=${geometry.potentialActiveIndices.length}`);
+if (geometry.potentialActiveIndices.length !== oldGeometry.potentialActiveIndices.length) throw new Error('old and fused prepared geometries have different active sets');
+
+// A generic RealWeatherField has no explicit rain-only batch capability. It must retain the old L13 path.
+const fallbackField = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
+const [centerX, centerY] = lngLatToMercator(45, 43);
+const fallbackWindow = canonicalWindowFromMercatorBounds({ minX: centerX - 0.004, maxX: centerX + 0.004, minY: centerY - 0.004, maxY: centerY + 0.004 });
+const fallbackPyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(fallbackWindow, lodRangeForStableLevel(10)));
+const fallbackSummaries = fallbackPyramid.evaluate([10], fallbackField.prepareFrame(0));
+if (!fallbackSummaries[13] || !fallbackSummaries[10]) throw new Error('generic provider did not retain the fallback L13 direct path');
+
+console.log(`fused coarse weather verification passed: summaries=${summaryChecks}, mapped=${mappedChecks}, packed=${packedChecks}, maxError=${maximumError}, reverse-order checked`);
+console.log(`all 19 exact source frames + 5 interpolated positions; L10/L11/L12 thresholds, weighted sums, maxima, Dots, Squares, packed instances match within 1e-6`);
+console.log(`generic non-sequence fallback retained L13 direct summary: yes; active L13 samples=${geometry.potentialActiveIndices.length}`);

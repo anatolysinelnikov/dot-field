@@ -253,6 +253,42 @@ export function aggregateWeatherSummary(parentLevel, childSummary, contributions
   return summary;
 }
 
+// Rain-only sequence fast path. It preserves the Float32 L13 storage boundary
+// and contribution order of evaluateDirectWeatherSummary(...L13) followed by
+// aggregateWeatherSummary(...L12), without retaining the intermediate L13
+// summary object.
+export function evaluateFusedRainAggregateSummary(parentLevel, frame, samplingGeometry, contributions, reusable = null, ArrayType = Float32Array, totalWeight = null) {
+  if (frame?.supportsRainOnlyPreparedBatch !== true || typeof frame.samplePreparedBatch !== 'function') {
+    throw new Error('Fused rain aggregation requires an explicit rain-only prepared batch capability.');
+  }
+  const activeChildren = samplingGeometry?.potentialActiveIndices;
+  if (!activeChildren) throw new Error('Fused rain aggregation requires prepared potential-active indices.');
+  const summary = createWeatherSummary(parentLevel, reusable, ArrayType, totalWeight);
+  const childSummary = { potentialActiveIndices: activeChildren };
+  const activeIndices = activeIndicesForAggregate(summary, childSummary, contributions);
+  zeroWeatherFields(summary, activeIndices);
+  const rainValues = geographicPreparedIntensityAtGeometryBatch(frame, samplingGeometry);
+  const storedRain = ArrayType === Float32Array ? Math.fround : (value) => value;
+  for (let activeChild = 0; activeChild < activeChildren.length; activeChild++) {
+    const childIndex = activeChildren[activeChild];
+    const rainMmh = rainValues[activeChild];
+    const rainForSummary = storedRain(rainMmh);
+    const start = contributions.offsets[childIndex];
+    const end = contributions.offsets[childIndex + 1];
+    for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+      const parentIndex = contributions.parentIndices[contributionIndex];
+      const weight = contributions.weights[contributionIndex];
+      summary.rainWeightedSumMmh[parentIndex] += weight * rainForSummary;
+      for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
+        summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight
+          * (rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0);
+      }
+      if (weight > 0) summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], rainForSummary);
+    }
+  }
+  return summary;
+}
+
 export class GeographicWeatherPyramid {
   constructor(summaryArrayType = Float32Array, topology = new GeographicLodTopology()) {
     this.summaryArrayType = summaryArrayType;
@@ -350,16 +386,36 @@ export class GeographicWeatherPyramid {
       const minimumAggregateLevel = Math.min(...aggregateRequested);
       this.levelDataFor(WEATHER_REFERENCE_LEVEL);
       for (let level = minimumAggregateLevel; level <= WEATHER_REFERENCE_LEVEL; level++) this.levelDataFor(level);
-      let summary = evaluateDirectWeatherSummary(
-        this.levels.get(WEATHER_REFERENCE_LEVEL),
-        frame,
-        reusableStates?.[WEATHER_REFERENCE_LEVEL],
-        this.summaryArrayType,
-        this.prepareSamplingGeometry(WEATHER_REFERENCE_LEVEL, frame),
-        this.totalWeights.get(WEATHER_REFERENCE_LEVEL)
-      );
-      summaries[WEATHER_REFERENCE_LEVEL] = summary;
-      for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= minimumAggregateLevel; level--) {
+      const samplingGeometry = this.prepareSamplingGeometry(WEATHER_REFERENCE_LEVEL, frame);
+      const useFusedRainPath = uniqueRequested.every((level) => level < WEATHER_REFERENCE_LEVEL)
+        && frame?.supportsRainOnlyPreparedBatch === true
+        && typeof frame.samplePreparedBatch === 'function'
+        && samplingGeometry?.potentialActiveIndices
+        && this.contributions.has(WEATHER_REFERENCE_LEVEL);
+      let summary;
+      if (useFusedRainPath) {
+        summary = evaluateFusedRainAggregateSummary(
+          this.levels.get(WEATHER_REFERENCE_LEVEL - 1),
+          frame,
+          samplingGeometry,
+          this.contributions.get(WEATHER_REFERENCE_LEVEL),
+          reusableStates?.[WEATHER_REFERENCE_LEVEL - 1],
+          this.summaryArrayType,
+          this.totalWeights.get(WEATHER_REFERENCE_LEVEL - 1)
+        );
+        summaries[WEATHER_REFERENCE_LEVEL - 1] = summary;
+      } else {
+        summary = evaluateDirectWeatherSummary(
+          this.levels.get(WEATHER_REFERENCE_LEVEL),
+          frame,
+          reusableStates?.[WEATHER_REFERENCE_LEVEL],
+          this.summaryArrayType,
+          samplingGeometry,
+          this.totalWeights.get(WEATHER_REFERENCE_LEVEL)
+        );
+        summaries[WEATHER_REFERENCE_LEVEL] = summary;
+      }
+      for (let level = (useFusedRainPath ? WEATHER_REFERENCE_LEVEL - 2 : WEATHER_REFERENCE_LEVEL - 1); level >= minimumAggregateLevel; level--) {
         const contributions = this.contributions.get(level + 1);
         if (!contributions) throw new Error(`LOD L${level} aggregation requires an unbroken L13 reference chain.`);
         summary = aggregateWeatherSummary(
