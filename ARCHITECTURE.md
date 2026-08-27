@@ -101,10 +101,14 @@ app.js ----------------------> MapLibre GL JS / Globe camera and basemap
 
 `app.js` owns UI state, playback, timeline scrubbing, custom camera controls,
 logical weather zoom, MapLibre construction, active-layer routing, and readouts.
-At startup it begins the MapTiler configuration request and the weather-provider
+At startup it begins the MapTiler configuration request and weather metadata
 load independently. MapLibre is constructed as soon as its configuration is
-available; weather custom layers are created only after both the MapLibre style
-and the complete validated weather sequence are ready. Before that point,
+available. The large weather binary is intentionally deferred until MapLibre
+has rendered a frame after `areTilesLoaded()` reports the current viewport's
+required tiles ready; weather custom layers are created only after the complete
+validated weather sequence is ready. This is a startup/network priority policy,
+not a renderer dependency: weather initialization always reads the current
+camera viewport at the time it runs. Before that point,
 weather-dependent controls are inactive while normal map navigation remains
 available. Startup diagnostics exposed at `window.__dotFieldStartup` record the
 major application, MapLibre, transfer, validation, topology, payload, render,
@@ -198,10 +202,11 @@ The source-grid geographic union bounds are 29.7600002289..71.5999984741°E
 and 41.8400001526..70.4000015259°N; support bounds are
 29.7199993134..71.6399993896°E and 41.7999992371..70.4400024414°N; crop
 bounds are 29.6800003052..71.6800003052°E and 41.7599983215..70.4800033569°N.
-Metadata and binary requests begin concurrently because binary transfer does not
-depend on metadata content. Metadata remains authoritative for all shape and
-byte-count checks; if metadata is unavailable or invalid, its in-flight binary
-request is aborted and the existing 404/410 CSV fallback signal is preserved.
+Metadata begins immediately, but its validated result is retained by the
+provider-owned staged loader until the application requests the large binary
+after initial basemap readiness. Metadata remains authoritative for all shape
+and byte-count checks; 404/410 metadata or binary failures preserve the
+existing CSV fallback signal.
 Metadata validation requires the supported schema, metadata-driven dimensions
 with width/height/frame-count minimums, timestamps, binary layout/counts/byte
 count, positive regular axis spacing, mm/h normalized units, rain availability,

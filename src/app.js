@@ -1,6 +1,6 @@
 import { LOD_MORPH_SECONDS, LOOP_SECONDS } from './engine/config.js';
 import { clamp, smoothstep } from './engine/math.js';
-import { loadActiveWeatherField, WEATHER_REGION } from './engine/geography.js';
+import { beginActiveWeatherLoad, WEATHER_REGION } from './engine/geography.js';
 import {
   MAX_LOGICAL_SAMPLING_ZOOM,
   canonicalWindowFromMercatorBounds,
@@ -62,7 +62,7 @@ const initialMinZoom =
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 
 markStartup('weather-load-start');
-const weatherPromise = loadActiveWeatherField({ onTiming: markStartup });
+const weatherLoad = beginActiveWeatherLoad({ onTiming: markStartup });
 let activeWeatherField = null;
 let rawWeatherField = null;
 let sourceFrameCount = 1;
@@ -153,6 +153,7 @@ const state = {
   resettingView: false,
   mapReady: false,
   styleReady: false,
+  basemapReady: false,
   weatherReady: false,
   weatherQueued: false,
   renderMode: 'raw',
@@ -167,6 +168,8 @@ let rawLayer = null;
 let geographicLayers = [];
 const VALID_RENDER_MODES = new Set(['raw', 'dots', 'squares']);
 let lastMapErrorSignature = '';
+let weatherSequencePromise = null;
+let basemapFallbackTimer = null;
 
 for (const control of [...renderModeButtons, hazards, timeSlider]) control.disabled = true;
 
@@ -184,8 +187,26 @@ function activateWeatherField(field) {
   tryInitializeWeatherLayer();
 }
 
-void weatherPromise.then(activateWeatherField).catch((error) => {
-  console.error('Unable to load weather data.', error);
+function startWeatherSequence(trigger) {
+  if (weatherSequencePromise) return weatherSequencePromise;
+  if (basemapFallbackTimer !== null) {
+    window.clearTimeout(basemapFallbackTimer);
+    basemapFallbackTimer = null;
+  }
+  markStartup(`weather-binary-trigger-${trigger}`);
+  weatherSequencePromise = weatherLoad.loadSequence();
+  void weatherSequencePromise.then(activateWeatherField).catch((error) => {
+    console.error('Unable to load weather data.', error);
+  });
+  return weatherSequencePromise;
+}
+
+// A sequence-asset 404/410 has no heavy binary to defer, so preserve the
+// existing CSV fallback behavior instead of waiting for MapLibre readiness.
+void weatherLoad.metadataReady.then((metadata) => {
+  if (metadata === null) startWeatherSequence('metadata-fallback');
+}).catch((error) => {
+  console.error('Unable to load weather metadata.', error);
 });
 
 const TIMESTAMP_MONTHS = Object.freeze(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
@@ -840,15 +861,52 @@ for (const eventName of ['pointerup', 'pointercancel']) {
     scrubbingPointerId = null;
   });
 }
+
+function markInitialBasemapVisible(trigger) {
+  if (state.basemapReady) return;
+  state.basemapReady = true;
+  if (basemapFallbackTimer !== null) {
+    window.clearTimeout(basemapFallbackTimer);
+    basemapFallbackTimer = null;
+  }
+  markStartup(`initial-basemap-visible-${trigger}`);
+  startWeatherSequence(`basemap-${trigger}`);
+}
+
+function observeInitialBasemapReadiness() {
+  if (!state.styleReady || startupTimings['first-map-render-after-style'] === undefined || state.basemapReady) return;
+  // In MapLibre GL JS 5.24.0, areTilesLoaded() reports whether the source
+  // tiles required by the current viewport have loaded. Requiring a following
+  // render avoids calling the pre-tile gray canvas a visible basemap; unlike
+  // loaded()/idle it does not wait for unrelated future work.
+  if (typeof map.areTilesLoaded === 'function' && map.areTilesLoaded()) {
+    markInitialBasemapVisible('viewport-tiles');
+  }
+}
+
 map.on('style.load', () => {
   markStartup('maplibre-style-load');
   if (!state.styleReady) map.setProjection({ type: 'globe' });
   state.styleReady = true;
   tryInitializeWeatherLayer();
+  // MapLibre load is also observed below, but this bounded safety trigger
+  // prevents an optional MapTiler resource from permanently suppressing the
+  // weather request. It is not the normal basemap-visible criterion.
+  basemapFallbackTimer = window.setTimeout(() => {
+    basemapFallbackTimer = null;
+    markStartup('initial-basemap-readiness-timeout');
+    startWeatherSequence('readiness-timeout');
+  }, 5000);
 });
 map.on('render', () => {
-  if (state.styleReady) markStartup('first-basemap-render');
+  if (state.styleReady) markStartup('first-map-render-after-style');
+  observeInitialBasemapReadiness();
   if (state.mapReady) markStartup('first-weather-layer-render');
+});
+map.on('sourcedata', (event) => {
+  if (!state.styleReady || !event?.sourceId) return;
+  markStartup('initial-map-source-data');
+  if (event.isSourceLoaded) markStartup('initial-map-source-ready');
 });
 map.on('mousemove', updateRawHover);
 map.on('click', selectRawCell);
@@ -889,6 +947,7 @@ map.on('moveend', () => {
 });
 map.on('load', () => {
   markStartup('maplibre-load');
+  markInitialBasemapVisible('map-load');
   updateResetViewControl();
 });
 map.on('error', (event) => {

@@ -1,4 +1,5 @@
 import {
+  beginRealWeatherSequenceLoad,
   loadRealWeatherSequence,
   loadRealWeatherSnapshot,
   RealWeatherSequenceAssetsUnavailableError
@@ -112,4 +113,45 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
   }
   setActiveWeatherField(field);
   return field;
+}
+
+export function beginActiveWeatherLoad({ onTiming = null } = {}) {
+  const sequenceLoad = beginRealWeatherSequenceLoad(
+    './data/generated/202608262200/metadata.json',
+    './data/generated/202608262200/rain.f32',
+    { onTiming }
+  );
+  let fallbackPromise = null;
+  const metadataReady = sequenceLoad.metadataReady.catch((error) => {
+    if (!(error instanceof RealWeatherSequenceAssetsUnavailableError)) throw error;
+    console.warn('Real weather sequence assets are unavailable; using the checked-in CSV snapshot.');
+    fallbackPromise = loadRealWeatherSnapshot('./data/mrl_z3_t+40min_376x239.csv');
+    return null;
+  });
+  let fieldPromise = null;
+
+  return {
+    metadataReady,
+    loadSequence() {
+      if (fieldPromise) return fieldPromise;
+      fieldPromise = (async () => {
+        const metadata = await metadataReady;
+        let field;
+        if (metadata === null) {
+          field = await fallbackPromise;
+        } else {
+          try {
+            field = await sequenceLoad.loadSequence();
+          } catch (error) {
+            if (!(error instanceof RealWeatherSequenceAssetsUnavailableError)) throw error;
+            console.warn('Real weather sequence assets are unavailable; using the checked-in CSV snapshot.');
+            field = await loadRealWeatherSnapshot('./data/mrl_z3_t+40min_376x239.csv');
+          }
+        }
+        setActiveWeatherField(field);
+        return field;
+      })();
+      return fieldPromise;
+    }
+  };
 }

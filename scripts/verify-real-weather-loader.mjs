@@ -1,4 +1,10 @@
-import { loadRealWeatherSequence, RealWeatherSequenceAssetsUnavailableError } from '../src/engine/real-weather.js';
+import {
+  beginRealWeatherSequenceLoad,
+  loadRealWeatherSequence,
+  RealWeatherSequenceAssetsUnavailableError
+} from '../src/engine/real-weather.js';
+import { beginActiveWeatherLoad } from '../src/engine/geography.js';
+import { readFile } from 'node:fs/promises';
 
 const metadata = {
   schema_version: 'dot-field-netcdf-sequence-v1',
@@ -41,7 +47,19 @@ await withFetch(async (url) => {
   if (url === 'binary') return binaryResponse([0, 1, 0, 0, 0, 0, 2, 0]);
   throw new Error(`unexpected URL ${url}`);
 }, async () => {
-  const sequence = await loadRealWeatherSequence('metadata', 'binary');
+  const requests = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requests.push(url);
+    if (url === 'metadata') return new Response(JSON.stringify(metadata));
+    return binaryResponse([0, 1, 0, 0, 0, 0, 2, 0]);
+  };
+  const staged = beginRealWeatherSequenceLoad('metadata', 'binary');
+  await staged.metadataReady;
+  check(requests.join(',') === 'metadata', 'metadata-ready must not begin the binary request');
+  const sequence = await Promise.all([staged.loadSequence(), staged.loadSequence()]).then(([first]) => first);
+  check(requests.join(',') === 'metadata,binary', 'binary must begin exactly once after the explicit sequence trigger');
+  globalThis.fetch = original;
   check(sequence.potentialWeatherMask.join(',') === '0,1,1,0', 'combined validation must retain the exact sequence-wide union mask');
 });
 
@@ -88,4 +106,36 @@ await withFetch(async (url) => url === 'metadata'
     .catch((error) => check(String(error.message).includes('binary.byte_count'), 'malformed metadata must preserve validation'));
 });
 
-console.log('real weather loader verification passed: concurrent transfers, fallback signal, exact fused mask, and malformed binary/metadata rejection');
+const fallbackCsv = await readFile(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8');
+await withFetch(async (url) => {
+  if (url.endsWith('/metadata.json')) return new Response('', { status: 404 });
+  if (url.endsWith('.csv')) return new Response(fallbackCsv);
+  throw new Error(`binary must not start after unavailable metadata: ${url}`);
+}, async () => {
+  const staged = beginActiveWeatherLoad();
+  check(await staged.metadataReady === null, 'metadata 404 must select the fallback path immediately');
+  const field = await staged.loadSequence();
+  check(field.frameCount === undefined, 'fallback snapshot must remain a non-sequence field');
+});
+
+await withFetch(async (url) => {
+  if (url.endsWith('/metadata.json')) return new Response(JSON.stringify(metadata));
+  if (url.endsWith('/rain.f32')) return new Response('', { status: 410 });
+  if (url.endsWith('.csv')) return new Response(fallbackCsv);
+  throw new Error(`unexpected URL ${url}`);
+}, async () => {
+  const field = await beginActiveWeatherLoad().loadSequence();
+  check(field.frameCount === undefined, 'binary 410 must preserve the CSV fallback');
+});
+
+await withFetch(async (url) => {
+  if (url.endsWith('/metadata.json')) return new Response('', { status: 404 });
+  if (url.endsWith('.csv')) return new Response('', { status: 500 });
+  throw new Error(`unexpected URL ${url}`);
+}, async () => {
+  await beginActiveWeatherLoad().loadSequence()
+    .then(() => { throw new Error('fallback snapshot failure must reject'); })
+    .catch((error) => check(String(error.message).includes('Unable to load real weather snapshot'), 'fallback snapshot failure must remain visible'));
+});
+
+console.log('real weather loader verification passed: staged binary gating, exact fused mask, sequence and CSV fallback paths, and malformed binary/metadata rejection');

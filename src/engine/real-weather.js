@@ -840,63 +840,65 @@ function validateRainFramesAndBuildPotentialMask(rainFramesMmh, frameSize) {
   return potentialWeatherMask;
 }
 
-export async function loadRealWeatherSequence(metadataUrl, binaryUrl, { onTiming = null } = {}) {
-  const timing = typeof onTiming === 'function' ? onTiming : () => {};
-  const binaryController = new AbortController();
+async function loadSequenceMetadata(metadataUrl, timing) {
   timing('weather-metadata-fetch-start');
-  const metadataPromise = fetchSequenceAsset(metadataUrl).then((response) => {
-    timing('weather-metadata-fetch-headers');
-    return response;
-  });
-  timing('weather-binary-fetch-start');
-  const binaryPromise = fetchSequenceAsset(binaryUrl, { signal: binaryController.signal }).then((response) => {
-    timing('weather-binary-fetch-headers');
-    return response;
-  });
-  // Keep an abort-triggered rejection observed when metadata makes the binary
-  // irrelevant; the awaited path below still propagates ordinary binary errors.
-  void binaryPromise.catch(() => {});
-
-  let validated;
+  const metadataResponse = await fetchSequenceAsset(metadataUrl);
+  timing('weather-metadata-fetch-headers');
+  let metadata;
   try {
-    const metadataResponse = await metadataPromise;
-    let metadata;
-    try {
-      metadata = await metadataResponse.json();
-    } catch {
-      failSequence('metadata is not valid JSON.');
-    }
-    timing('weather-metadata-fetch-complete');
-    validated = validateSequenceMetadata(metadata);
-    timing('weather-metadata-validation-complete');
-  } catch (error) {
-    binaryController.abort();
-    await binaryPromise.catch(() => {});
-    throw error;
+    metadata = await metadataResponse.json();
+  } catch {
+    failSequence('metadata is not valid JSON.');
   }
+  timing('weather-metadata-fetch-complete');
+  const validated = validateSequenceMetadata(metadata);
+  timing('weather-metadata-validation-complete');
+  return validated;
+}
 
-  const binaryResponse = await binaryPromise;
-  const binaryBuffer = await binaryResponse.arrayBuffer();
-  timing('weather-binary-body-complete');
-  if (binaryBuffer.byteLength !== validated.expectedByteCount) {
-    failSequence(`rain.f32 byte length is ${binaryBuffer.byteLength}, expected ${validated.expectedByteCount}.`);
-  }
-  const rainFramesMmh = new Float32Array(binaryBuffer);
-  if (rainFramesMmh.length !== validated.expectedElementCount) failSequence('rain.f32 element count does not match metadata.');
-  const potentialWeatherMask = validateRainFramesAndBuildPotentialMask(rainFramesMmh, validated.width * validated.height);
-  timing('weather-binary-validation-complete');
-  timing('weather-potential-weather-mask-complete');
-  const { longitudes, latitudes } = axesFromSequenceMetadata(validated);
-  const sequence = new RealWeatherSequence({
-    longitudes,
-    latitudes,
-    rainFramesMmh,
-    frameCount: validated.frameCount,
-    longitudeSpacing: validated.longitudeSpacing,
-    latitudeSpacing: validated.latitudeSpacing,
-    timestamps: validated.timestamps,
-    potentialWeatherMask
-  });
-  timing('weather-sequence-construction-complete');
-  return sequence;
+export function beginRealWeatherSequenceLoad(metadataUrl, binaryUrl, { onTiming = null } = {}) {
+  const timing = typeof onTiming === 'function' ? onTiming : () => {};
+  const metadataReady = loadSequenceMetadata(metadataUrl, timing);
+  let sequencePromise = null;
+
+  return {
+    metadataReady,
+    loadSequence() {
+      if (sequencePromise) return sequencePromise;
+      sequencePromise = (async () => {
+        const validated = await metadataReady;
+        timing('weather-binary-fetch-start');
+        const binaryResponse = await fetchSequenceAsset(binaryUrl);
+        timing('weather-binary-fetch-headers');
+        const binaryBuffer = await binaryResponse.arrayBuffer();
+        timing('weather-binary-body-complete');
+        if (binaryBuffer.byteLength !== validated.expectedByteCount) {
+          failSequence(`rain.f32 byte length is ${binaryBuffer.byteLength}, expected ${validated.expectedByteCount}.`);
+        }
+        const rainFramesMmh = new Float32Array(binaryBuffer);
+        if (rainFramesMmh.length !== validated.expectedElementCount) failSequence('rain.f32 element count does not match metadata.');
+        const potentialWeatherMask = validateRainFramesAndBuildPotentialMask(rainFramesMmh, validated.width * validated.height);
+        timing('weather-binary-validation-complete');
+        timing('weather-potential-weather-mask-complete');
+        const { longitudes, latitudes } = axesFromSequenceMetadata(validated);
+        const sequence = new RealWeatherSequence({
+          longitudes,
+          latitudes,
+          rainFramesMmh,
+          frameCount: validated.frameCount,
+          longitudeSpacing: validated.longitudeSpacing,
+          latitudeSpacing: validated.latitudeSpacing,
+          timestamps: validated.timestamps,
+          potentialWeatherMask
+        });
+        timing('weather-sequence-construction-complete');
+        return sequence;
+      })();
+      return sequencePromise;
+    }
+  };
+}
+
+export async function loadRealWeatherSequence(metadataUrl, binaryUrl, options = {}) {
+  return beginRealWeatherSequenceLoad(metadataUrl, binaryUrl, options).loadSequence();
 }
