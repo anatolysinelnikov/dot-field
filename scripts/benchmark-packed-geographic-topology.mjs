@@ -127,6 +127,45 @@ function oldCentered(fine, coarse) {
   return { offsets, parentIndices: Uint32Array.from(parentIndices), weights: Float64Array.from(weights) };
 }
 
+function oldTopologySetup(topology, range) {
+  const started = performance.now();
+  const contributionsStarted = performance.now();
+  const contributions = new Map();
+  for (let level = range.minLevel + 1; level <= range.maxLevel; level++) {
+    contributions.set(level, oldCentered(topology.levels.get(level), topology.levels.get(level - 1)));
+  }
+  const contributionsMs = performance.now() - contributionsStarted;
+  const totalWeightsStarted = performance.now();
+  const totalWeights = new Map();
+  if (topology.levels.has(13)) {
+    const referenceWeights = new Float32Array(topology.levels.get(13).samples.length);
+    referenceWeights.fill(1);
+    totalWeights.set(13, referenceWeights);
+    for (let level = 12; level >= range.minLevel; level--) {
+      const childWeights = totalWeights.get(level + 1);
+      const levelContributions = contributions.get(level + 1);
+      if (!childWeights || !levelContributions || !topology.levels.has(level)) continue;
+      const weights = new Float32Array(topology.levels.get(level).samples.length);
+      for (let childIndex = 0; childIndex < childWeights.length; childIndex++) {
+        const start = levelContributions.offsets[childIndex];
+        const end = levelContributions.offsets[childIndex + 1];
+        for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+          weights[levelContributions.parentIndices[contributionIndex]] += childWeights[childIndex]
+            * levelContributions.weights[contributionIndex];
+        }
+      }
+      totalWeights.set(level, weights);
+    }
+  }
+  return {
+    contributionsMs,
+    totalWeightsMs: performance.now() - totalWeightsStarted,
+    totalMs: performance.now() - started,
+    contributions,
+    totalWeights
+  };
+}
+
 function legacyTopologyBytes(topology) {
   let bytes = 0;
   for (const levelData of topology.levels.values()) {
@@ -214,6 +253,26 @@ function replacementMetrics(window) {
   return { windowTimes, rangeTimes };
 }
 
+function oldReplacementMetrics(window) {
+  const initialRange = CONFIGURATIONS[3][1];
+  const windows = windowSequence(window);
+  const windowTimes = [];
+  for (const nextWindow of windows.slice(1)) {
+    const started = performance.now();
+    const topology = oldBuildTopology(nextWindow, initialRange);
+    oldTopologySetup(topology, initialRange);
+    windowTimes.push(performance.now() - started);
+  }
+  const rangeTimes = [];
+  for (const [, range] of CONFIGURATIONS) {
+    const started = performance.now();
+    const topology = oldBuildTopology(window, range);
+    oldTopologySetup(topology, range);
+    rangeTimes.push(performance.now() - started);
+  }
+  return { windowTimes, rangeTimes };
+}
+
 function runCase(name, window, range, fullSupport) {
   const packed = new GeographicLodTopology(window, range);
   const legacy = oldBuildTopology(window, range);
@@ -232,7 +291,9 @@ function runCase(name, window, range, fullSupport) {
   const packedCenteredStarted = performance.now();
   for (let level = Math.max(MIN_GRID_LEVEL + 1, range.minLevel + 1); level <= Math.min(13, range.maxLevel); level++) buildCenteredContributions(packed.levelDataFor(level), packed.levelDataFor(level - 1));
   const packedCenteredMs = performance.now() - packedCenteredStarted;
+  const oldSetup = oldTopologySetup(legacy, range);
   const replacement = replacementMetrics(window);
+  const oldReplacement = oldReplacementMetrics(window);
   const oldCounts = oldRetainedCounts(legacy);
   const packedCounts = packedRetainedCounts(packed);
   const result = {
@@ -245,9 +306,14 @@ function runCase(name, window, range, fullSupport) {
     transitionParentsMs: { legacy: legacy.transitionParentsMs, packed: packed.constructionTimings.transitionParentsMs },
     directPairsMs: { legacy: legacy.directPairsMs, packed: packed.constructionTimings.directPairsMs },
     centeredContributionsMs: { legacy: oldCenteredMs, packed: packedCenteredMs },
+    legacySetTopologyMs: {
+      contributionsMs: oldSetup.contributionsMs,
+      totalWeightsMs: oldSetup.totalWeightsMs,
+      totalMs: oldSetup.totalMs
+    },
     setTopologyMs: packedPyramid.topologySetupTimings,
     providerSamplingGeometryMs: { legacy: oldGeometryMs, packed: packedGeometryMs, bytes: frame.samplingGeometryBytes(packedGeometry) },
-    replacementMs: replacement,
+    replacementMs: { legacy: oldReplacement, packed: replacement },
     memory: {
       legacyHeap: fullSupport ? null : measureHeap(() => oldBuildTopology(window, range), 2),
       packedHeap: measureHeap(() => new GeographicLodTopology(window, range), 3),
