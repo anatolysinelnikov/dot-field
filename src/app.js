@@ -3,9 +3,11 @@ import { clamp, smoothstep } from './engine/math.js';
 import { loadActiveWeatherField, WEATHER_REGION } from './engine/geography.js';
 import {
   MAX_LOGICAL_SAMPLING_ZOOM,
+  canonicalWindowFromMercatorBounds,
+  canonicalWindowsEqual,
+  lngLatToMercator,
   logicalZoomLatitudeAdjustment,
   rawZoomForLogicalSamplingZoom,
-  selectMercatorGridSamples,
   zoomToMercatorGridLevel
 } from './engine/geographic-lod.js';
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
@@ -121,6 +123,9 @@ const state = {
   lodTransition: null,
   logicalSamplingZoom: WEATHER_REGION.initialZoom,
   camera: null,
+  canonicalWindow: null,
+  pendingCanonicalWindow: null,
+  canonicalWindowRebuilds: 0,
   rawMaxZoom: INITIAL_RAW_MAX_ZOOM,
   resettingView: false,
   mapReady: false,
@@ -146,6 +151,81 @@ function rebaseCamera() {
   state.camera = cameraState();
 }
 
+function visibleMercatorBounds() {
+  const coordinates = [];
+  const mapBounds = map.getBounds();
+  if (mapBounds) {
+    coordinates.push(
+      [mapBounds.getWest(), mapBounds.getSouth()],
+      [mapBounds.getWest(), mapBounds.getNorth()],
+      [mapBounds.getEast(), mapBounds.getSouth()],
+      [mapBounds.getEast(), mapBounds.getNorth()]
+    );
+  }
+
+  // Globe bounds can be optimistic near the horizon under pitch or rotation.
+  // Include a deterministic screen lattice so the envelope covers the visible
+  // viewport even when the projected footprint is not rectangular in lng/lat.
+  const columns = 4;
+  const rows = 4;
+  for (let row = 0; row <= rows; row++) {
+    for (let column = 0; column <= columns; column++) {
+      const point = map.unproject([
+        mapContainer.clientWidth * column / columns,
+        mapContainer.clientHeight * row / rows
+      ]);
+      if (point && Number.isFinite(point.lng) && Number.isFinite(point.lat)) coordinates.push([point.lng, point.lat]);
+    }
+  }
+
+  const mercators = coordinates
+    .filter(([longitude, latitude]) => Number.isFinite(longitude) && Number.isFinite(latitude))
+    .map(([longitude, latitude]) => lngLatToMercator(longitude, latitude));
+  if (!mercators.length) return null;
+  return {
+    minX: Math.min(...mercators.map(([x]) => x)),
+    maxX: Math.max(...mercators.map(([x]) => x)),
+    minY: Math.min(...mercators.map(([, y]) => y)),
+    maxY: Math.max(...mercators.map(([, y]) => y))
+  };
+}
+
+function applyCanonicalWindow(canonicalWindow) {
+  if (canonicalWindowsEqual(canonicalWindow, state.canonicalWindow)) return false;
+  if (state.lodTransition) {
+    state.pendingCanonicalWindow = canonicalWindow;
+    return false;
+  }
+  if (!geographicWeatherPyramid.setCanonicalWindow(canonicalWindow)) {
+    // The initial camera envelope may equal the fixed-support topology. Record
+    // that resolved window even when no topology allocation was necessary.
+    state.canonicalWindow = canonicalWindow;
+    state.pendingCanonicalWindow = null;
+    return false;
+  }
+  state.canonicalWindow = canonicalWindow;
+  state.pendingCanonicalWindow = null;
+  state.canonicalWindowRebuilds += 1;
+  weatherLayer.setTopology(geographicWeatherPyramid.topology);
+  squaresLayer.setTopology(geographicWeatherPyramid.topology);
+  if (state.lod.level === null) return true;
+  commitSamples(state.lod.level, geographicWeatherPyramid.samplesFor(state.lod.level));
+  updateLodDiagnostics();
+  return true;
+}
+
+function updateCanonicalWindow() {
+  if (!state.mapReady) return;
+  const bounds = visibleMercatorBounds();
+  if (!bounds) return;
+  const candidate = canonicalWindowFromMercatorBounds(bounds);
+  if (canonicalWindowsEqual(candidate, state.canonicalWindow)) {
+    state.pendingCanonicalWindow = null;
+    return;
+  }
+  applyCanonicalWindow(candidate);
+}
+
 function updateLodDiagnostics() {
   const zoom = state.logicalSamplingZoom.toFixed(2);
   const transition = state.lodTransition;
@@ -153,6 +233,7 @@ function updateLodDiagnostics() {
     ? `${transition.fromLevel} → ${transition.toLevel}`
     : state.lod.level === null ? '—' : state.lod.level;
   lodDiagnostics.textContent = `Zoom ${zoom} · LOD ${level}`;
+  lodDiagnostics.dataset.windowRebuilds = String(state.canonicalWindowRebuilds);
 }
 
 function updateRawMapMaxZoom(latitude) {
@@ -187,6 +268,7 @@ function updateLogicalSamplingZoom() {
     state.logicalSamplingZoom = Math.min(MAX_LOGICAL_SAMPLING_ZOOM, state.logicalSamplingZoom + delta);
   }
   state.camera = next;
+  updateCanonicalWindow();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
   updateLodDiagnostics();
 }
@@ -300,13 +382,14 @@ function initializeWeatherLayer() {
   state.mapReady = true;
   applyRenderMode();
   rebaseCamera();
+  updateCanonicalWindow();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
 }
 
 function startAdjacentTransition(level, now) {
   const direction = Math.sign(level - state.lod.level);
   const toLevel = state.lod.level + direction;
-  const toSamples = selectMercatorGridSamples(toLevel).samples;
+  const toSamples = geographicWeatherPyramid.samplesFor(toLevel);
   state.lodTransition = {
     fromLevel: state.lod.level,
     toLevel,
@@ -325,8 +408,7 @@ function rebuildSamples(level, now = performance.now()) {
   if (!state.mapReady) return;
   state.desiredLevel = level;
   if (state.lod.level === null) {
-    const selection = selectMercatorGridSamples(level);
-    commitSamples(selection.level, selection.samples);
+    commitSamples(level, geographicWeatherPyramid.samplesFor(level));
     return;
   }
   const transition = state.lodTransition;
@@ -364,6 +446,11 @@ function updateLODTransition(now) {
   if (rawProgress < 1) return;
   state.lodTransition = null;
   commitSamples(transition.toLevel, transition.toSamples);
+  if (state.pendingCanonicalWindow) {
+    const pendingWindow = state.pendingCanonicalWindow;
+    state.pendingCanonicalWindow = null;
+    applyCanonicalWindow(pendingWindow);
+  }
   if (state.desiredLevel !== state.lod.level) startAdjacentTransition(state.desiredLevel, now);
 }
 
@@ -589,6 +676,7 @@ map.on('moveend', () => {
   state.resettingView = false;
   state.logicalSamplingZoom = WEATHER_REGION.initialZoom;
   rebaseCamera();
+  updateCanonicalWindow();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
   updateResetViewControl();
 });

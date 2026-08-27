@@ -7,8 +7,8 @@ export const MERCATOR_WORLD_SIZE = 512;
 export const TARGET_GRID_SPACING = 9;
 export const MIN_GRID_LEVEL = 10;
 export const MAX_GRID_LEVEL = 15;
-// The discrete renderers may materialize the complete canonical L15 identity
-// system. This is independent from the physical weather reference level.
+// The discrete renderers materialize only the active canonical window. This is
+// independent from the physical weather reference level.
 export const MAX_DISPLAY_GRID_LEVEL = 15;
 
 const LOD_LEVEL_OFFSET = Math.log2(MERCATOR_WORLD_SIZE / TARGET_GRID_SPACING);
@@ -17,6 +17,8 @@ export const MAX_LOGICAL_SAMPLING_ZOOM = MAX_DISPLAY_GRID_LEVEL + 0.5 - LOD_LEVE
 
 const MAX_GRID_SIZE = 2 ** MAX_GRID_LEVEL;
 const MAX_MERCATOR_LATITUDE = 85.05112878;
+const COARSE_CANONICAL_STEP = 2 ** (MAX_GRID_LEVEL - MIN_GRID_LEVEL);
+const COARSE_MERCATOR_STEP = 1 / 2 ** MIN_GRID_LEVEL;
 
 export function lngLatToMercator(longitude, latitude) {
   const clampedLatitude = clamp(latitude, -MAX_MERCATOR_LATITUDE, MAX_MERCATOR_LATITUDE);
@@ -67,6 +69,70 @@ const canonicalSupport = Object.freeze({
   maxY: Math.min(MAX_GRID_SIZE, Math.ceil(supportBounds.maxY * MAX_GRID_SIZE) + 1)
 });
 
+function finiteCanonicalCoordinate(value, name) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new Error(`${name} must be finite.`);
+  return number;
+}
+
+// Canonical windows are expressed in the globally anchored L15 identity
+// coordinate system. The outward snap makes every active boundary compatible
+// with the coarsest L10 grid. A caller may pass an already snapped window or
+// raw canonical coordinates; both paths remain deterministic.
+export function normalizeCanonicalWindow(window = canonicalSupport) {
+  if (window === canonicalSupport) return canonicalSupport;
+  const minX = finiteCanonicalCoordinate(window.minX, 'canonicalWindow.minX');
+  const maxX = finiteCanonicalCoordinate(window.maxX, 'canonicalWindow.maxX');
+  const minY = finiteCanonicalCoordinate(window.minY, 'canonicalWindow.minY');
+  const maxY = finiteCanonicalCoordinate(window.maxY, 'canonicalWindow.maxY');
+  const snapAxis = (rawMin, rawMax, supportMin, supportMax) => {
+    const snappedMin = Math.max(supportMin, Math.floor(rawMin / COARSE_CANONICAL_STEP) * COARSE_CANONICAL_STEP);
+    const snappedMax = Math.min(supportMax, Math.ceil(rawMax / COARSE_CANONICAL_STEP) * COARSE_CANONICAL_STEP);
+    if (snappedMax >= snappedMin) return [snappedMin, snappedMax];
+    // A camera can be panned entirely outside the finite compact data domain.
+    // Keep a valid one-cell topology at the nearest supported edge so an
+    // off-domain viewport never creates an invalid or exception path.
+    if (rawMax < supportMin) {
+      const edge = Math.ceil(supportMin / COARSE_CANONICAL_STEP) * COARSE_CANONICAL_STEP;
+      return [edge, edge];
+    }
+    if (rawMin > supportMax) {
+      const edge = Math.floor(supportMax / COARSE_CANONICAL_STEP) * COARSE_CANONICAL_STEP;
+      return [edge, edge];
+    }
+    throw new Error('canonicalWindow must have non-empty bounds.');
+  };
+  const [snappedMinX, snappedMaxX] = snapAxis(minX, maxX, canonicalSupport.minX, canonicalSupport.maxX);
+  const [snappedMinY, snappedMaxY] = snapAxis(minY, maxY, canonicalSupport.minY, canonicalSupport.maxY);
+  const snapped = { minX: snappedMinX, maxX: snappedMaxX, minY: snappedMinY, maxY: snappedMaxY };
+  return Object.freeze(snapped);
+}
+
+export function canonicalWindowsEqual(left, right) {
+  return Boolean(left && right)
+    && left.minX === right.minX && left.maxX === right.maxX
+    && left.minY === right.minY && left.maxY === right.maxY;
+}
+
+// Convert an application-owned visible Mercator envelope to a deterministic
+// active topology window. The 25% envelope expansion is viewport overscan;
+// one additional L10 interval protects centered coarse aggregation at the
+// active boundary. The result is then snapped outward to L10 boundaries.
+export function canonicalWindowFromMercatorBounds(bounds) {
+  const minX = finiteCanonicalCoordinate(bounds.minX, 'Mercator bounds.minX');
+  const maxX = finiteCanonicalCoordinate(bounds.maxX, 'Mercator bounds.maxX');
+  const minY = finiteCanonicalCoordinate(bounds.minY, 'Mercator bounds.minY');
+  const maxY = finiteCanonicalCoordinate(bounds.maxY, 'Mercator bounds.maxY');
+  const spanX = Math.max(maxX - minX, 1 / MAX_GRID_SIZE);
+  const spanY = Math.max(maxY - minY, 1 / MAX_GRID_SIZE);
+  return normalizeCanonicalWindow({
+    minX: (minX - spanX * 0.25 - COARSE_MERCATOR_STEP) * MAX_GRID_SIZE,
+    maxX: (maxX + spanX * 0.25 + COARSE_MERCATOR_STEP) * MAX_GRID_SIZE,
+    minY: (minY - spanY * 0.25 - COARSE_MERCATOR_STEP) * MAX_GRID_SIZE,
+    maxY: (maxY + spanY * 0.25 + COARSE_MERCATOR_STEP) * MAX_GRID_SIZE
+  });
+}
+
 // Choose the nearest dyadic step to the requested CSS-pixel density. This
 // depends only on zoom, so map navigation and projection never reseat samples.
 export function zoomToMercatorGridLevel(zoom) {
@@ -75,15 +141,16 @@ export function zoomToMercatorGridLevel(zoom) {
   return clamp(Math.round(desired), MIN_GRID_LEVEL, MAX_DISPLAY_GRID_LEVEL);
 }
 
-export function selectMercatorGridSamples(level) {
+export function selectMercatorGridSamples(level, canonicalWindow = canonicalSupport) {
   const boundedLevel = clamp(level, MIN_GRID_LEVEL, MAX_GRID_LEVEL);
+  const window = normalizeCanonicalWindow(canonicalWindow);
   const gridSize = 2 ** boundedLevel;
   const step = 1 / gridSize;
   const identityScale = 2 ** (MAX_GRID_LEVEL - boundedLevel);
-  const minI = Math.ceil(canonicalSupport.minX / identityScale);
-  const maxI = Math.floor(canonicalSupport.maxX / identityScale);
-  const minJ = Math.ceil(canonicalSupport.minY / identityScale);
-  const maxJ = Math.floor(canonicalSupport.maxY / identityScale);
+  const minI = Math.ceil(window.minX / identityScale);
+  const maxI = Math.floor(window.maxX / identityScale);
+  const minJ = Math.ceil(window.minY / identityScale);
+  const maxJ = Math.floor(window.maxY / identityScale);
   const samples = [];
 
   for (let j = minJ; j <= maxJ; j++) {
@@ -148,10 +215,11 @@ function buildDirectPairs(lower, higher) {
 // Canonical positions and one-parent ownership for visual LOD morphs. This is
 // deliberately independent from centered weather-summary contributions.
 export class GeographicLodTopology {
-  constructor() {
+  constructor(canonicalWindow = canonicalSupport) {
+    this.canonicalWindow = normalizeCanonicalWindow(canonicalWindow);
     this.levels = new Map();
     for (let level = MIN_GRID_LEVEL; level <= MAX_DISPLAY_GRID_LEVEL; level++) {
-      const selection = selectMercatorGridSamples(level);
+      const selection = selectMercatorGridSamples(level, this.canonicalWindow);
       const canonicalAnchors = new Float64Array(selection.samples.length * 2);
       for (let index = 0; index < selection.samples.length; index++) {
         canonicalAnchors[index * 2] = selection.samples[index].mercator[0];

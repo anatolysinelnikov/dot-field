@@ -317,6 +317,19 @@ export class GeographicDotsLayer {
     for (const buffer of [...Object.values(this.instanceBuffers || {}), ...Object.values(this.vertexBuffers || {})]) if (buffer) gl.deleteBuffer(buffer);
   }
 
+  setTopology(topology) {
+    this.topology = topology;
+    this.samples = [];
+    this.transition = null;
+    this.temporal = null;
+    this.temporalProgress = 0;
+    this.instances = { rain: new Float32Array(), strong: new Float32Array(), storm: new Float32Array(), hail: new Float32Array() };
+    this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
+    this.bufferCapacity = { rain: 0, strong: 0, storm: 0, hail: 0 };
+    this.buffersDirty = true;
+    this.map?.triggerRepaint();
+  }
+
   activeLevels() {
     if (this.transition) return [this.transition.fromSamples[0].level, this.transition.toSamples[0].level];
     return this.samples.length ? [this.samples[0].level] : [];

@@ -7,7 +7,9 @@ import {
   MAX_DISPLAY_GRID_LEVEL,
   MIN_GRID_LEVEL,
   MAX_GRID_LEVEL,
-  GeographicLodTopology
+  GeographicLodTopology,
+  canonicalWindowsEqual,
+  normalizeCanonicalWindow
 } from './geographic-lod.js';
 
 // L13 is the nearest practical dyadic Mercator scale to the current parsed
@@ -169,14 +171,25 @@ export function aggregateWeatherSummary(parentLevel, childSummary, contributions
 export class GeographicWeatherPyramid {
   constructor(summaryArrayType = Float32Array, topology = new GeographicLodTopology()) {
     this.summaryArrayType = summaryArrayType;
+    this.setTopology(topology);
+  }
+
+  setTopology(topology) {
     this.topology = topology;
     this.levels = topology.levels;
-
     this.contributions = new Map();
     for (let level = MIN_GRID_LEVEL + 1; level <= WEATHER_REFERENCE_LEVEL; level++) {
       this.contributions.set(level, buildCenteredContributions(this.levels.get(level), this.levels.get(level - 1)));
     }
     this.samplingGeometries = new Map();
+  }
+
+  setCanonicalWindow(canonicalWindow) {
+    const nextWindow = normalizeCanonicalWindow(canonicalWindow);
+    if (canonicalWindowsEqual(this.topology.canonicalWindow, nextWindow)) return false;
+    const nextTopology = new GeographicLodTopology(nextWindow);
+    this.setTopology(nextTopology);
+    return true;
   }
 
   samplesFor(level) {

@@ -119,6 +119,19 @@ export class GeographicSquaresLayer {
     for (const buffer of [this.vertexBuffer, ...(this.instanceBuffers || [])]) if (buffer) gl.deleteBuffer(buffer);
   }
 
+  setTopology(topology) {
+    if (this.weatherPyramid.topology !== topology) throw new Error('Squares topology must be the shared weather-pyramid topology.');
+    this.samples = [];
+    this.transition = null;
+    this.temporal = null;
+    this.temporalProgress = 0;
+    this.instanceData = [new Float32Array(), new Float32Array()];
+    this.instanceCounts = [0, 0];
+    this.instanceBufferCapacity = [0, 0];
+    this.instanceDirty = [true, true];
+    this.map?.triggerRepaint();
+  }
+
   setActive(active) {
     this.active = active;
     if (!active) {

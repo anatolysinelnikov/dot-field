@@ -33,6 +33,26 @@ real geographic weather sequence
         +-- fixed L14 scalar lattice --> Blur / Areas (+ optional Smooth)
 ```
 
+The spatial runtime separates provider/data bounds from the active render
+window and from sample identity:
+
+```text
+provider/data bounds
+        ↓
+viewport + deterministic overscan
+        ↓
+active canonical topology window
+        ↓
+Dots / Squares
+```
+
+The viewport selects globally anchored canonical identities; it does not define
+or reseat them. Panning therefore cannot change a sample's canonical ID,
+canonical coordinates, Mercator position, geographic position, or weather value
+at a given time. The current `WEATHER_SUPPORT` remains the temporary compact
+data/support scope; restoration of the complete provider domain is a later
+task, not part of this windowing change.
+
 The intended provider boundary remains:
 
 ```text
@@ -105,6 +125,15 @@ RAW is intentionally static and never participates in temporal evaluation.
 Dots and Squares read out their active LOD/sample count. Blur and Areas report
 their fixed L14 reconstruction lattice instead of camera LOD.
 
+For Dots and Squares, each MapLibre camera move is converted to a conservative
+Mercator envelope using the map bounds plus a deterministic 5 × 5 screen
+unprojection lattice. The envelope expands by 25% of its span on every side,
+adds at least one L10 interval of topology/aggregation safety margin, and is
+snapped outward to L10-compatible boundaries in the global L15 integer
+coordinate system. A move only rebuilds the shared topology when those snapped
+coordinates change. A pending window update is applied after an active 0.2 s
+LOD morph completes, so a window shift is never represented as an LOD morph.
+
 The application-owned RAF runs only while playback advances or a 0.2 s LOD
 transition is active. Paused map navigation and static updates use MapLibre's
 own repaint scheduling; beginning or reversing an LOD transition wakes the
@@ -145,9 +174,12 @@ metadata, inconsistent values/geometry, or an incorrect binary length fail
 visibly instead. `WEATHER_SUPPORT` is the stable grid-aligned support rectangle
 described above. The availability GeoJSON is diagnostic observation coverage
 only, not a forecast-rain mask. The deterministic globally anchored Mercator
-topology still derives all L10–L15 identities from this support; changing its
-extent changes only the selected topology envelope, not grid anchoring,
-canonical identity, target spacing, LOD levels, or parent/child relationships.
+topology still derives all L10–L15 identities from this support. Dots and
+Squares materialize only the current snapped viewport topology window plus its
+coarse safety margin; changing the window changes only which identities are
+materialized, not grid anchoring, canonical identity, target spacing, LOD
+levels, or parent/child relationships. The compact source crop and converter
+are unchanged by viewport windowing.
 
 ## RAW source-grid diagnostic — `src/engine/raw-weather-layer.js`
 
@@ -182,8 +214,12 @@ selected sample's `mercator` coordinate is the world-space position used by
 discrete representations.
 The camera never reseats the grid. Canonical identity resolution and the
 maximum displayed Dots/Squares level are both L15. Logical sampling zoom is
-application-owned and latitude-corrected for Globe camera behavior, so panning
-and rotating do not alter displayed weather density.
+application-owned and latitude-corrected for Globe camera behavior. An explicit
+active window is represented by inclusive L15 integer bounds, snapped outward
+to the coarsest L10 interval. The topology builds nested L10–L15 selections,
+transition parents, direct pairs, and centered aggregate contributions from
+that same window, so panning and rotating do not alter displayed weather
+density or sample identity.
 
 ## Shared physical weather summaries — `src/engine/geographic-weather-pyramid.js`
 
@@ -204,6 +240,15 @@ couple temporal frames or renderers. L14/L15 add sampling resolution, not
 meteorological information.
 Only L12 through L10 are recursively aggregated spatial summaries from L13;
 they are never direct field samples or values from an existing renderer pyramid.
+
+The shared pyramid can replace its active canonical topology when the snapped
+camera window changes. Replacement rebuilds the L10–L13 centered contribution
+maps and drops prepared provider sampling geometry from the old window. Dots
+and Squares receive the same replacement topology and clear incompatible
+temporal summaries, mapped arrays, and packed instances before evaluating the
+new window at the current weather time. Blur and Areas intentionally do not use
+this state: they remain on the existing fixed support-derived L14 scalar
+lattice until Task 3b.
 
 ```text
 provider source grid
