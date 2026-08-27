@@ -187,6 +187,10 @@ function denseContributionBytesForRelation(fineLevel, relation) {
   return (fineLevel.count + 1) * Uint32Array.BYTES_PER_ELEMENT + entries * (Uint32Array.BYTES_PER_ELEMENT + Float64Array.BYTES_PER_ELEMENT);
 }
 
+function typedMapBytes(values) {
+  return [...values.values()].reduce((sum, value) => sum + value.byteLength, 0);
+}
+
 function legacyTopologyBytes(topology) {
   let bytes = 0;
   for (const levelData of topology.levels.values()) {
@@ -347,6 +351,7 @@ function runCase(name, window, range, fullSupport) {
     directPairsMs: { legacy: legacy.directPairsMs, packed: packed.constructionTimings.directPairsMs },
     aggregationRelationSetupMs: { legacyDenseReference: oldCenteredMs, packedSeparable: packedRelationMs },
     aggregationRelationBytes: { legacyDenseReference: oldContributionBytes, packedSeparable: packedRelationBytes },
+    totalWeightBytes: { legacyDenseReference: typedMapBytes(oldSetup.totalWeights), packedSeparable: typedMapBytes(packedPyramid.totalWeights) },
     legacySetTopologyMs: {
       relationSetupMs: oldSetup.relationMs,
       totalWeightsMs: oldSetup.totalWeightsMs,
@@ -415,6 +420,7 @@ function runFullSupportCase(label, range) {
   const packedGeometryMs = performance.now() - geometryStarted;
   const packedAggregationRelationBytes = [...pyramid.centeredRelations].reduce((sum, [level, relation]) => sum + centeredRelationBytes(relation), 0);
   const estimatedDenseAggregationBytes = [...pyramid.centeredRelations].reduce((sum, [level, relation]) => sum + denseContributionBytesForRelation(packed.levelDataFor(level), relation), 0);
+  const totalWeightBytes = typedMapBytes(pyramid.totalWeights);
   return {
     name: `full-support ${label}`,
     fullSupport: true,
@@ -427,6 +433,7 @@ function runFullSupportCase(label, range) {
     directPairsMs: { legacy: legacyMetrics.directPairsMs, packed: packed.constructionTimings.directPairsMs },
     aggregationRelationSetupMs: { legacyDenseReference: legacyMetrics.aggregationRelationSetupMs, packedSeparable: pyramid.topologySetupTimings.relationMs },
     aggregationRelationBytes: { legacyDenseReference: legacyMetrics.aggregationRelationBytes ?? estimatedDenseAggregationBytes, packedSeparable: packedAggregationRelationBytes },
+    totalWeightBytes: { legacyDenseReference: totalWeightBytes, packedSeparable: totalWeightBytes },
     setTopologyMs: pyramid.topologySetupTimings,
     providerSamplingGeometryMs: { legacy: null, packed: packedGeometryMs, bytes: frame.samplingGeometryBytes(geometry) },
     replacementMs: null,
