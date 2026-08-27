@@ -8,7 +8,8 @@ import {
   mercatorToLngLat,
   normalizeCanonicalWindow,
   mercatorXForIndex,
-  mercatorYForIndex
+  mercatorYForIndex,
+  forEachDirectTransitionPair
 } from '../src/engine/geographic-lod.js';
 import { buildCenteredContributionRelation, forEachCenteredContributionRelationEntry } from '../src/engine/geographic-weather-pyramid.js';
 
@@ -131,6 +132,12 @@ function compareTyped(name, packed, reference, tolerance = 0) {
   check(maxError <= tolerance, `${name} max error=${maxError}`);
 }
 
+function directPairSequence(relation) {
+  const pairs = [];
+  forEachDirectTransitionPair(relation, (lowerIndex, higherIndex) => pairs.push(lowerIndex, higherIndex));
+  return Int32Array.from(pairs);
+}
+
 function compareCenteredRelation(name, relation, reference) {
   let referenceIndex = 0;
   let mismatch = null;
@@ -195,7 +202,7 @@ function verifyWindow(rawWindow, name) {
     }
     const referenceChildren = referenceParents.childIndices.flat();
     compareTyped(`${name} L${level} parent-major child order`, Uint32Array.from(packedChildren), Uint32Array.from(referenceChildren));
-    compareTyped(`${name} L${level}<->L${level + 1} direct pairs`, topology.directPairsFor(level - 1, level), oldPairs(referenceCoarse, referenceFine));
+    compareTyped(`${name} L${level - 1}<->L${level} direct transition pair sequence`, directPairSequence(topology.directTransitionRelationFor(level - 1, level)), oldPairs(referenceCoarse, referenceFine));
     if (level <= 13) {
       const packedRelation = buildCenteredContributionRelation(packedFine, packedCoarse);
       const referenceContributions = oldCentered(referenceFine, referenceCoarse);

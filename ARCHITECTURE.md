@@ -317,7 +317,8 @@ sampling zoom is application-owned and latitude-corrected for Globe camera behav
 active window is represented by inclusive L15 integer bounds, snapped outward
 to the coarsest L10 interval. A topology also has an explicit contiguous LOD
 range; it builds only the requested levels and only the transition parents,
-direct pairs, and compact centered aggregate relations whose endpoints exist.
+compact direct adjacent-transition relations, and compact centered aggregate
+relations whose endpoints exist.
 When lower levels are requested, the complete L13→L12→L11→L10 dependency chain
 is required; missing levels fail clearly. Thus panning and rotating do not
 alter displayed weather density or sample identity, while low display LODs do
@@ -355,8 +356,8 @@ mapped arrays, and instances are discarded before the new window is evaluated.
 For a range-only replacement at the same canonical window, the topology reuses
 the exact immutable packed `levelData` objects for overlapping levels when
 level, window, integer bounds, dimensions, spacing, and count all match. It
-likewise reuses transition-parent and direct-pair arrays
-when both endpoint objects are retained. Removed levels become unreachable;
+likewise reuses transition-parent and direct adjacent-transition relations when
+both endpoint objects are retained. Removed levels become unreachable;
 new levels are constructed normally.
 
 Centered aggregation relations and geometric `totalWeight` arrays use bounded
@@ -517,9 +518,15 @@ That mapping is deliberately separate from the centered multi-parent weather
 contribution topology. Parent ownership is packed as CSR
 `childOffsets/childIndices` plus `parentIndexByChild`, preserving parent-major
 and fine-row-major iteration without an array of child arrays. Direct adjacent
-LOD pairs are packed `Int32Array` index pairs derived arithmetically. LOD
-transitions therefore keep canonical child/parent positions and no-grid-jump
-behavior.
+LOD transitions use a compact deterministic arithmetic relation: it references
+the two immutable level descriptors and keeps only O(width + height) axis
+metadata, emitting all lower samples row-major and then higher-only samples
+row-major without materializing an `Int32Array` pair stream. A shared identity
+is an aligned canonical coordinate inside both selected rectangles, so clipped
+edges remain exact. This direct visual relation is distinct from hierarchical
+transition-parent ownership and centered weather aggregation. LOD transitions
+therefore keep canonical identity/order, world-space positions, and no-grid-
+jump behavior.
 
 The application and Dots/Squares retain compact level descriptors rather than
 sample arrays. Provider sampling geometry derives the regular packed grid axes
@@ -534,8 +541,8 @@ non-rectangular providers retain their appropriate dense fallback.
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
 transitions use deterministic parent/child topology below/equal to L13 and
-direct-pair refinement for the active L13↔L14 transition. The engine retains
-the direct L14↔L15 relation for explicit future configurations.
+direct adjacent-relation refinement for the active L13↔L14 transition. The
+engine retains the direct L14↔L15 relation for explicit future configurations.
 Dots retain the stable same-level temporal/mapped state for a source LOD while
 a transition builds the required pair representation; promoting a destination
 therefore only performs the unavoidable same-level instance pass. A subsequent

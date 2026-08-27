@@ -6,7 +6,7 @@ import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geogra
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { DOTS_STRONG_RAIN_FULL_MMH, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadii } from '../src/engine/hazard-renderer.js';
-import { canonicalCoordinatesForIndex, canonicalIndexForCoordinates, canonicalWindowFromMercatorBounds, GeographicLodTopology, MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MAX_LOGICAL_SAMPLING_ZOOM, MIN_GRID_LEVEL, mercatorToLngLat, lngLatToMercator, mercatorXForIndex, mercatorXToLongitude, mercatorYForIndex, mercatorYToLatitude, lodRangeForStableLevel, zoomToMercatorGridLevel } from '../src/engine/geographic-lod.js';
+import { canonicalCoordinatesForIndex, canonicalIndexForCoordinates, canonicalWindowFromMercatorBounds, forEachDirectTransitionPair, GeographicLodTopology, MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MAX_LOGICAL_SAMPLING_ZOOM, MIN_GRID_LEVEL, mercatorToLngLat, lngLatToMercator, mercatorXForIndex, mercatorXToLongitude, mercatorYForIndex, mercatorYToLatitude, lodRangeForStableLevel, zoomToMercatorGridLevel } from '../src/engine/geographic-lod.js';
 import { SCALAR_GRID_LEVEL } from '../src/engine/geographic-scalar-lattice.js';
 
 const LEVELS = [10, 11, 12, 13, 14, 15];
@@ -195,8 +195,8 @@ for (const level of DIRECT_LEVELS) {
 }
 
 for (const [lower, higher, hierarchical] of [[12, 13, true], [13, 14, false], [14, 15, false]]) {
-  const pairs = pyramid.topology.directPairsFor(lower, higher); let inheritedPositionError = 0; let inheritedPairs = 0; let introducedPairs = 0; const lowLevelData = pyramid.topology.levels.get(lower); const highLevelData = pyramid.topology.levels.get(higher);
-  for (let index = 0; index < pairs.length; index += 2) { const low = pairs[index]; const high = pairs[index + 1]; if (low >= 0 && high >= 0) { inheritedPairs++; inheritedPositionError = max(inheritedPositionError, Math.abs(mercatorXForIndex(lowLevelData, low) - mercatorXForIndex(highLevelData, high))); inheritedPositionError = max(inheritedPositionError, Math.abs(mercatorYForIndex(lowLevelData, low) - mercatorYForIndex(highLevelData, high))); } else introducedPairs++; }
+  const relation = pyramid.topology.directTransitionRelationFor(lower, higher); let inheritedPositionError = 0; let inheritedPairs = 0; let introducedPairs = 0; const lowLevelData = pyramid.topology.levels.get(lower); const highLevelData = pyramid.topology.levels.get(higher);
+  forEachDirectTransitionPair(relation, (low, high) => { if (low >= 0 && high >= 0) { inheritedPairs++; inheritedPositionError = max(inheritedPositionError, Math.abs(mercatorXForIndex(lowLevelData, low) - mercatorXForIndex(highLevelData, high))); inheritedPositionError = max(inheritedPositionError, Math.abs(mercatorYForIndex(lowLevelData, low) - mercatorYForIndex(highLevelData, high))); } else introducedPairs++; });
   console.log(`transition L${lower}<->L${higher}: ${hierarchical ? 'hierarchical' : 'direct pairs'}, inherited=${inheritedPairs}, introduced=${introducedPairs}, inherited position error=${inheritedPositionError}`); check(inheritedPositionError === 0 && (hierarchical ? pyramid.topology.transitionParentsFor(higher) : introducedPairs > 0), `L${lower}<->L${higher} transition topology`);
 }
 

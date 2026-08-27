@@ -204,7 +204,12 @@ function legacyTopologyBytes(topology) {
 function packedTopologyBytes(topology) {
   let bytes = 0;
   for (const parents of topology.transitionParents.values()) bytes += parents.childOffsets.byteLength + parents.childIndices.byteLength + parents.parentIndexByChild.byteLength;
-  for (const pairs of topology.directPairs.values()) bytes += pairs.byteLength;
+  return bytes;
+}
+
+function directTransitionRelationBytes(topology) {
+  let bytes = 0;
+  for (const relation of topology.directTransitionRelations.values()) bytes += relation.lowerToHigherColumns.byteLength + relation.lowerToHigherRows.byteLength;
   return bytes;
 }
 
@@ -219,7 +224,7 @@ function oldRetainedCounts(topology) {
 }
 
 function packedRetainedCounts(topology) {
-  return { sampleObjects: 0, sampleIds: 0, mapEntries: topology.levels.size + topology.transitionParents.size + topology.directPairs.size, nestedChildArrays: 0 };
+  return { sampleObjects: 0, sampleIds: 0, mapEntries: topology.levels.size + topology.transitionParents.size + topology.directTransitionRelations.size, nestedChildArrays: 0 };
 }
 
 function measureHeap(builder, repetitions = 3) {
@@ -348,7 +353,8 @@ function runCase(name, window, range, fullSupport) {
     constructionTimingRunsMs: constructionTiming,
     perLevelGridMs: { legacy: legacy.levelTimes, packed: packed.constructionTimings.levels },
     transitionParentsMs: { legacy: legacy.transitionParentsMs, packed: packed.constructionTimings.transitionParentsMs },
-    directPairsMs: { legacy: legacy.directPairsMs, packed: packed.constructionTimings.directPairsMs },
+    directTransitionRelationMs: { legacyDensePairs: legacy.directPairsMs, packed: packed.constructionTimings.directTransitionRelationMs },
+    directTransitionRelationBytes: { legacyDensePairs: [...legacy.directPairs.values()].reduce((sum, pairs) => sum + pairs.byteLength, 0), packed: directTransitionRelationBytes(packed) },
     aggregationRelationSetupMs: { legacyDenseReference: oldCenteredMs, packedSeparable: packedRelationMs },
     aggregationRelationBytes: { legacyDenseReference: oldContributionBytes, packedSeparable: packedRelationBytes },
     totalWeightBytes: { legacyDenseReference: typedMapBytes(oldSetup.totalWeights), packedSeparable: typedMapBytes(packedPyramid.totalWeights) },
@@ -402,12 +408,12 @@ function runFullSupportCase(label, range) {
     const nestedChildArrays = [...packed.levels.keys()].filter((level) => level > range.minLevel).reduce((sum, level) => sum + packed.levelDataFor(level - 1).count, 0);
     const legacyTypedBytes = sampleObjects * 2 * Float64Array.BYTES_PER_ELEMENT
       + [...packed.levels.keys()].filter((level) => level > range.minLevel).reduce((sum, level) => sum + packed.levelDataFor(level).count * Int32Array.BYTES_PER_ELEMENT, 0)
-      + [...packed.directPairs.values()].reduce((sum, pairs) => sum + pairs.byteLength, 0);
+      + 0;
     legacyMetrics = {
       completeConstructionMs: null,
       perLevelGridMs: null,
       transitionParentsMs: null,
-      directPairsMs: null,
+      directTransitionRelationMs: packed.constructionTimings.directTransitionRelationMs,
       aggregationRelationSetupMs: null,
       aggregationRelationBytes: null,
       memory: { legacyTypedBytes, oldCounts: { sampleObjects, sampleIds: sampleObjects, mapEntries: sampleObjects + (packed.levels.size - 1) * 3, nestedChildArrays } },
@@ -430,7 +436,8 @@ function runFullSupportCase(label, range) {
     constructionTimingRunsMs: { legacy: null, packed: packedConstructionTiming },
     perLevelGridMs: { legacy: legacyMetrics.perLevelGridMs, packed: packed.constructionTimings.levels },
     transitionParentsMs: { legacy: legacyMetrics.transitionParentsMs, packed: packed.constructionTimings.transitionParentsMs },
-    directPairsMs: { legacy: legacyMetrics.directPairsMs, packed: packed.constructionTimings.directPairsMs },
+    directTransitionRelationMs: { legacyDensePairs: legacyMetrics.directPairsMs, packed: packed.constructionTimings.directTransitionRelationMs },
+    directTransitionRelationBytes: { legacyDensePairs: legacyMetrics.directPairs ? [...legacyMetrics.directPairs.values()].reduce((sum, pairs) => sum + pairs.byteLength, 0) : null, packed: directTransitionRelationBytes(packed) },
     aggregationRelationSetupMs: { legacyDenseReference: legacyMetrics.aggregationRelationSetupMs, packedSeparable: pyramid.topologySetupTimings.relationMs },
     aggregationRelationBytes: { legacyDenseReference: legacyMetrics.aggregationRelationBytes ?? estimatedDenseAggregationBytes, packedSeparable: packedAggregationRelationBytes },
     totalWeightBytes: { legacyDenseReference: totalWeightBytes, packedSeparable: totalWeightBytes },

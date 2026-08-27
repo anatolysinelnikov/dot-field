@@ -141,8 +141,8 @@ function runTransition(Layer, fromLevel, toLevel, optimized) {
       for (const [level, relation] of pyramid.topology.transitionParents) {
         if (nextTopology.transitionParents.has(level)) check(nextTopology.transitionParents.get(level) === relation, `L${fromLevel}->L${toLevel} reuses transition parents L${level}`);
       }
-      for (const [level, relation] of pyramid.topology.directPairs) {
-        if (nextTopology.directPairs.has(level)) check(nextTopology.directPairs.get(level) === relation, `L${fromLevel}->L${toLevel} reuses direct pairs L${level}`);
+      for (const [level, relation] of pyramid.topology.directTransitionRelations) {
+        if (nextTopology.directTransitionRelations.has(level)) check(nextTopology.directTransitionRelations.get(level) === relation, `L${fromLevel}->L${toLevel} reuses direct transition relation L${level}`);
       }
       pyramid.setTopology(nextTopology, { preserveCompatibleState: true });
       for (const [level, relation] of oldRelations) {

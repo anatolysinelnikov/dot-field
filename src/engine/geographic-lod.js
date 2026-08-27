@@ -302,7 +302,10 @@ function buildTransitionParents(fine, coarse) {
   return { childOffsets, childIndices, parentIndexByChild };
 }
 
-function buildDirectPairs(lower, higher) {
+// Reference only: preserves the former materialized pair sequence for
+// verification and benchmarking. Production topology construction uses the
+// compact direct-transition relation below instead.
+export function buildDirectPairsReference(lower, higher) {
   const pairs = new Int32Array((lower.count + higher.count) * 2);
   let cursor = 0;
   for (let index = 0; index < lower.count; index++) {
@@ -321,6 +324,68 @@ function buildDirectPairs(lower, higher) {
   return pairs.slice(0, cursor);
 }
 
+// Direct adjacent-level visual pairing is not parent ownership and is not the
+// centered weather aggregation relation. Its logical stream is lower samples
+// in row-major order followed by higher-only samples in row-major order. On
+// adjacent dyadic grids the matching higher index is an affine 2x transform,
+// so no per-pair storage is necessary.
+export function buildDirectTransitionRelation(lower, higher) {
+  if (higher.level !== lower.level + 1 || higher.identityScale * 2 !== lower.identityScale) {
+    throw new Error('Direct transition relations require adjacent dyadic grid descriptors.');
+  }
+  const lowerToHigherColumns = new Int32Array(lower.width);
+  const lowerToHigherRows = new Int32Array(lower.height);
+  for (let column = 0; column < lower.width; column++) {
+    const higherColumn = (lower.minI + column) * 2 - higher.minI;
+    lowerToHigherColumns[column] = higherColumn >= 0 && higherColumn < higher.width ? higherColumn : -1;
+  }
+  for (let row = 0; row < lower.height; row++) {
+    const higherRow = (lower.minJ + row) * 2 - higher.minJ;
+    lowerToHigherRows[row] = higherRow >= 0 && higherRow < higher.height ? higherRow * higher.width : -1;
+  }
+  const rawSharedColumnStart = lower.minI * 2 - higher.minI;
+  const rawSharedRowStart = lower.minJ * 2 - higher.minJ;
+  let sharedHigherColumnStart = Math.max(0, rawSharedColumnStart);
+  let sharedHigherRowStart = Math.max(0, rawSharedRowStart);
+  if ((sharedHigherColumnStart - rawSharedColumnStart) & 1) sharedHigherColumnStart++;
+  if ((sharedHigherRowStart - rawSharedRowStart) & 1) sharedHigherRowStart++;
+  return Object.freeze({
+    lower, higher, lowerToHigherColumns, lowerToHigherRows,
+    sharedHigherColumnStart,
+    sharedHigherColumnEnd: Math.min(higher.width - 1, lower.maxI * 2 - higher.minI),
+    sharedHigherRowStart,
+    sharedHigherRowEnd: Math.min(higher.height - 1, lower.maxJ * 2 - higher.minJ)
+  });
+}
+
+// Verifier/diagnostic traversal. Keep production hot loops numeric and inline;
+// callbacks here deliberately make pair-sequence assertions easy to read.
+export function forEachDirectTransitionPair(relation, visit) {
+  const { lower, higher } = relation;
+  const higherWidth = higher.width;
+  for (let lowerRow = 0, lowerIndex = 0; lowerRow < lower.height; lowerRow++) {
+    const higherRowBase = relation.lowerToHigherRows[lowerRow];
+    for (let lowerColumn = 0; lowerColumn < lower.width; lowerColumn++, lowerIndex++) {
+      const higherColumn = relation.lowerToHigherColumns[lowerColumn];
+      const higherIndex = higherRowBase >= 0 && higherColumn >= 0 ? higherRowBase + higherColumn : -1;
+      visit(lowerIndex, higherIndex);
+    }
+  }
+  for (let higherRow = 0, higherIndex = 0; higherRow < higher.height; higherRow++) {
+    const lowerJ = higher.minJ + higherRow;
+    const alignedRow = lowerJ % 2 === 0;
+    const lowerRow = lowerJ / 2 - lower.minJ;
+    for (let higherColumn = 0; higherColumn < higherWidth; higherColumn++, higherIndex++) {
+      const lowerI = higher.minI + higherColumn;
+      if (alignedRow && lowerI % 2 === 0) {
+        const lowerColumn = lowerI / 2 - lower.minI;
+        if (lowerRow >= 0 && lowerRow < lower.height && lowerColumn >= 0 && lowerColumn < lower.width) continue;
+      }
+      visit(-1, higherIndex);
+    }
+  }
+}
+
 // Canonical positions and one-parent ownership for visual LOD morphs. This is
 // deliberately independent from centered weather-summary contributions.
 export class GeographicLodTopology {
@@ -333,7 +398,7 @@ export class GeographicLodTopology {
     this.constructionTimings = {
       levels: [], levelsCreated: 0, levelsReused: 0,
       transitionParentsMs: 0, transitionParentsCreated: 0, transitionParentsReused: 0,
-      directPairsMs: 0, directPairsCreated: 0, directPairsReused: 0, totalMs: 0
+      directTransitionRelationMs: 0, directTransitionRelationsCreated: 0, directTransitionRelationsReused: 0, totalMs: 0
     };
     for (let level = this.levelRange.minLevel; level <= this.levelRange.maxLevel; level++) {
       const levelStarted = now();
@@ -362,20 +427,20 @@ export class GeographicLodTopology {
       }
     }
     this.constructionTimings.transitionParentsMs = now() - transitionStarted;
-    this.directPairs = new Map();
-    const directPairsStarted = now();
+    this.directTransitionRelations = new Map();
+    const directTransitionRelationStarted = now();
     for (let level = this.levelRange.minLevel + 1; level <= this.levelRange.maxLevel; level++) {
-      const reusable = sameWindow && reuseFrom.directPairs.get(level);
+      const reusable = sameWindow && reuseFrom.directTransitionRelations?.get(level);
       if (reusable && reuseFrom.levels.get(level) === this.levels.get(level)
         && reuseFrom.levels.get(level - 1) === this.levels.get(level - 1)) {
-        this.directPairs.set(level, reusable);
-        this.constructionTimings.directPairsReused++;
+        this.directTransitionRelations.set(level, reusable);
+        this.constructionTimings.directTransitionRelationsReused++;
       } else {
-        this.directPairs.set(level, buildDirectPairs(this.levels.get(level - 1), this.levels.get(level)));
-        this.constructionTimings.directPairsCreated++;
+        this.directTransitionRelations.set(level, buildDirectTransitionRelation(this.levels.get(level - 1), this.levels.get(level)));
+        this.constructionTimings.directTransitionRelationsCreated++;
       }
     }
-    this.constructionTimings.directPairsMs = now() - directPairsStarted;
+    this.constructionTimings.directTransitionRelationMs = now() - directTransitionRelationStarted;
     this.constructionTimings.totalMs = now() - topologyStarted;
   }
 
@@ -390,10 +455,10 @@ export class GeographicLodTopology {
     if (!parents) throw new Error(`LOD transition parent data for L${fineLevel} is not materialized.`);
     return parents;
   }
-  directPairsFor(lowerLevel, higherLevel) {
+  directTransitionRelationFor(lowerLevel, higherLevel) {
     if (higherLevel !== lowerLevel + 1) throw new Error('Direct grid pairs require adjacent levels.');
-    const pairs = this.directPairs.get(higherLevel);
-    if (!pairs) throw new Error(`LOD direct-pair data for L${lowerLevel}↔L${higherLevel} is not materialized.`);
-    return pairs;
+    const relation = this.directTransitionRelations.get(higherLevel);
+    if (!relation) throw new Error(`LOD direct-transition relation for L${lowerLevel}↔L${higherLevel} is not materialized.`);
+    return relation;
   }
 }

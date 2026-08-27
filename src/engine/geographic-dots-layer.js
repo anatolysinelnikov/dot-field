@@ -269,7 +269,7 @@ function buildSameLevelTemporalInstances(time0, time1, levelData, radiusKey, wri
   return writer.finish();
 }
 
-function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, fromLevelData, toLevelData, pairs, fromIsLower, radiusKey, writer) {
+export function buildDirectTemporalInstancesReference(fromTime0, toTime0, fromTime1, toTime1, fromLevelData, toLevelData, pairs, fromIsLower, radiusKey, writer) {
   writer.reset();
   const fromRadii0 = fromTime0[radiusKey];
   const toRadii0 = toTime0[radiusKey];
@@ -290,6 +290,69 @@ function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, fr
     const endLevelData = toIndex < 0 ? fromLevelData : toLevelData;
     const endIndex = toIndex < 0 ? fromIndex : toIndex;
     writer.push(mercatorXForIndex(startLevelData, startIndex), mercatorYForIndex(startLevelData, startIndex), mercatorXForIndex(endLevelData, endIndex), mercatorYForIndex(endLevelData, endIndex), fromRadius0, fromRadius1, toRadius0, toRadius1);
+  }
+  return writer.finish();
+}
+
+// This matches the former direct-pair sequence exactly: every lower sample,
+// then every higher-only sample. Adjacent dyadic grids make shared positions
+// identical, so the hot loop needs only affine row/column arithmetic and no
+// pair array, canonical lookup, callback, or coordinate object.
+export function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, relation, fromIsLower, radiusKey, writer) {
+  writer.reset();
+  const lower = relation.lower;
+  const higher = relation.higher;
+  const fromRadii0 = fromTime0[radiusKey];
+  const toRadii0 = toTime0[radiusKey];
+  const fromRadii1 = fromTime1[radiusKey];
+  const toRadii1 = toTime1[radiusKey];
+  const lowerSpacing = lower.spacing;
+  const higherSpacing = higher.spacing;
+  const lowerWidth = lower.width;
+  const higherWidth = higher.width;
+  const lowerIsFrom = fromIsLower;
+  const lowerToHigherColumns = relation.lowerToHigherColumns;
+  const lowerToHigherRows = relation.lowerToHigherRows;
+  const sharedHigherColumnStart = relation.sharedHigherColumnStart;
+  const sharedHigherColumnEnd = relation.sharedHigherColumnEnd;
+  const sharedHigherRowStart = relation.sharedHigherRowStart;
+  const sharedHigherRowEnd = relation.sharedHigherRowEnd;
+
+  for (let lowerRow = 0, lowerIndex = 0; lowerRow < lower.height; lowerRow++) {
+    const lowerY = (lower.minJ + lowerRow) * lowerSpacing;
+    const higherRowBase = lowerToHigherRows[lowerRow];
+    for (let lowerColumn = 0; lowerColumn < lowerWidth; lowerColumn++, lowerIndex++) {
+      const higherColumn = lowerToHigherColumns[lowerColumn];
+      const higherIndex = higherRowBase >= 0 && higherColumn >= 0 ? higherRowBase + higherColumn : -1;
+      const fromIndex = lowerIsFrom ? lowerIndex : higherIndex;
+      const toIndex = lowerIsFrom ? higherIndex : lowerIndex;
+      const fromRadius0 = fromIndex < 0 ? 0 : fromRadii0[fromIndex];
+      const fromRadius1 = fromIndex < 0 ? 0 : fromRadii1[fromIndex];
+      const toRadius0 = toIndex < 0 ? 0 : toRadii0[toIndex];
+      const toRadius1 = toIndex < 0 ? 0 : toRadii1[toIndex];
+      if (!hasTemporalRadius(fromRadius0, fromRadius1, toRadius0, toRadius1)) continue;
+      const lowerX = (lower.minI + lowerColumn) * lowerSpacing;
+      writer.push(lowerX, lowerY, lowerX, lowerY, fromRadius0, fromRadius1, toRadius0, toRadius1);
+    }
+  }
+
+  for (let higherRow = 0, higherIndex = 0; higherRow < higher.height; higherRow++) {
+    const higherY = (higher.minJ + higherRow) * higherSpacing;
+    const alignedRow = higherRow >= sharedHigherRowStart && higherRow <= sharedHigherRowEnd
+      && ((higherRow - sharedHigherRowStart) & 1) === 0;
+    for (let higherColumn = 0; higherColumn < higherWidth; higherColumn++, higherIndex++) {
+      if (alignedRow && higherColumn >= sharedHigherColumnStart && higherColumn <= sharedHigherColumnEnd
+        && ((higherColumn - sharedHigherColumnStart) & 1) === 0) continue;
+      const fromIndex = lowerIsFrom ? -1 : higherIndex;
+      const toIndex = lowerIsFrom ? higherIndex : -1;
+      const fromRadius0 = fromIndex < 0 ? 0 : fromRadii0[fromIndex];
+      const fromRadius1 = fromIndex < 0 ? 0 : fromRadii1[fromIndex];
+      const toRadius0 = toIndex < 0 ? 0 : toRadii0[toIndex];
+      const toRadius1 = toIndex < 0 ? 0 : toRadii1[toIndex];
+      if (!hasTemporalRadius(fromRadius0, fromRadius1, toRadius0, toRadius1)) continue;
+      const higherX = (higher.minI + higherColumn) * higherSpacing;
+      writer.push(higherX, higherY, higherX, higherY, fromRadius0, fromRadius1, toRadius0, toRadius1);
+    }
   }
   return writer.finish();
 }
@@ -632,7 +695,7 @@ export class GeographicDotsLayer {
       const refining = toLevel > fromLevel;
       const coarseLevel = refining ? fromLevel : toLevel;
       const fineLevel = refining ? toLevel : fromLevel;
-      const pairs = hierarchical ? null : this.topology.directPairsFor(Math.min(fromLevel, toLevel), Math.max(fromLevel, toLevel));
+      const directTransitionRelation = hierarchical ? null : this.topology.directTransitionRelationFor(Math.min(fromLevel, toLevel), Math.max(fromLevel, toLevel));
       const fromIsLower = fromLevel < toLevel;
       const coarseLevelData = this.topology.levels.get(coarseLevel);
       const fineLevelData = this.topology.levels.get(fineLevel);
@@ -658,9 +721,7 @@ export class GeographicDotsLayer {
             toTemporal.frames0.mapped[toLevel],
             fromTemporal.frames1.mapped[fromLevel],
             toTemporal.frames1.mapped[toLevel],
-            fromLevelData,
-            toLevelData,
-            pairs,
+            directTransitionRelation,
             fromIsLower,
             RADIUS_KEYS[type],
             this.instanceWriters[type]

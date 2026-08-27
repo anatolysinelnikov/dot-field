@@ -9,6 +9,7 @@ import {
   canonicalWindowFromMercatorBounds,
   canonicalCoordinatesForIndex,
   canonicalIndexForCoordinates,
+  forEachDirectTransitionPair,
   lodRangeForStableLevel,
   lngLatToMercator,
   mercatorXForIndex,
@@ -103,8 +104,10 @@ function verifyHierarchy(topology, name) {
     }
     const parents = topology.transitionParentsFor(level + 1);
     for (const parentIndex of parents.parentIndexByChild) if (parentIndex < 0 || parentIndex >= lower.count) invalidParents++;
-    const pairs = topology.directPairsFor(level, level + 1);
-    for (const pair of pairs) if (pair < -1 || pair >= Math.max(lower.count, higher.count)) invalidPairs++;
+    const relation = topology.directTransitionRelationFor(level, level + 1);
+    forEachDirectTransitionPair(relation, (lowerIndex, higherIndex) => {
+      if (lowerIndex < -1 || lowerIndex >= lower.count || higherIndex < -1 || higherIndex >= higher.count) invalidPairs++;
+    });
     if (level + 1 <= 13 && topology.levelRange.minLevel <= level) {
       const relation = pyramid.topologyFor(level + 1).centeredRelationToParent;
       for (let child = 0; child < relation.fineWidth * relation.fineHeight; child++) {
