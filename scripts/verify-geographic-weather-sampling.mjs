@@ -136,9 +136,9 @@ const ordinary = new GeographicWeatherPyramid(Float64Array, fullTopology).evalua
 let aggregate = preparedSummaries.get(13);
 let ordinaryAggregate = ordinary;
 for (const level of [12, 11, 10]) {
-  const contributions = pyramid.topologyFor(level + 1).contributionsToParent;
-  aggregate = aggregateWeatherSummary(pyramid.levels.get(level), aggregate, contributions, null, Float64Array);
-  ordinaryAggregate = aggregateWeatherSummary(pyramid.levels.get(level), ordinaryAggregate, contributions, null, Float64Array);
+  const relation = pyramid.topologyFor(level + 1).centeredRelationToParent;
+  aggregate = aggregateWeatherSummary(pyramid.levels.get(level), aggregate, relation, null, Float64Array);
+  ordinaryAggregate = aggregateWeatherSummary(pyramid.levels.get(level), ordinaryAggregate, relation, null, Float64Array);
   const error = summaryError(ordinaryAggregate, aggregate);
   console.log(`L${level} aggregate summary error after prepared L13: ${error}`);
   check(error <= TOLERANCE, `L${level} aggregate remains unchanged`);

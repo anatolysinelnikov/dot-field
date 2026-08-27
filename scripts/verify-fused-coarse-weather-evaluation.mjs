@@ -3,6 +3,7 @@ import { setActiveWeatherField } from '../src/engine/geography.js';
 import { RealWeatherSequence, parseRealWeatherCsv } from '../src/engine/real-weather.js';
 import {
   aggregateWeatherSummary,
+  buildCenteredContributions,
   evaluateDirectWeatherSummary,
   RAIN_COVERAGE_THRESHOLDS_MMH,
   GeographicWeatherPyramid
@@ -33,6 +34,7 @@ const levels = [10, 11, 12];
 const topology = new GeographicLodTopology(undefined, lodRangeForStableLevel(10));
 const fusedPyramid = new GeographicWeatherPyramid(Float32Array, topology);
 const oldPyramid = new GeographicWeatherPyramid(Float32Array, topology);
+for (const level of [11, 12, 13]) oldPyramid.centeredRelations.set(level, buildCenteredContributions(topology.levels.get(level), topology.levels.get(level - 1)));
 const geometry = fusedPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
 const oldGeometry = oldPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
 
@@ -50,7 +52,7 @@ function oldChain(frame, minimumLevel, reusable = null) {
     summary = aggregateWeatherSummary(
       oldPyramid.levels.get(level),
       summary,
-      oldPyramid.contributions.get(level + 1),
+      oldPyramid.centeredRelations.get(level + 1),
       reusable?.[level] || null,
       Float32Array,
       oldPyramid.totalWeights.get(level)

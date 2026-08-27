@@ -14,7 +14,7 @@ import {
 } from '../src/engine/geographic-lod.js';
 import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
-import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
+import { buildCenteredContributions, forEachCenteredContributionRelationEntry, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 
 const TEMPORAL_FRAME_COUNT = 180;
 const LEVELS = [10, 11, 12, 13, 14, 15];
@@ -113,13 +113,20 @@ function comparePyramid(oldPyramid, optimizedPyramid, name) {
     const oldLevel = oldPyramid.levels.get(level);
     const optimizedLevel = optimizedPyramid.levels.get(level);
     if (!oldLevel || !optimizedLevel) continue;
-    const oldContribution = oldPyramid.contributions.get(level);
-    const optimizedContribution = optimizedPyramid.contributions.get(level);
-    if (oldContribution || optimizedContribution) {
-      check(Boolean(oldContribution) && Boolean(optimizedContribution)
-        && sameArray(oldContribution.offsets, optimizedContribution.offsets)
-        && sameArray(oldContribution.parentIndices, optimizedContribution.parentIndices)
-        && sameArray(oldContribution.weights, optimizedContribution.weights), `${name} L${level} centered contributions match exactly`);
+    if (level >= 11 && level <= 13 && oldPyramid.levels.has(level - 1) && optimizedPyramid.levels.has(level - 1)) {
+      const oldContribution = buildCenteredContributions(oldPyramid.levels.get(level), oldPyramid.levels.get(level - 1));
+      const optimizedRelation = optimizedPyramid.centeredRelations.get(level);
+      let contributionIndex = 0;
+      let relationMatches = Boolean(optimizedRelation);
+      if (relationMatches) {
+        for (let childIndex = 0; childIndex < optimizedRelation.fineWidth * optimizedRelation.fineHeight; childIndex++) {
+          forEachCenteredContributionRelationEntry(optimizedRelation, childIndex, (parentIndex, weight) => {
+            if (oldContribution.parentIndices[contributionIndex] !== parentIndex || oldContribution.weights[contributionIndex] !== weight) relationMatches = false;
+            contributionIndex++;
+          });
+        }
+      }
+      check(relationMatches && contributionIndex === oldContribution.parentIndices.length, `${name} L${level} centered relation matches dense reference exactly`);
     }
     const oldWeights = oldPyramid.totalWeights.get(level);
     const optimizedWeights = optimizedPyramid.totalWeights.get(level);

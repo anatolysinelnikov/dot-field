@@ -3,6 +3,7 @@ import { setActiveWeatherField } from '../src/engine/geography.js';
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
 import {
   aggregateWeatherSummary,
+  buildCenteredContributions,
   evaluateDirectWeatherSummary,
   RAIN_COVERAGE_THRESHOLDS_MMH,
   GeographicWeatherPyramid
@@ -32,6 +33,8 @@ setActiveWeatherField(weather);
 const topology = new GeographicLodTopology(undefined, lodRangeForStableLevel(10));
 const optimizedPyramid = new GeographicWeatherPyramid(Float32Array, topology);
 const densePyramid = new GeographicWeatherPyramid(Float32Array, topology);
+const denseRelations = new Map();
+for (let level = 12; level >= 10; level--) denseRelations.set(level + 1, buildCenteredContributions(topology.levels.get(level + 1), topology.levels.get(level)));
 const optimizedGeometry = optimizedPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
 const denseGeometry = { ...optimizedGeometry };
 delete denseGeometry.potentialActiveIndices;
@@ -44,7 +47,7 @@ function denseChain(pyramid, frame, minimumLevel) {
     summary = aggregateWeatherSummary(
       pyramid.levels.get(level),
       summary,
-      pyramid.contributions.get(level + 1),
+      denseRelations.get(level + 1),
       null,
       Float32Array,
       pyramid.totalWeights.get(level)

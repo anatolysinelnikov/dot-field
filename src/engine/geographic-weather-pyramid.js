@@ -35,30 +35,30 @@ export const RAIN_COVERAGE_THRESHOLDS_MMH = Object.freeze([
   50.0
 ]);
 const now = () => globalThis.performance?.now?.() ?? Date.now();
-const AGGREGATION_PLAN_CACHE_LIMIT = 12;
-const centeredContributionPlanCache = new Map();
+const AGGREGATION_RELATION_CACHE_LIMIT = 12;
+const centeredContributionRelationCache = new Map();
 const totalWeightPlanCache = new Map();
-const aggregationPlanCacheCounters = { contributionHits: 0, contributionMisses: 0, totalWeightHits: 0, totalWeightMisses: 0 };
+const aggregationRelationCacheCounters = { relationHits: 0, relationMisses: 0, totalWeightHits: 0, totalWeightMisses: 0 };
 
 function boundedCacheSet(cache, key, value) {
   if (cache.has(key)) cache.delete(key);
   cache.set(key, value);
-  while (cache.size > AGGREGATION_PLAN_CACHE_LIMIT) cache.delete(cache.keys().next().value);
+  while (cache.size > AGGREGATION_RELATION_CACHE_LIMIT) cache.delete(cache.keys().next().value);
 }
 
-export function resetAggregationPlanCache() {
-  centeredContributionPlanCache.clear();
+export function resetAggregationRelationCache() {
+  centeredContributionRelationCache.clear();
   totalWeightPlanCache.clear();
-  aggregationPlanCacheCounters.contributionHits = 0;
-  aggregationPlanCacheCounters.contributionMisses = 0;
-  aggregationPlanCacheCounters.totalWeightHits = 0;
-  aggregationPlanCacheCounters.totalWeightMisses = 0;
+  aggregationRelationCacheCounters.relationHits = 0;
+  aggregationRelationCacheCounters.relationMisses = 0;
+  aggregationRelationCacheCounters.totalWeightHits = 0;
+  aggregationRelationCacheCounters.totalWeightMisses = 0;
 }
 
-export function aggregationPlanCacheStats() {
+export function aggregationRelationCacheStats() {
   return {
-    ...aggregationPlanCacheCounters,
-    contributionEntries: centeredContributionPlanCache.size,
+    ...aggregationRelationCacheCounters,
+    relationEntries: centeredContributionRelationCache.size,
     totalWeightEntries: totalWeightPlanCache.size
   };
 }
@@ -136,12 +136,38 @@ function initializeDirectTotalWeight(summary) {
 function initializeAggregateTotalWeight(summary, childSummary, contributions) {
   if (summary.totalWeightInitialized) return;
   summary.totalWeight.fill(0);
-  for (let childIndex = 0; childIndex < childSummary.levelData.count; childIndex++) {
-    const start = contributions.offsets[childIndex];
-    const end = contributions.offsets[childIndex + 1];
-    for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
-      const parentIndex = contributions.parentIndices[contributionIndex];
-      summary.totalWeight[parentIndex] += contributions.weights[contributionIndex] * childSummary.totalWeight[childIndex];
+  if (contributions.kind !== 'separable-centered') {
+    for (let childIndex = 0; childIndex < childSummary.levelData.count; childIndex++) {
+      const start = contributions.offsets[childIndex];
+      const end = contributions.offsets[childIndex + 1];
+      for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+        const parentIndex = contributions.parentIndices[contributionIndex];
+        summary.totalWeight[parentIndex] += contributions.weights[contributionIndex] * childSummary.totalWeight[childIndex];
+      }
+    }
+    summary.totalWeightInitialized = true;
+    return;
+  }
+  const relation = contributions;
+  const fineWidth = relation.fineWidth;
+  for (let row = 0; row < relation.fineHeight; row++) {
+    const yCount = relation.y.candidateCounts[row];
+    const yRawWeight = relation.y.rawCandidateCounts[row] === 1 ? 1 : 0.5;
+    const yBase = row * 2;
+    for (let column = 0; column < fineWidth; column++) {
+      const childIndex = row * fineWidth + column;
+      const xCount = relation.x.candidateCounts[column];
+      const xRawWeight = relation.x.rawCandidateCounts[column] === 1 ? 1 : 0.5;
+      const axisWeight = xRawWeight * yRawWeight;
+      const totalCandidateWeight = axisWeight * xCount * yCount;
+      const xBase = column * 2;
+      for (let xOffset = 0; xOffset < xCount; xOffset++) {
+        const parentX = relation.x.candidateIndices[xBase + xOffset];
+        for (let yOffset = 0; yOffset < yCount; yOffset++) {
+          const parentIndex = relation.y.candidateIndices[yBase + yOffset] * relation.coarseWidth + parentX;
+          summary.totalWeight[parentIndex] += (axisWeight / totalCandidateWeight) * childSummary.totalWeight[childIndex];
+        }
+      }
     }
   }
   summary.totalWeightInitialized = true;
@@ -156,11 +182,29 @@ function activeIndicesForAggregate(summary, childSummary, contributions) {
     return null;
   }
   const active = new Uint8Array(summary.levelData.count);
-  for (const childIndex of childActiveIndices) {
-    const start = contributions.offsets[childIndex];
-    const end = contributions.offsets[childIndex + 1];
-    for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
-      active[contributions.parentIndices[contributionIndex]] = 1;
+  if (contributions.kind === 'separable-centered') {
+    const relation = contributions;
+    for (const childIndex of childActiveIndices) {
+      const column = childIndex % relation.fineWidth;
+      const row = Math.floor(childIndex / relation.fineWidth);
+      const xCount = relation.x.candidateCounts[column];
+      const yCount = relation.y.candidateCounts[row];
+      const xBase = column * 2;
+      const yBase = row * 2;
+      for (let xOffset = 0; xOffset < xCount; xOffset++) {
+        const parentX = relation.x.candidateIndices[xBase + xOffset];
+        for (let yOffset = 0; yOffset < yCount; yOffset++) {
+          active[relation.y.candidateIndices[yBase + yOffset] * relation.coarseWidth + parentX] = 1;
+        }
+      }
+    }
+  } else {
+    for (const childIndex of childActiveIndices) {
+      const start = contributions.offsets[childIndex];
+      const end = contributions.offsets[childIndex + 1];
+      for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+        active[contributions.parentIndices[contributionIndex]] = 1;
+      }
     }
   }
   const activeIndices = [];
@@ -227,6 +271,73 @@ export function buildCenteredContributions(fineLevel, coarseLevel) {
   return { offsets, parentIndices, weights };
 }
 
+function buildCenteredAxisRelation(fineLevel, coarseLevel, axis) {
+  const count = axis === 'x' ? fineLevel.width : fineLevel.height;
+  const fineStart = (axis === 'x' ? fineLevel.minI : fineLevel.minJ) * fineLevel.identityScale;
+  const coarseStart = (axis === 'x' ? coarseLevel.minI : coarseLevel.minJ) * coarseLevel.identityScale;
+  const coarseEnd = (axis === 'x' ? coarseLevel.maxI : coarseLevel.maxJ) * coarseLevel.identityScale;
+  const fineStep = fineLevel.identityScale;
+  const parentStep = coarseLevel.identityScale;
+  const candidateCounts = new Uint8Array(count);
+  const rawCandidateCounts = new Uint8Array(count);
+  const candidateIndices = new Uint32Array(count * 2);
+
+  for (let index = 0; index < count; index++) {
+    const coordinate = fineStart + index * fineStep;
+    const remainder = coordinate % parentStep;
+    if (remainder !== 0 && remainder !== parentStep / 2) throw new Error('Fine sample is not centered between adjacent dyadic anchors.');
+    const rawCount = remainder === 0 ? 1 : 2;
+    const start = remainder === 0 ? coordinate : coordinate - parentStep / 2;
+    rawCandidateCounts[index] = rawCount;
+    let validCount = 0;
+    for (let offset = 0; offset < rawCount; offset++) {
+      const candidate = start + offset * parentStep;
+      if (candidate < coarseStart || candidate > coarseEnd) continue;
+      candidateIndices[index * 2 + validCount++] = (candidate - coarseStart) / parentStep;
+    }
+    if (!validCount) throw new Error('Fine sample has no centered coarse contribution.');
+    candidateCounts[index] = validCount;
+  }
+
+  return { candidateCounts, rawCandidateCounts, candidateIndices };
+}
+
+// Production centered aggregation relation. The two axis tables retain only
+// the valid local coarse indices for each fine column/row; 2D candidates are
+// enumerated in x-outer/y-inner order at evaluation time.
+export function buildCenteredContributionRelation(fineLevel, coarseLevel) {
+  return {
+    kind: 'separable-centered',
+    fineWidth: fineLevel.width,
+    fineHeight: fineLevel.height,
+    coarseWidth: coarseLevel.width,
+    x: buildCenteredAxisRelation(fineLevel, coarseLevel, 'x'),
+    y: buildCenteredAxisRelation(fineLevel, coarseLevel, 'y')
+  };
+}
+
+// Verification-only enumerator. Hot production loops access the same compact
+// arrays inline to avoid callback and per-contribution allocation overhead.
+export function forEachCenteredContributionRelationEntry(relation, childIndex, callback) {
+  const column = childIndex % relation.fineWidth;
+  const row = Math.floor(childIndex / relation.fineWidth);
+  const xCount = relation.x.candidateCounts[column];
+  const yCount = relation.y.candidateCounts[row];
+  const xRawWeight = relation.x.rawCandidateCounts[column] === 1 ? 1 : 0.5;
+  const yRawWeight = relation.y.rawCandidateCounts[row] === 1 ? 1 : 0.5;
+  const axisWeight = xRawWeight * yRawWeight;
+  const totalCandidateWeight = axisWeight * xCount * yCount;
+  const xBase = column * 2;
+  const yBase = row * 2;
+  for (let xOffset = 0; xOffset < xCount; xOffset++) {
+    const parentX = relation.x.candidateIndices[xBase + xOffset];
+    for (let yOffset = 0; yOffset < yCount; yOffset++) {
+      const parentY = relation.y.candidateIndices[yBase + yOffset];
+      callback(parentY * relation.coarseWidth + parentX, axisWeight / totalCandidateWeight);
+    }
+  }
+}
+
 // For adjacent dyadic levels, local contribution indices depend only on the
 // relative origins, dimensions, and edge clipping of the two rectangular
 // selections. Absolute geographic position is intentionally absent. The
@@ -245,65 +356,19 @@ export function centeredContributionStructuralKey(fineLevel, coarseLevel) {
   ].join(':');
 }
 
-// This verifier proves the cached plan against the new topology without
-// allocating a second contribution graph. Every offset, local parent index,
-// and Float64 weight is checked using the same canonical arithmetic as the
-// uncached builder. A matching structural key then proves translation
-// invariance for the plan and its derived total weights.
-export function verifyCenteredContributionPlan(fineLevel, coarseLevel, contributions) {
-  if (!contributions || contributions.offsets.length !== fineLevel.count + 1) return false;
-  const parentStep = 2 ** (MAX_GRID_LEVEL - coarseLevel.level);
-  let expectedOffset = 0;
-  for (let childIndex = 0; childIndex < fineLevel.count; childIndex++) {
-    const canonicalX = canonicalXForIndex(fineLevel, childIndex);
-    const canonicalY = canonicalYForIndex(fineLevel, childIndex);
-    const xRemainder = canonicalX % parentStep;
-    const yRemainder = canonicalY % parentStep;
-    if ((xRemainder !== 0 && xRemainder !== parentStep / 2)
-      || (yRemainder !== 0 && yRemainder !== parentStep / 2)) return false;
-    const xCount = xRemainder === 0 ? 1 : 2;
-    const yCount = yRemainder === 0 ? 1 : 2;
-    const xStart = xRemainder === 0 ? canonicalX : canonicalX - parentStep / 2;
-    const yStart = yRemainder === 0 ? canonicalY : canonicalY - parentStep / 2;
-    const totalCandidateWeight = (xCount === 1 ? 1 : 0.5) * (yCount === 1 ? 1 : 0.5);
-    let candidateCount = 0;
-    for (let xOffset = 0; xOffset < xCount; xOffset++) {
-      for (let yOffset = 0; yOffset < yCount; yOffset++) {
-        if (canonicalIndexForCoordinates(coarseLevel, xStart + xOffset * parentStep, yStart + yOffset * parentStep) >= 0) candidateCount++;
-      }
-    }
-    if (contributions.offsets[childIndex] !== expectedOffset
-      || contributions.offsets[childIndex + 1] !== expectedOffset + candidateCount) return false;
-    let contributionIndex = expectedOffset;
-    for (let xOffset = 0; xOffset < xCount; xOffset++) {
-      for (let yOffset = 0; yOffset < yCount; yOffset++) {
-        const parentIndex = canonicalIndexForCoordinates(coarseLevel, xStart + xOffset * parentStep, yStart + yOffset * parentStep);
-        if (parentIndex < 0) continue;
-        const weight = ((xCount === 1 ? 1 : 0.5) * (yCount === 1 ? 1 : 0.5)) / (totalCandidateWeight * candidateCount);
-        if (contributions.parentIndices[contributionIndex] !== parentIndex
-          || contributions.weights[contributionIndex] !== weight) return false;
-        contributionIndex++;
-      }
-    }
-    expectedOffset += candidateCount;
-  }
-  return contributions.parentIndices.length === expectedOffset;
-}
-
-function getCenteredContributionPlan(fineLevel, coarseLevel, reuse) {
+function getCenteredContributionRelation(fineLevel, coarseLevel, reuse) {
   const key = centeredContributionStructuralKey(fineLevel, coarseLevel);
   if (reuse) {
-    const cached = centeredContributionPlanCache.get(key);
-    if (cached && verifyCenteredContributionPlan(fineLevel, coarseLevel, cached)) {
-      aggregationPlanCacheCounters.contributionHits++;
-      return { key, plan: cached, reused: true };
+    const cached = centeredContributionRelationCache.get(key);
+    if (cached) {
+      aggregationRelationCacheCounters.relationHits++;
+      return { key, relation: cached, reused: true };
     }
   }
-  aggregationPlanCacheCounters.contributionMisses++;
-  const plan = buildCenteredContributions(fineLevel, coarseLevel);
-  if (!verifyCenteredContributionPlan(fineLevel, coarseLevel, plan)) throw new Error('Centered contribution verifier rejected a freshly built plan.');
-  if (reuse) boundedCacheSet(centeredContributionPlanCache, key, plan);
-  return { key, plan, reused: false };
+  aggregationRelationCacheCounters.relationMisses++;
+  const relation = buildCenteredContributionRelation(fineLevel, coarseLevel);
+  if (reuse) boundedCacheSet(centeredContributionRelationCache, key, relation);
+  return { key, relation, reused: false };
 }
 
 function totalWeightStructuralKey(level, levelData, contributionKeys) {
@@ -312,6 +377,31 @@ function totalWeightStructuralKey(level, levelData, contributionKeys) {
 
 function buildTotalWeight(levelData, childWeights, contributions, ArrayType) {
   const weights = new ArrayType(levelData.count);
+  if (contributions.kind === 'separable-centered') {
+    const relation = contributions;
+    const fineWidth = relation.fineWidth;
+    for (let row = 0; row < relation.fineHeight; row++) {
+      const yCount = relation.y.candidateCounts[row];
+      const yRawWeight = relation.y.rawCandidateCounts[row] === 1 ? 1 : 0.5;
+      const yBase = row * 2;
+      for (let column = 0; column < fineWidth; column++) {
+        const childIndex = row * fineWidth + column;
+        const xCount = relation.x.candidateCounts[column];
+        const xRawWeight = relation.x.rawCandidateCounts[column] === 1 ? 1 : 0.5;
+        const axisWeight = xRawWeight * yRawWeight;
+        const totalCandidateWeight = axisWeight * xCount * yCount;
+        const xBase = column * 2;
+        for (let xOffset = 0; xOffset < xCount; xOffset++) {
+          const parentX = relation.x.candidateIndices[xBase + xOffset];
+          for (let yOffset = 0; yOffset < yCount; yOffset++) {
+            const parentIndex = relation.y.candidateIndices[yBase + yOffset] * relation.coarseWidth + parentX;
+            weights[parentIndex] += (axisWeight / totalCandidateWeight) * childWeights[childIndex];
+          }
+        }
+      }
+    }
+    return weights;
+  }
   for (let childIndex = 0; childIndex < childWeights.length; childIndex++) {
     const start = contributions.offsets[childIndex];
     const end = contributions.offsets[childIndex + 1];
@@ -324,18 +414,18 @@ function buildTotalWeight(levelData, childWeights, contributions, ArrayType) {
 
 export function buildAggregationSetup(topology, ArrayType = Float32Array, reuse = true) {
   const started = now();
-  const contributionsStarted = now();
-  const contributions = new Map();
+  const relationStarted = now();
+  const relations = new Map();
   const contributionKeys = new Map();
-  let contributionHits = 0;
+  let relationHits = 0;
   for (let level = Math.max(MIN_GRID_LEVEL + 1, topology.levelRange.minLevel + 1); level <= Math.min(WEATHER_REFERENCE_LEVEL, topology.levelRange.maxLevel); level++) {
     if (!topology.levels.has(level - 1)) continue;
-    const result = getCenteredContributionPlan(topology.levels.get(level), topology.levels.get(level - 1), reuse);
-    contributions.set(level, result.plan);
+    const result = getCenteredContributionRelation(topology.levels.get(level), topology.levels.get(level - 1), reuse);
+    relations.set(level, result.relation);
     contributionKeys.set(level, result.key);
-    if (result.reused) contributionHits++;
+    if (result.reused) relationHits++;
   }
-  const contributionsMs = now() - contributionsStarted;
+  const relationMs = now() - relationStarted;
   const totalWeightsStarted = now();
   const totalWeights = new Map();
   const totalWeightKeys = new Map();
@@ -345,10 +435,10 @@ export function buildAggregationSetup(topology, ArrayType = Float32Array, reuse 
     const referenceKey = totalWeightStructuralKey(WEATHER_REFERENCE_LEVEL, referenceLevelData, []);
     let referenceWeights = reuse ? totalWeightPlanCache.get(referenceKey) : null;
     if (referenceWeights?.length === referenceLevelData.count && referenceWeights.constructor === ArrayType) {
-      aggregationPlanCacheCounters.totalWeightHits++;
+      aggregationRelationCacheCounters.totalWeightHits++;
       totalWeightHits++;
     } else {
-      aggregationPlanCacheCounters.totalWeightMisses++;
+      aggregationRelationCacheCounters.totalWeightMisses++;
       referenceWeights = new ArrayType(referenceLevelData.count);
       referenceWeights.fill(1);
       if (reuse) boundedCacheSet(totalWeightPlanCache, referenceKey, referenceWeights);
@@ -357,19 +447,19 @@ export function buildAggregationSetup(topology, ArrayType = Float32Array, reuse 
     totalWeightKeys.set(WEATHER_REFERENCE_LEVEL, referenceKey);
     for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= topology.levelRange.minLevel; level--) {
       const childWeights = totalWeights.get(level + 1);
-      const levelContributions = contributions.get(level + 1);
-      if (!childWeights || !levelContributions || !topology.levels.has(level)) continue;
+      const levelRelation = relations.get(level + 1);
+      if (!childWeights || !levelRelation || !topology.levels.has(level)) continue;
       const key = totalWeightStructuralKey(level, topology.levels.get(level), [
         contributionKeys.get(level + 1),
         totalWeightKeys.get(level + 1)
       ]);
       let weights = reuse ? totalWeightPlanCache.get(key) : null;
       if (weights?.length === topology.levels.get(level).count && weights.constructor === ArrayType) {
-        aggregationPlanCacheCounters.totalWeightHits++;
+        aggregationRelationCacheCounters.totalWeightHits++;
         totalWeightHits++;
       } else {
-        aggregationPlanCacheCounters.totalWeightMisses++;
-        weights = buildTotalWeight(topology.levels.get(level), childWeights, levelContributions, ArrayType);
+        aggregationRelationCacheCounters.totalWeightMisses++;
+        weights = buildTotalWeight(topology.levels.get(level), childWeights, levelRelation, ArrayType);
         if (reuse) boundedCacheSet(totalWeightPlanCache, key, weights);
       }
       totalWeights.set(level, weights);
@@ -377,13 +467,13 @@ export function buildAggregationSetup(topology, ArrayType = Float32Array, reuse 
     }
   }
   return {
-    contributions,
+    relations,
     totalWeights,
     timings: {
-      contributionsMs,
+      relationMs,
       totalWeightsMs: now() - totalWeightsStarted,
       totalMs: now() - started,
-      contributionHits,
+      relationHits,
       totalWeightHits
     }
   };
@@ -442,26 +532,65 @@ export function aggregateWeatherSummary(parentLevel, childSummary, contributions
   zeroWeatherFields(summary, activeIndices);
   const childCount = childSummary.levelData.count;
   const activeChildren = childSummary.potentialActiveIndices;
+  if (contributions.kind !== 'separable-centered') {
+    for (let activeChild = 0; activeChild < (activeChildren ? activeChildren.length : childCount); activeChild++) {
+      const childIndex = activeChildren ? activeChildren[activeChild] : activeChild;
+      const start = contributions.offsets[childIndex];
+      const end = contributions.offsets[childIndex + 1];
+      for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+        const parentIndex = contributions.parentIndices[contributionIndex];
+        const weight = contributions.weights[contributionIndex];
+        const effectiveWeight = weight * childSummary.totalWeight[childIndex];
+        summary.rainWeightedSumMmh[parentIndex] += weight * childSummary.rainWeightedSumMmh[childIndex];
+        for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
+          summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight * childSummary.rainCoverageWeight[thresholdIndex][childIndex];
+        }
+        summary.stormCoverageWeight[parentIndex] += weight * childSummary.stormCoverageWeight[childIndex];
+        summary.stormWeightedSeverity[parentIndex] += weight * childSummary.stormWeightedSeverity[childIndex];
+        summary.hailCoverageWeight[parentIndex] += weight * childSummary.hailCoverageWeight[childIndex];
+        summary.hailWeightedSeverity[parentIndex] += weight * childSummary.hailWeightedSeverity[childIndex];
+        if (effectiveWeight > 0) {
+          summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], childSummary.rainMaxMmh[childIndex]);
+          summary.stormMaxSeverity[parentIndex] = Math.max(summary.stormMaxSeverity[parentIndex], childSummary.stormMaxSeverity[childIndex]);
+          summary.hailMaxSeverity[parentIndex] = Math.max(summary.hailMaxSeverity[parentIndex], childSummary.hailMaxSeverity[childIndex]);
+        }
+      }
+    }
+    return summary;
+  }
+
+  const relation = contributions;
   for (let activeChild = 0; activeChild < (activeChildren ? activeChildren.length : childCount); activeChild++) {
     const childIndex = activeChildren ? activeChildren[activeChild] : activeChild;
-    const start = contributions.offsets[childIndex];
-    const end = contributions.offsets[childIndex + 1];
-    for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
-      const parentIndex = contributions.parentIndices[contributionIndex];
-      const weight = contributions.weights[contributionIndex];
-      const effectiveWeight = weight * childSummary.totalWeight[childIndex];
-      summary.rainWeightedSumMmh[parentIndex] += weight * childSummary.rainWeightedSumMmh[childIndex];
-      for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-        summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight * childSummary.rainCoverageWeight[thresholdIndex][childIndex];
-      }
-      summary.stormCoverageWeight[parentIndex] += weight * childSummary.stormCoverageWeight[childIndex];
-      summary.stormWeightedSeverity[parentIndex] += weight * childSummary.stormWeightedSeverity[childIndex];
-      summary.hailCoverageWeight[parentIndex] += weight * childSummary.hailCoverageWeight[childIndex];
-      summary.hailWeightedSeverity[parentIndex] += weight * childSummary.hailWeightedSeverity[childIndex];
-      if (effectiveWeight > 0) {
-        summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], childSummary.rainMaxMmh[childIndex]);
-        summary.stormMaxSeverity[parentIndex] = Math.max(summary.stormMaxSeverity[parentIndex], childSummary.stormMaxSeverity[childIndex]);
-        summary.hailMaxSeverity[parentIndex] = Math.max(summary.hailMaxSeverity[parentIndex], childSummary.hailMaxSeverity[childIndex]);
+    const column = childIndex % relation.fineWidth;
+    const row = Math.floor(childIndex / relation.fineWidth);
+    const xCount = relation.x.candidateCounts[column];
+    const yCount = relation.y.candidateCounts[row];
+    const xRawWeight = relation.x.rawCandidateCounts[column] === 1 ? 1 : 0.5;
+    const yRawWeight = relation.y.rawCandidateCounts[row] === 1 ? 1 : 0.5;
+    const axisWeight = xRawWeight * yRawWeight;
+    const totalCandidateWeight = axisWeight * xCount * yCount;
+    const xBase = column * 2;
+    const yBase = row * 2;
+    for (let xOffset = 0; xOffset < xCount; xOffset++) {
+      const parentX = relation.x.candidateIndices[xBase + xOffset];
+      for (let yOffset = 0; yOffset < yCount; yOffset++) {
+        const parentIndex = relation.y.candidateIndices[yBase + yOffset] * relation.coarseWidth + parentX;
+        const weight = axisWeight / totalCandidateWeight;
+        const effectiveWeight = weight * childSummary.totalWeight[childIndex];
+        summary.rainWeightedSumMmh[parentIndex] += weight * childSummary.rainWeightedSumMmh[childIndex];
+        for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
+          summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight * childSummary.rainCoverageWeight[thresholdIndex][childIndex];
+        }
+        summary.stormCoverageWeight[parentIndex] += weight * childSummary.stormCoverageWeight[childIndex];
+        summary.stormWeightedSeverity[parentIndex] += weight * childSummary.stormWeightedSeverity[childIndex];
+        summary.hailCoverageWeight[parentIndex] += weight * childSummary.hailCoverageWeight[childIndex];
+        summary.hailWeightedSeverity[parentIndex] += weight * childSummary.hailWeightedSeverity[childIndex];
+        if (effectiveWeight > 0) {
+          summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], childSummary.rainMaxMmh[childIndex]);
+          summary.stormMaxSeverity[parentIndex] = Math.max(summary.stormMaxSeverity[parentIndex], childSummary.stormMaxSeverity[childIndex]);
+          summary.hailMaxSeverity[parentIndex] = Math.max(summary.hailMaxSeverity[parentIndex], childSummary.hailMaxSeverity[childIndex]);
+        }
       }
     }
   }
@@ -488,17 +617,44 @@ export function evaluateFusedRainAggregateSummary(parentLevel, frame, samplingGe
     const childIndex = activeChildren[activeChild];
     const rainMmh = rainValues[activeChild];
     const rainForSummary = storedRain(rainMmh);
-    const start = contributions.offsets[childIndex];
-    const end = contributions.offsets[childIndex + 1];
-    for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
-      const parentIndex = contributions.parentIndices[contributionIndex];
-      const weight = contributions.weights[contributionIndex];
-      summary.rainWeightedSumMmh[parentIndex] += weight * rainForSummary;
-      for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-        summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight
-          * (rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0);
+    if (contributions.kind !== 'separable-centered') {
+      const start = contributions.offsets[childIndex];
+      const end = contributions.offsets[childIndex + 1];
+      for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+        const parentIndex = contributions.parentIndices[contributionIndex];
+        const weight = contributions.weights[contributionIndex];
+        summary.rainWeightedSumMmh[parentIndex] += weight * rainForSummary;
+        for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
+          summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight
+            * (rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0);
+        }
+        if (weight > 0) summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], rainForSummary);
       }
-      if (weight > 0) summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], rainForSummary);
+      continue;
+    }
+    const relation = contributions;
+    const column = childIndex % relation.fineWidth;
+    const row = Math.floor(childIndex / relation.fineWidth);
+    const xCount = relation.x.candidateCounts[column];
+    const yCount = relation.y.candidateCounts[row];
+    const xRawWeight = relation.x.rawCandidateCounts[column] === 1 ? 1 : 0.5;
+    const yRawWeight = relation.y.rawCandidateCounts[row] === 1 ? 1 : 0.5;
+    const axisWeight = xRawWeight * yRawWeight;
+    const totalCandidateWeight = axisWeight * xCount * yCount;
+    const xBase = column * 2;
+    const yBase = row * 2;
+    for (let xOffset = 0; xOffset < xCount; xOffset++) {
+      const parentX = relation.x.candidateIndices[xBase + xOffset];
+      for (let yOffset = 0; yOffset < yCount; yOffset++) {
+        const parentIndex = relation.y.candidateIndices[yBase + yOffset] * relation.coarseWidth + parentX;
+        const weight = axisWeight / totalCandidateWeight;
+        summary.rainWeightedSumMmh[parentIndex] += weight * rainForSummary;
+        for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
+          summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight
+            * (rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0);
+        }
+        if (weight > 0) summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], rainForSummary);
+      }
     }
   }
   return summary;
@@ -520,7 +676,7 @@ export class GeographicWeatherPyramid {
     this.topology = topology;
     this.levels = topology.levels;
     const setup = buildAggregationSetup(topology, this.summaryArrayType, options.reuse !== false);
-    this.contributions = setup.contributions;
+    this.centeredRelations = setup.relations;
     this.totalWeights = setup.totalWeights;
     this.topologySetupTimings = setup.timings;
     this.samplingGeometries = new Map();
@@ -560,7 +716,7 @@ export class GeographicWeatherPyramid {
     const levelData = this.levelDataFor(level);
     return {
       levelData,
-      contributionsToParent: this.contributions.get(level) || null
+      centeredRelationToParent: this.centeredRelations.get(level) || null
     };
   }
 
@@ -597,14 +753,14 @@ export class GeographicWeatherPyramid {
         && frame?.supportsRainOnlyPreparedBatch === true
         && typeof frame.samplePreparedBatch === 'function'
         && samplingGeometry?.potentialActiveIndices
-        && this.contributions.has(WEATHER_REFERENCE_LEVEL);
+        && this.centeredRelations.has(WEATHER_REFERENCE_LEVEL);
       let summary;
       if (useFusedRainPath) {
         summary = evaluateFusedRainAggregateSummary(
           this.levels.get(WEATHER_REFERENCE_LEVEL - 1),
           frame,
           samplingGeometry,
-          this.contributions.get(WEATHER_REFERENCE_LEVEL),
+          this.centeredRelations.get(WEATHER_REFERENCE_LEVEL),
           reusableStates?.[WEATHER_REFERENCE_LEVEL - 1],
           this.summaryArrayType,
           this.totalWeights.get(WEATHER_REFERENCE_LEVEL - 1)
@@ -622,12 +778,12 @@ export class GeographicWeatherPyramid {
         summaries[WEATHER_REFERENCE_LEVEL] = summary;
       }
       for (let level = (useFusedRainPath ? WEATHER_REFERENCE_LEVEL - 2 : WEATHER_REFERENCE_LEVEL - 1); level >= minimumAggregateLevel; level--) {
-        const contributions = this.contributions.get(level + 1);
-        if (!contributions) throw new Error(`LOD L${level} aggregation requires an unbroken L13 reference chain.`);
+        const relation = this.centeredRelations.get(level + 1);
+        if (!relation) throw new Error(`LOD L${level} aggregation requires an unbroken L13 reference chain.`);
         summary = aggregateWeatherSummary(
           this.levels.get(level),
           summary,
-          contributions,
+          relation,
           reusableStates?.[level],
           this.summaryArrayType,
           this.totalWeights.get(level)

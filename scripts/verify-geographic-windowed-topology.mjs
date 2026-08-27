@@ -15,7 +15,7 @@ import {
   mercatorYForIndex,
   normalizeLodRange
 } from '../src/engine/geographic-lod.js';
-import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
+import { forEachCenteredContributionRelationEntry, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
 import { geographicTemporalFrameAt } from '../src/engine/geographic-layer-utils.js';
 
@@ -106,13 +106,13 @@ function verifyHierarchy(topology, name) {
     const pairs = topology.directPairsFor(level, level + 1);
     for (const pair of pairs) if (pair < -1 || pair >= Math.max(lower.count, higher.count)) invalidPairs++;
     if (level + 1 <= 13 && topology.levelRange.minLevel <= level) {
-      const contributions = pyramid.topologyFor(level + 1).contributionsToParent;
-      for (let child = 0; child < contributions.offsets.length - 1; child++) {
+      const relation = pyramid.topologyFor(level + 1).centeredRelationToParent;
+      for (let child = 0; child < relation.fineWidth * relation.fineHeight; child++) {
         let weight = 0;
-        for (let index = contributions.offsets[child]; index < contributions.offsets[child + 1]; index++) {
-          if (contributions.parentIndices[index] >= lower.count) invalidParents++;
-          weight += contributions.weights[index];
-        }
+        forEachCenteredContributionRelationEntry(relation, child, (parentIndex, contributionWeight) => {
+          if (parentIndex >= lower.count) invalidParents++;
+          weight += contributionWeight;
+        });
         contributionWeightError = Math.max(contributionWeightError, Math.abs(weight - 1));
       }
     }

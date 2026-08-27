@@ -4,6 +4,7 @@ import { geographicPreparedIntensityAtGeometry, setActiveWeatherField } from '..
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
 import {
   aggregateWeatherSummary,
+  buildCenteredContributions,
   createWeatherSummary,
   evaluateDirectWeatherSummary,
   evaluateFusedRainAggregateSummary,
@@ -70,6 +71,13 @@ function makeTopology(stableLevel) {
   return new GeographicLodTopology(undefined, lodRangeForStableLevel(stableLevel));
 }
 
+function installDenseAggregationReference(pyramid) {
+  for (let level = 11; level <= 13; level++) {
+    if (!pyramid.levels.has(level - 1) || !pyramid.levels.has(level)) continue;
+    pyramid.centeredRelations.set(level, buildCenteredContributions(pyramid.levels.get(level), pyramid.levels.get(level - 1)));
+  }
+}
+
 function denseGeometry(geometry) {
   if (!geometry?.potentialActiveIndices) return geometry;
   const copy = { ...geometry };
@@ -91,7 +99,7 @@ function evaluateChain(pyramid, frame, level, geometry, reusable = null) {
     summary = aggregateWeatherSummary(
       pyramid.levels.get(childLevel),
       summary,
-      pyramid.contributions.get(childLevel + 1),
+      pyramid.centeredRelations.get(childLevel + 1),
       reusable?.[childLevel] || null,
       Float32Array,
       pyramid.totalWeights.get(childLevel)
@@ -225,7 +233,7 @@ function legacyChain(pyramid, frame, level, geometry, reusable = null) {
   let summary = legacyEvaluateDirect(pyramid.levels.get(13), frame, reusable?.[13] || null, geometry);
   const summaries = { 13: summary };
   for (let childLevel = 12; childLevel >= level; childLevel--) {
-    summary = legacyAggregate(pyramid.levels.get(childLevel), summary, pyramid.contributions.get(childLevel + 1), reusable?.[childLevel] || null);
+    summary = legacyAggregate(pyramid.levels.get(childLevel), summary, pyramid.centeredRelations.get(childLevel + 1), reusable?.[childLevel] || null);
     summaries[childLevel] = summary;
   }
   return summaries;
@@ -238,7 +246,7 @@ function sparseUncachedChain(pyramid, frame, level, geometry, activeIndices, reu
     summary = aggregateWeatherSummary(
       pyramid.levels.get(childLevel),
       summary,
-      pyramid.contributions.get(childLevel + 1),
+      pyramid.centeredRelations.get(childLevel + 1),
       reusable?.[childLevel] || null,
       Float32Array,
       pyramid.totalWeights.get(childLevel)
@@ -274,8 +282,8 @@ function benchmarkAggregationOnly(pyramid, level, initialSummary, optimized) {
     let summary = initialSummary;
     for (let childLevel = 12; childLevel >= level; childLevel--) {
       summary = optimized
-        ? aggregateWeatherSummary(pyramid.levels.get(childLevel), summary, pyramid.contributions.get(childLevel + 1), reusable[childLevel] || null, Float32Array, pyramid.totalWeights.get(childLevel))
-        : legacyAggregate(pyramid.levels.get(childLevel), summary, pyramid.contributions.get(childLevel + 1), reusable[childLevel] || null);
+        ? aggregateWeatherSummary(pyramid.levels.get(childLevel), summary, pyramid.centeredRelations.get(childLevel + 1), reusable[childLevel] || null, Float32Array, pyramid.totalWeights.get(childLevel))
+        : legacyAggregate(pyramid.levels.get(childLevel), summary, pyramid.centeredRelations.get(childLevel + 1), reusable[childLevel] || null);
       reusable[childLevel] = summary;
     }
   });
@@ -288,7 +296,7 @@ function benchmarkAggregationStep(pyramid, parentLevel, childSummary, optimized)
       reusable = aggregateWeatherSummary(
         pyramid.levels.get(parentLevel),
         childSummary,
-        pyramid.contributions.get(parentLevel + 1),
+        pyramid.centeredRelations.get(parentLevel + 1),
         reusable,
         Float32Array,
         pyramid.totalWeights.get(parentLevel)
@@ -297,7 +305,7 @@ function benchmarkAggregationStep(pyramid, parentLevel, childSummary, optimized)
       reusable = legacyAggregate(
         pyramid.levels.get(parentLevel),
         childSummary,
-        pyramid.contributions.get(parentLevel + 1),
+        pyramid.centeredRelations.get(parentLevel + 1),
         reusable
       );
     }
@@ -311,7 +319,7 @@ function benchmarkFusedFirstStep(pyramid, frame, geometry) {
       pyramid.levels.get(12),
       frame,
       geometry,
-      pyramid.contributions.get(13),
+      pyramid.centeredRelations.get(13),
       reusable,
       Float32Array,
       pyramid.totalWeights.get(12)
@@ -414,6 +422,7 @@ for (const stableLevel of LEVELS) {
   const optimized = benchmarkChain(pyramid, frame, stableLevel, geometry);
   const sparseUncached = benchmarkSparseUncachedChain(pyramid, frame, stableLevel, dense, geometry.potentialActiveIndices);
   const legacyPyramid = new GeographicWeatherPyramid(Float32Array, topology);
+  installDenseAggregationReference(legacyPyramid);
   const legacyGeometry = denseGeometry(legacyPyramid.prepareSamplingGeometry(13, frame));
   const legacyResult = benchmarkLegacyChain(legacyPyramid, frame, stableLevel, legacyGeometry);
   const optimizedSummary = optimized.summaries;
@@ -466,14 +475,14 @@ for (const stableLevel of LEVELS) {
   const activeIndexBytes = Object.values(optimizedSummary).filter(Boolean).reduce((sum, summary) => sum + (summary.potentialActiveIndices?.byteLength || 0), 0);
   console.log(`L${stableLevel}: topology=${[...pyramid.levels.values()].map((levelData) => `L${levelData.level}:${levelData.count}`).join(',')}`);
   console.log(`L${stableLevel}: samples canonical=${pyramid.levelDataFor(stableLevel).count} potential-active=${activeSummaryCount}; ratio=${pyramid.levelDataFor(stableLevel).count}:${activeSummaryCount}; L13 direct samples dense=${pyramid.levelDataFor(13).count} optimized=${activeCount}`);
-  console.log(`L${stableLevel}: L13 direct ms dense=${directDenseMs.toFixed(3)} sparse-uncached=${sparseUncachedDirectMs.toFixed(3)} optimized=${directOptimizedMs.toFixed(3)}; old L13→L12=${oldL13ToL12Ms.toFixed(3)}; fused L13→L12=${fusedL13ToL12Ms.toFixed(3)}; old L12→L11=${oldL12ToL11Ms === null ? 'n/a' : oldL12ToL11Ms.toFixed(3)} fused=${fusedL12ToL11Ms === null ? 'n/a' : fusedL12ToL11Ms.toFixed(3)}; old L11→L10=${oldL11ToL10Ms === null ? 'n/a' : oldL11ToL10Ms.toFixed(3)} fused=${fusedL11ToL10Ms === null ? 'n/a' : fusedL11ToL10Ms.toFixed(3)}`);
-  console.log(`L${stableLevel}: weather keyframe ms dense=${legacyResult.keyframeMs.toFixed(3)} sparse-old=${optimized.keyframeMs.toFixed(3)} fused=${fused.keyframeMs.toFixed(3)}; old aggregate-all=${aggregateOptimizedMs.toFixed(3)} dense-aggregate=${aggregateDenseMs.toFixed(3)}`);
+  console.log(`L${stableLevel}: L13 direct ms dense=${directDenseMs.toFixed(3)} sparse-uncached=${sparseUncachedDirectMs.toFixed(3)} separable=${directOptimizedMs.toFixed(3)}; separable L13→L12=${oldL13ToL12Ms.toFixed(3)}; fused L13→L12=${fusedL13ToL12Ms.toFixed(3)}; separable L12→L11=${oldL12ToL11Ms === null ? 'n/a' : oldL12ToL11Ms.toFixed(3)} fused=${fusedL12ToL11Ms === null ? 'n/a' : fusedL12ToL11Ms.toFixed(3)}; separable L11→L10=${oldL11ToL10Ms === null ? 'n/a' : oldL11ToL10Ms.toFixed(3)} fused=${fusedL11ToL10Ms === null ? 'n/a' : fusedL11ToL10Ms.toFixed(3)}`);
+  console.log(`L${stableLevel}: weather keyframe ms dense-reference=${legacyResult.keyframeMs.toFixed(3)} separable=${optimized.keyframeMs.toFixed(3)} fused=${fused.keyframeMs.toFixed(3)}; separable aggregate-all=${aggregateOptimizedMs.toFixed(3)} dense-reference-aggregate=${aggregateDenseMs.toFixed(3)}`);
   const denseTotalPreparationMs = legacyResult.keyframeMs + legacyDotsMappingMs + legacyDotsInstanceMs + legacySquaresMappingMs + legacySquaresInstanceMs;
   const sparseTotalPreparationMs = optimized.keyframeMs + dotsMappingMs + dotsInstanceMs + squaresMappingMs + squaresInstanceMs;
   const fusedTotalPreparationMs = fused.keyframeMs + fusedDotsMappingMs + fusedDotsInstanceMs + fusedSquaresMappingMs + fusedSquaresInstanceMs;
-  console.log(`L${stableLevel}: Dots mapping ms dense=${legacyDotsMappingMs.toFixed(3)} sparse-old=${dotsMappingMs.toFixed(3)} fused=${fusedDotsMappingMs.toFixed(3)}; instances dense=${legacyDotsInstanceMs.toFixed(3)} sparse-old=${dotsInstanceMs.toFixed(3)} fused=${fusedDotsInstanceMs.toFixed(3)}; counts dense=${JSON.stringify(denseDotsMetrics.counts)} sparse-old=${JSON.stringify(sparseDotsMetrics.counts)} fused=${JSON.stringify(fusedDotsMetrics.counts)}; bytes dense=${denseDotsMetrics.bytes} sparse-old=${sparseDotsMetrics.bytes} fused=${fusedDotsMetrics.bytes}`);
-  console.log(`L${stableLevel}: Squares mapping ms dense=${legacySquaresMappingMs.toFixed(3)} sparse-old=${squaresMappingMs.toFixed(3)} fused=${fusedSquaresMappingMs.toFixed(3)}; instances dense=${legacySquaresInstanceMs.toFixed(3)} sparse-old=${squaresInstanceMs.toFixed(3)} fused=${fusedSquaresInstanceMs.toFixed(3)}; count dense=${denseSquaresMetrics.count} sparse-old=${sparseSquaresMetrics.count} fused=${fusedSquaresMetrics.count}; packedBytes dense=${denseSquaresMetrics.packedBytes} sparse-old=${sparseSquaresMetrics.packedBytes} fused=${fusedSquaresMetrics.packedBytes}; allocatedBytes dense=${denseSquaresMetrics.allocatedBytes} sparse-old=${sparseSquaresMetrics.allocatedBytes} fused=${fusedSquaresMetrics.allocatedBytes}`);
-  console.log(`L${stableLevel}: total weather-to-instance-preparation ms dense=${denseTotalPreparationMs.toFixed(3)} sparse-old=${sparseTotalPreparationMs.toFixed(3)} fused=${fusedTotalPreparationMs.toFixed(3)}`);
+  console.log(`L${stableLevel}: Dots mapping ms dense-reference=${legacyDotsMappingMs.toFixed(3)} separable=${dotsMappingMs.toFixed(3)} fused=${fusedDotsMappingMs.toFixed(3)}; instances dense-reference=${legacyDotsInstanceMs.toFixed(3)} separable=${dotsInstanceMs.toFixed(3)} fused=${fusedDotsInstanceMs.toFixed(3)}; counts dense-reference=${JSON.stringify(denseDotsMetrics.counts)} separable=${JSON.stringify(sparseDotsMetrics.counts)} fused=${JSON.stringify(fusedDotsMetrics.counts)}; bytes dense-reference=${denseDotsMetrics.bytes} separable=${sparseDotsMetrics.bytes} fused=${fusedDotsMetrics.bytes}`);
+  console.log(`L${stableLevel}: Squares mapping ms dense-reference=${legacySquaresMappingMs.toFixed(3)} separable=${squaresMappingMs.toFixed(3)} fused=${fusedSquaresMappingMs.toFixed(3)}; instances dense-reference=${legacySquaresInstanceMs.toFixed(3)} separable=${squaresInstanceMs.toFixed(3)} fused=${fusedSquaresInstanceMs.toFixed(3)}; count dense-reference=${denseSquaresMetrics.count} separable=${sparseSquaresMetrics.count} fused=${fusedSquaresMetrics.count}; packedBytes dense-reference=${denseSquaresMetrics.packedBytes} separable=${sparseSquaresMetrics.packedBytes} fused=${fusedSquaresMetrics.packedBytes}; allocatedBytes dense-reference=${denseSquaresMetrics.allocatedBytes} separable=${sparseSquaresMetrics.allocatedBytes} fused=${fusedSquaresMetrics.allocatedBytes}`);
+  console.log(`L${stableLevel}: total weather-to-instance-preparation ms dense-reference=${denseTotalPreparationMs.toFixed(3)} separable=${sparseTotalPreparationMs.toFixed(3)} fused=${fusedTotalPreparationMs.toFixed(3)}`);
   console.log(`L${stableLevel}: physical summary memory one-keyframe old=${mib(summaryBytes)} fused=${mib(fusedSummaryBytes)}; normal two-keyframe old=${mib(summaryBytes * 2)} fused=${mib(fusedSummaryBytes * 2)}; eliminated L13=${mib(l13SummaryBytes)} per keyframe; active-index list=${mib(activeIndexBytes)} source union mask=${mib(weather.potentialWeatherMask?.byteLength || 0)} Dots/Squares mapped=${mib(pyramid.levelDataFor(stableLevel).count * (4 + 8) * Float32Array.BYTES_PER_ELEMENT)}`);
   if (stableLevel === 10) console.log(`L${stableLevel}: dense-vs-optimized sample check=${denseSummary[stableLevel].rainWeightedSumMmh[0] === optimizedSummary[stableLevel].rainWeightedSumMmh[0]}`);
 }

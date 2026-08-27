@@ -285,7 +285,7 @@ sampling zoom is application-owned and latitude-corrected for Globe camera behav
 active window is represented by inclusive L15 integer bounds, snapped outward
 to the coarsest L10 interval. A topology also has an explicit contiguous LOD
 range; it builds only the requested levels and only the transition parents,
-direct pairs, and centered aggregate contributions whose endpoints exist.
+direct pairs, and compact centered aggregate relations whose endpoints exist.
 When lower levels are requested, the complete L13→L12→L11→L10 dependency chain
 is required; missing levels fail clearly. Thus panning and rotating do not
 alter displayed weather density or sample identity, while low display LODs do
@@ -327,13 +327,19 @@ likewise reuses transition-parent and direct-pair arrays
 when both endpoint objects are retained. Removed levels become unreachable;
 new levels are constructed normally.
 
-Centered contribution plans and geometric `totalWeight` arrays use a bounded
-cache keyed by relative dyadic structure (level pair, dimensions,
-origins/parity, and clipping shape), never absolute geographic position. Before
-a plan is reused, an exact verifier checks every contribution offset, parent
-index, and Float64 weight against the new packed topology; equal structural
-keys then prove the derived total weights are translation invariant.
-Differently shaped support-edge windows rebuild their plans. Range-only pyramid
+Centered aggregation relations and geometric `totalWeight` arrays use bounded
+caches keyed by relative dyadic structure (level pair, dimensions,
+origins/parity, and clipping shape), never absolute geographic position. A
+relation retains compact X- and Y-axis candidate tables: each fine column and
+row stores its valid local coarse indices and its untrimmed one- or two-anchor
+cardinality. The production evaluator combines those tables in the exact
+X-outer/Y-inner order, clips support-edge candidates, and applies the same
+per-child normalization as the reference dense relation. Thus retained
+aggregation topology is O(width + height), with no offset array, parent-index
+list, or Float64 weight per fine sample. Dense contribution construction is
+kept only by verification/benchmark reference paths; production cache hits do
+not perform an O(sample-count) topology verification traversal. Differently
+shaped support-edge windows rebuild their compact relations. Range-only pyramid
 replacement carries sampling geometry and its compatible source-frame spatial
 cache only when the exact packed level object is retained; this preserves the
 provider's prepared lookup and potential-support state without coupling the
@@ -366,7 +372,7 @@ representation-independent physical semantics.
 For the explicit rain-only prepared batch capability used by the current local
 sequence, a coarse-only request for L10, L11, or L12 fuses the prepared L13
 rain values directly into the L12 summary through the same centered L13→L12
-contribution map. This path does not materialize an L13 summary object; it
+compact L13→L12 centered relation. This path does not materialize an L13 summary object; it
 retains the cached L12 total weights, tests coverage thresholds against the
 unrounded physical values, and applies the existing Float32 L13 storage
 boundary before weighted sums and maxima are accumulated. L12→L11→L10 then
@@ -399,12 +405,14 @@ remains physical mm/h, including values above 50 mm/h. Coverage arrays retain
 distribution information that a mean alone would lose, and hazard maxima are
 retained alongside coverage and weighted severity.
 
-Aggregate-side centered contribution mappings are separate from LOD transition
-ownership. They exist only for L13→L12→L11→L10. An aligned fine coordinate contributes with weight 1; a half-step
+Aggregate-side centered relations are separate from LOD transition ownership.
+They exist only for L13→L12→L11→L10. An aligned fine coordinate contributes with weight 1; a half-step
 coordinate splits 0.5/0.5 on that axis, with X/Y weights multiplied. Candidates
 outside the finite selected support are omitted and the remaining weights for
 that fine sample are divided by their sum, so every child retains total support
-weight 1. For each child summary contribution `w`, all additive statistics and
+weight 1. The compact relation preserves the dense reference's X-outer,
+Y-inner candidate order, including one-cell support-edge/corner clipping. For
+each child summary contribution `w`, all additive statistics and
 coverage weights receive `w * child.totalWeight` or `w * child statistic`, and
 maxima retain the maximum over positive support. This makes the summaries
 recursively composable without re-thresholding child means. The summary storage

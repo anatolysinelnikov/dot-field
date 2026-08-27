@@ -15,9 +15,10 @@ import {
   lodRangeForStableLevel
 } from '../src/engine/geographic-lod.js';
 import {
+  buildCenteredContributions,
   GeographicWeatherPyramid,
-  resetAggregationPlanCache,
-  aggregationPlanCacheStats
+  resetAggregationRelationCache,
+  aggregationRelationCacheStats
 } from '../src/engine/geographic-weather-pyramid.js';
 import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
@@ -125,6 +126,46 @@ function installDenseGeometryFallback(pyramid) {
   };
 }
 
+function installDenseAggregationReference(pyramid) {
+  const range = pyramid.topology.levelRange;
+  const relationStarted = now();
+  const centeredRelations = new Map();
+  for (let level = range.minLevel + 1; level <= Math.min(13, range.maxLevel); level++) {
+    centeredRelations.set(level, buildCenteredContributions(pyramid.levels.get(level), pyramid.levels.get(level - 1)));
+  }
+  const relationMs = now() - relationStarted;
+  const totalWeightsStarted = now();
+  const totalWeights = new Map();
+  if (pyramid.levels.has(13)) {
+    const referenceWeights = new Float32Array(pyramid.levels.get(13).count);
+    referenceWeights.fill(1);
+    totalWeights.set(13, referenceWeights);
+    for (let level = 12; level >= range.minLevel; level--) {
+      const childWeights = totalWeights.get(level + 1);
+      const relation = centeredRelations.get(level + 1);
+      if (!childWeights || !relation || !pyramid.levels.has(level)) continue;
+      const weights = new Float32Array(pyramid.levels.get(level).count);
+      for (let childIndex = 0; childIndex < childWeights.length; childIndex++) {
+        const start = relation.offsets[childIndex];
+        const end = relation.offsets[childIndex + 1];
+        for (let contributionIndex = start; contributionIndex < end; contributionIndex++) {
+          weights[relation.parentIndices[contributionIndex]] += relation.weights[contributionIndex] * childWeights[childIndex];
+        }
+      }
+      totalWeights.set(level, weights);
+    }
+  }
+  pyramid.centeredRelations = centeredRelations;
+  pyramid.totalWeights = totalWeights;
+  pyramid.topologySetupTimings = {
+    relationMs,
+    totalWeightsMs: now() - totalWeightsStarted,
+    totalMs: now() - relationStarted,
+    relationHits: 0,
+    totalWeightHits: 0
+  };
+}
+
 function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)];
@@ -158,7 +199,10 @@ function phaseBreakdown(window, stableLevel, reuse, dense) {
   const range = lodRangeForStableLevel(stableLevel);
   const topology = new GeographicLodTopology(window, range);
   const pyramid = new GeographicWeatherPyramid(Float32Array, topology, { reuse });
-  if (dense) installDenseGeometryFallback(pyramid);
+  if (dense) {
+    installDenseAggregationReference(pyramid);
+    installDenseGeometryFallback(pyramid);
+  }
   pyramid.samplingGeometries.clear();
   const referenceLevel = stableLevel <= 13 ? 13 : stableLevel;
   const frame0 = weather.prepareFrame(62 / TEMPORAL_FRAME_COUNT);
@@ -196,7 +240,7 @@ function phaseBreakdown(window, stableLevel, reuse, dense) {
   void dots0; void dots1; void squares0; void squares1; void dotsInstanceMs; void squaresInstanceMs;
   return {
     topologyConstructionMs: topology.constructionTimings.totalMs,
-    centeredContributionMs: pyramid.topologySetupTimings.contributionsMs,
+    relationSetupMs: pyramid.topologySetupTimings.relationMs,
     totalWeightMs: pyramid.topologySetupTimings.totalWeightsMs,
     setTopologyMs: pyramid.topologySetupTimings.totalMs,
     providerSamplingGeometryMs,
@@ -209,27 +253,31 @@ function phaseBreakdown(window, stableLevel, reuse, dense) {
     squaresInstanceMs: measuredSquaresInstanceMs,
     sampleCount: pyramid.levelDataFor(stableLevel).count,
     activeSampleCount: geometry.potentialActiveIndices?.length ?? geometry.baseIndex.length,
-    cache: aggregationPlanCacheStats()
+    cache: aggregationRelationCacheStats()
   };
 }
 
 function replacementMs(window, nextWindow, stableLevel, reuse, dense, renderer) {
   const range = lodRangeForStableLevel(stableLevel);
   const initialPyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(window, range), { reuse });
-  if (dense) installDenseGeometryFallback(initialPyramid);
+  if (dense) {
+    installDenseAggregationReference(initialPyramid);
+    installDenseGeometryFallback(initialPyramid);
+  }
   const layer = renderer === 'dots' ? new GeographicDotsLayer(initialPyramid) : new GeographicSquaresLayer(initialPyramid);
   layer.setActive(true);
   layer.setLevelData(initialPyramid.levelDataFor(stableLevel), 62 / TEMPORAL_FRAME_COUNT);
   const started = now();
   const topology = new GeographicLodTopology(nextWindow, range);
   initialPyramid.setTopology(topology, { reuse });
+  if (dense) installDenseAggregationReference(initialPyramid);
   layer.setTopology(topology);
   layer.setLevelData(initialPyramid.levelDataFor(stableLevel), 62 / TEMPORAL_FRAME_COUNT);
   return {
     totalMs: now() - started,
     topologyConstructionMs: topology.constructionTimings.totalMs,
     setTopologyMs: initialPyramid.topologySetupTimings.totalMs,
-    cache: aggregationPlanCacheStats()
+    cache: aggregationRelationCacheStats()
   };
 }
 
@@ -240,7 +288,7 @@ function runCase(stableLevel, direction, reuse) {
   const dotsSamples = [];
   const squaresSamples = [];
   for (let repeat = 0; repeat < REPEATS; repeat++) {
-    resetAggregationPlanCache();
+    resetAggregationRelationCache();
     // Baseline measures an uncached replacement. Optimized phase timings use
     // the second construction after the initial window has populated the
     // bounded structural plans, matching an adjacent production pan.
@@ -255,7 +303,7 @@ function runCase(stableLevel, direction, reuse) {
     const values = samples.map((sample) => sample[key]);
     return { median: median(values), p95: percentile(values, 0.95), max: Math.max(...values) };
   };
-  const phaseKeys = ['topologyConstructionMs', 'centeredContributionMs', 'totalWeightMs', 'setTopologyMs', 'providerSamplingGeometryMs', 'sourceFrameCacheMs', 'firstWeatherKeyframeMs', 'secondWeatherKeyframeMs', 'dotsMappingMs', 'squaresMappingMs', 'dotsInstanceMs', 'squaresInstanceMs'];
+  const phaseKeys = ['topologyConstructionMs', 'relationSetupMs', 'totalWeightMs', 'setTopologyMs', 'providerSamplingGeometryMs', 'sourceFrameCacheMs', 'firstWeatherKeyframeMs', 'secondWeatherKeyframeMs', 'dotsMappingMs', 'squaresMappingMs', 'dotsInstanceMs', 'squaresInstanceMs'];
   const phase = Object.fromEntries(phaseKeys.map((key) => [key, summarize(phaseSamples, key)]));
   const replacement = {
     dots: summarize(dotsSamples, 'totalMs'),

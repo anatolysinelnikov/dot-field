@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { RAIN_COVERAGE_THRESHOLDS_MMH, WEATHER_REFERENCE_LEVEL, GeographicWeatherPyramid, aggregateWeatherSummary, createWeatherSummary } from '../src/engine/geographic-weather-pyramid.js';
+import { RAIN_COVERAGE_THRESHOLDS_MMH, WEATHER_REFERENCE_LEVEL, GeographicWeatherPyramid, aggregateWeatherSummary, buildCenteredContributions, forEachCenteredContributionRelationEntry, createWeatherSummary } from '../src/engine/geographic-weather-pyramid.js';
 import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
@@ -102,12 +102,17 @@ for (const requested of [[12, 13], [13, 14], [14, 15]]) {
 
 let centeredWeightError = 0; let centeredEntries = 0; let centeredMappingBytes = 0;
 for (let level = MIN_GRID_LEVEL + 1; level <= WEATHER_REFERENCE_LEVEL; level++) {
-  const contributions = pyramid.topologyFor(level).contributionsToParent; check(Boolean(contributions), `L${level}->L${level - 1} has centered aggregate contributions`);
-  for (let child = 0; child < contributions.offsets.length - 1; child++) { let weight = 0; for (let index = contributions.offsets[child]; index < contributions.offsets[child + 1]; index++) { weight += contributions.weights[index]; centeredEntries++; } centeredWeightError = max(centeredWeightError, Math.abs(weight - 1)); }
-  centeredMappingBytes += contributions.offsets.byteLength + contributions.parentIndices.byteLength + contributions.weights.byteLength;
+  const relation = pyramid.topologyFor(level).centeredRelationToParent; check(Boolean(relation), `L${level}->L${level - 1} has centered aggregate relation`);
+  centeredMappingBytes += relation.x.candidateCounts.byteLength + relation.x.rawCandidateCounts.byteLength + relation.x.candidateIndices.byteLength
+    + relation.y.candidateCounts.byteLength + relation.y.rawCandidateCounts.byteLength + relation.y.candidateIndices.byteLength;
+  for (let child = 0; child < relation.fineWidth * relation.fineHeight; child++) {
+    let weight = 0;
+    forEachCenteredContributionRelationEntry(relation, child, (_parentIndex, contributionWeight) => { weight += contributionWeight; centeredEntries++; });
+    centeredWeightError = max(centeredWeightError, Math.abs(weight - 1));
+  }
 }
-check(pyramid.topologyFor(14).contributionsToParent === null && pyramid.topologyFor(15).contributionsToParent === null, 'L14/L15 have no physical centered aggregation mapping');
-console.log(`aggregate contribution support error: ${centeredWeightError}; entries=${centeredEntries}; bytes=${centeredMappingBytes}`); check(centeredWeightError <= FLOAT64_TOLERANCE, 'aggregate contribution weights conserve each child support');
+check(pyramid.topologyFor(14).centeredRelationToParent === null && pyramid.topologyFor(15).centeredRelationToParent === null, 'L14/L15 have no physical centered aggregation relation');
+console.log(`aggregate relation support error: ${centeredWeightError}; logical entries=${centeredEntries}; retained axis bytes=${centeredMappingBytes}`); check(centeredWeightError <= FLOAT64_TOLERANCE, 'aggregate relation weights conserve each child support');
 
 for (const level of DIRECT_LEVELS) {
   const summary = summaries[level]; const compact = float32Summaries[level]; let directError = 0; let compactError = 0; let highRain = 0;
@@ -153,7 +158,10 @@ for (const level of AGGREGATE_LEVELS) {
   for (let threshold = 0; threshold < RAIN_COVERAGE_THRESHOLDS_MMH.length; threshold++) check(Math.abs(sum(summaries[level].rainCoverageWeight[threshold]) - sum(summaries[13].rainCoverageWeight[threshold])) <= FLOAT64_TOLERANCE, `L13->L${level} rain coverage conservation at ${RAIN_COVERAGE_THRESHOLDS_MMH[threshold]}`);
   for (const fieldName of ['rainMaxMmh', 'stormMaxSeverity', 'hailMaxSeverity']) check(Math.abs(maximum(summaries[level][fieldName]) - maximum(summaries[13][fieldName])) <= FLOAT64_TOLERANCE, `L13->L${level} ${fieldName} maximum preservation`);
 }
-const composed = composeContributions(pyramid.topologyFor(13).contributionsToParent, pyramid.topologyFor(12).contributionsToParent);
+const composed = composeContributions(
+  buildCenteredContributions(pyramid.levels.get(13), pyramid.levels.get(12)),
+  buildCenteredContributions(pyramid.levels.get(12), pyramid.levels.get(11))
+);
 const composedL11 = aggregateWeatherSummary(pyramid.levels.get(11), summaries[13], composed, null, Float64Array);
 let recursiveError = maxSummaryDifference(composedL11, summaries[11]); console.log(`L13->L12->L11 recursive/composed error=${recursiveError}`); check(recursiveError <= FLOAT64_TOLERANCE, 'aggregate recursive/composed equivalence');
 

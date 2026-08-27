@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { setActiveWeatherField } from '../src/engine/geography.js';
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
-import { evaluateDirectWeatherSummary, aggregateWeatherSummary, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
+import { buildCenteredContributions, evaluateDirectWeatherSummary, aggregateWeatherSummary, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicLodTopology, lodRangeForStableLevel } from '../src/engine/geographic-lod.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
@@ -27,6 +27,7 @@ setActiveWeatherField(weather);
 const topology = new GeographicLodTopology(undefined, lodRangeForStableLevel(10));
 const optimizedPyramid = new GeographicWeatherPyramid(Float32Array, topology);
 const densePyramid = new GeographicWeatherPyramid(Float32Array, topology);
+for (const level of [11, 12, 13]) densePyramid.centeredRelations.set(level, buildCenteredContributions(topology.levels.get(level), topology.levels.get(level - 1)));
 const optimizedGeometry = optimizedPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
 const denseGeometry = { ...optimizedGeometry };
 delete denseGeometry.potentialActiveIndices;
@@ -39,7 +40,7 @@ function denseChain(pyramid, frame, minimumLevel) {
     summary = aggregateWeatherSummary(
       pyramid.levels.get(level),
       summary,
-      pyramid.contributions.get(level + 1),
+      pyramid.centeredRelations.get(level + 1),
       null,
       Float32Array,
       pyramid.totalWeights.get(level)

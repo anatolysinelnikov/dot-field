@@ -9,7 +9,7 @@ import {
   lngLatToMercator,
   normalizeCanonicalWindow
 } from '../src/engine/geographic-lod.js';
-import { buildCenteredContributions, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
+import { buildCenteredContributionRelation, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { prepareGeographicFieldFrame, setActiveWeatherField, WEATHER_REGION } from '../src/engine/geography.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
 
@@ -128,14 +128,19 @@ function oldCentered(fine, coarse) {
   return { offsets, parentIndices: Uint32Array.from(parentIndices), weights: Float64Array.from(weights) };
 }
 
-function oldTopologySetup(topology, range) {
-  const started = performance.now();
-  const contributionsStarted = performance.now();
+function oldSetupContributions(topology, range) {
   const contributions = new Map();
-  for (let level = range.minLevel + 1; level <= range.maxLevel; level++) {
+  for (let level = range.minLevel + 1; level <= Math.min(13, range.maxLevel); level++) {
     contributions.set(level, oldCentered(topology.levels.get(level), topology.levels.get(level - 1)));
   }
-  const contributionsMs = performance.now() - contributionsStarted;
+  return contributions;
+}
+
+function oldTopologySetup(topology, range) {
+  const started = performance.now();
+  const relationStarted = performance.now();
+  const contributions = oldSetupContributions(topology, range);
+  const relationMs = performance.now() - relationStarted;
   const totalWeightsStarted = performance.now();
   const totalWeights = new Map();
   if (topology.levels.has(13)) {
@@ -159,12 +164,27 @@ function oldTopologySetup(topology, range) {
     }
   }
   return {
-    contributionsMs,
+    relationMs,
     totalWeightsMs: performance.now() - totalWeightsStarted,
     totalMs: performance.now() - started,
     contributions,
     totalWeights
   };
+}
+
+function denseContributionBytes(contributions) {
+  return contributions.offsets.byteLength + contributions.parentIndices.byteLength + contributions.weights.byteLength;
+}
+
+function centeredRelationBytes(relation) {
+  return relation.x.candidateCounts.byteLength + relation.x.rawCandidateCounts.byteLength + relation.x.candidateIndices.byteLength
+    + relation.y.candidateCounts.byteLength + relation.y.rawCandidateCounts.byteLength + relation.y.candidateIndices.byteLength;
+}
+
+function denseContributionBytesForRelation(fineLevel, relation) {
+  let entries = 0;
+  for (const xCount of relation.x.candidateCounts) for (const yCount of relation.y.candidateCounts) entries += xCount * yCount;
+  return (fineLevel.count + 1) * Uint32Array.BYTES_PER_ELEMENT + entries * (Uint32Array.BYTES_PER_ELEMENT + Float64Array.BYTES_PER_ELEMENT);
 }
 
 function legacyTopologyBytes(topology) {
@@ -303,9 +323,13 @@ function runCase(name, window, range, fullSupport) {
   const oldCenteredStarted = performance.now();
   for (let level = Math.max(MIN_GRID_LEVEL + 1, range.minLevel + 1); level <= Math.min(13, range.maxLevel); level++) oldCentered(legacy.levels.get(level), legacy.levels.get(level - 1));
   const oldCenteredMs = performance.now() - oldCenteredStarted;
-  const packedCenteredStarted = performance.now();
-  for (let level = Math.max(MIN_GRID_LEVEL + 1, range.minLevel + 1); level <= Math.min(13, range.maxLevel); level++) buildCenteredContributions(packed.levelDataFor(level), packed.levelDataFor(level - 1));
-  const packedCenteredMs = performance.now() - packedCenteredStarted;
+  const packedRelationStarted = performance.now();
+  const packedRelations = new Map();
+  for (let level = Math.max(MIN_GRID_LEVEL + 1, range.minLevel + 1); level <= Math.min(13, range.maxLevel); level++) packedRelations.set(level, buildCenteredContributionRelation(packed.levelDataFor(level), packed.levelDataFor(level - 1)));
+  const packedRelationMs = performance.now() - packedRelationStarted;
+  const oldDenseContributions = oldSetupContributions(legacy, range);
+  const oldContributionBytes = [...oldDenseContributions].filter(([level]) => level <= 13).reduce((sum, [, contributions]) => sum + denseContributionBytes(contributions), 0);
+  const packedRelationBytes = [...packedRelations.values()].reduce((sum, relation) => sum + centeredRelationBytes(relation), 0);
   const oldSetup = oldTopologySetup(legacy, range);
   const replacement = replacementMetrics(window);
   const oldReplacement = oldReplacementMetrics(window);
@@ -321,9 +345,10 @@ function runCase(name, window, range, fullSupport) {
     perLevelGridMs: { legacy: legacy.levelTimes, packed: packed.constructionTimings.levels },
     transitionParentsMs: { legacy: legacy.transitionParentsMs, packed: packed.constructionTimings.transitionParentsMs },
     directPairsMs: { legacy: legacy.directPairsMs, packed: packed.constructionTimings.directPairsMs },
-    centeredContributionsMs: { legacy: oldCenteredMs, packed: packedCenteredMs },
+    aggregationRelationSetupMs: { legacyDenseReference: oldCenteredMs, packedSeparable: packedRelationMs },
+    aggregationRelationBytes: { legacyDenseReference: oldContributionBytes, packedSeparable: packedRelationBytes },
     legacySetTopologyMs: {
-      contributionsMs: oldSetup.contributionsMs,
+      relationSetupMs: oldSetup.relationMs,
       totalWeightsMs: oldSetup.totalWeightsMs,
       totalMs: oldSetup.totalMs
     },
@@ -349,14 +374,15 @@ function runFullSupportCase(label, range) {
   let legacyMetrics;
   if (process.env.PACKED_TOPOLOGY_INCLUDE_LEGACY_FULL === '1') {
     const legacy = oldBuildTopology(supportWindow, range);
-    const centeredStarted = performance.now();
-    for (let level = Math.max(MIN_GRID_LEVEL + 1, range.minLevel + 1); level <= Math.min(13, range.maxLevel); level++) oldCentered(legacy.levels.get(level), legacy.levels.get(level - 1));
+    const relationStarted = performance.now();
+    const legacyRelations = oldSetupContributions(legacy, range);
     legacyMetrics = {
       completeConstructionMs: legacy.totalMs,
       perLevelGridMs: legacy.levelTimes,
       transitionParentsMs: legacy.transitionParentsMs,
       directPairsMs: legacy.directPairsMs,
-      centeredContributionsMs: performance.now() - centeredStarted,
+      aggregationRelationSetupMs: performance.now() - relationStarted,
+      aggregationRelationBytes: [...legacyRelations].filter(([level]) => level <= 13).reduce((sum, [, relation]) => sum + denseContributionBytes(relation), 0),
       memory: { legacyTypedBytes: legacyTopologyBytes(legacy), oldCounts: oldRetainedCounts(legacy) },
       counts: Object.fromEntries([...legacy.levels].map(([level, data]) => [`L${level}`, data.samples.length]))
     };
@@ -377,7 +403,8 @@ function runFullSupportCase(label, range) {
       perLevelGridMs: null,
       transitionParentsMs: null,
       directPairsMs: null,
-      centeredContributionsMs: null,
+      aggregationRelationSetupMs: null,
+      aggregationRelationBytes: null,
       memory: { legacyTypedBytes, oldCounts: { sampleObjects, sampleIds: sampleObjects, mapEntries: sampleObjects + (packed.levels.size - 1) * 3, nestedChildArrays } },
       counts
     };
@@ -386,6 +413,8 @@ function runFullSupportCase(label, range) {
   const geometryStarted = performance.now();
   const geometry = pyramid.prepareSamplingGeometry(range.maxLevel, frame);
   const packedGeometryMs = performance.now() - geometryStarted;
+  const packedAggregationRelationBytes = [...pyramid.centeredRelations].reduce((sum, [level, relation]) => sum + centeredRelationBytes(relation), 0);
+  const estimatedDenseAggregationBytes = [...pyramid.centeredRelations].reduce((sum, [level, relation]) => sum + denseContributionBytesForRelation(packed.levelDataFor(level), relation), 0);
   return {
     name: `full-support ${label}`,
     fullSupport: true,
@@ -396,7 +425,8 @@ function runFullSupportCase(label, range) {
     perLevelGridMs: { legacy: legacyMetrics.perLevelGridMs, packed: packed.constructionTimings.levels },
     transitionParentsMs: { legacy: legacyMetrics.transitionParentsMs, packed: packed.constructionTimings.transitionParentsMs },
     directPairsMs: { legacy: legacyMetrics.directPairsMs, packed: packed.constructionTimings.directPairsMs },
-    centeredContributionsMs: { legacy: legacyMetrics.centeredContributionsMs, packed: pyramid.topologySetupTimings.contributionsMs },
+    aggregationRelationSetupMs: { legacyDenseReference: legacyMetrics.aggregationRelationSetupMs, packedSeparable: pyramid.topologySetupTimings.relationMs },
+    aggregationRelationBytes: { legacyDenseReference: legacyMetrics.aggregationRelationBytes ?? estimatedDenseAggregationBytes, packedSeparable: packedAggregationRelationBytes },
     setTopologyMs: pyramid.topologySetupTimings,
     providerSamplingGeometryMs: { legacy: null, packed: packedGeometryMs, bytes: frame.samplingGeometryBytes(geometry) },
     replacementMs: null,

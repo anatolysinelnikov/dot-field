@@ -10,7 +10,7 @@ import {
   mercatorXForIndex,
   mercatorYForIndex
 } from '../src/engine/geographic-lod.js';
-import { buildCenteredContributions } from '../src/engine/geographic-weather-pyramid.js';
+import { buildCenteredContributionRelation, forEachCenteredContributionRelationEntry } from '../src/engine/geographic-weather-pyramid.js';
 
 const LEVELS = [10, 11, 12, 13, 14, 15];
 const FULL_RANGE = { minLevel: MIN_GRID_LEVEL, maxLevel: MAX_GRID_LEVEL };
@@ -131,6 +131,28 @@ function compareTyped(name, packed, reference, tolerance = 0) {
   check(maxError <= tolerance, `${name} max error=${maxError}`);
 }
 
+function compareCenteredRelation(name, relation, reference) {
+  let referenceIndex = 0;
+  let mismatch = null;
+  for (let childIndex = 0; childIndex < relation.fineWidth * relation.fineHeight; childIndex++) {
+    let actualCount = 0;
+    forEachCenteredContributionRelationEntry(relation, childIndex, (parentIndex, weight) => {
+      if (mismatch) return;
+      if (referenceIndex >= reference.parentIndices.length
+        || reference.parentIndices[referenceIndex] !== parentIndex
+        || reference.weights[referenceIndex] !== weight) {
+        mismatch = `child=${childIndex} entry=${actualCount} expected=${reference.parentIndices[referenceIndex]}/${reference.weights[referenceIndex]} actual=${parentIndex}/${weight}`;
+        return;
+      }
+      actualCount++;
+      referenceIndex++;
+    });
+    const expectedCount = reference.offsets[childIndex + 1] - reference.offsets[childIndex];
+    if (!mismatch && actualCount !== expectedCount) mismatch = `child=${childIndex} expected count=${expectedCount} actual=${actualCount}`;
+  }
+  check(!mismatch && referenceIndex === reference.parentIndices.length, `${name} centered relation exact sequence${mismatch ? ` (${mismatch})` : ''}`);
+}
+
 function verifyWindow(rawWindow, name) {
   const canonicalWindow = normalizeCanonicalWindow(rawWindow);
   const topology = new GeographicLodTopology(canonicalWindow, FULL_RANGE);
@@ -175,11 +197,9 @@ function verifyWindow(rawWindow, name) {
     compareTyped(`${name} L${level} parent-major child order`, Uint32Array.from(packedChildren), Uint32Array.from(referenceChildren));
     compareTyped(`${name} L${level}<->L${level + 1} direct pairs`, topology.directPairsFor(level - 1, level), oldPairs(referenceCoarse, referenceFine));
     if (level <= 13) {
-      const packedContributions = buildCenteredContributions(packedFine, packedCoarse);
+      const packedRelation = buildCenteredContributionRelation(packedFine, packedCoarse);
       const referenceContributions = oldCentered(referenceFine, referenceCoarse);
-      compareTyped(`${name} L${level}->L${level - 1} contribution offsets`, packedContributions.offsets, referenceContributions.offsets);
-      compareTyped(`${name} L${level}->L${level - 1} contribution parents`, packedContributions.parentIndices, referenceContributions.parentIndices);
-      compareTyped(`${name} L${level}->L${level - 1} contribution weights`, packedContributions.weights, referenceContributions.weights, Number.EPSILON);
+      compareCenteredRelation(`${name} L${level}->L${level - 1}`, packedRelation, referenceContributions);
     }
   }
 }

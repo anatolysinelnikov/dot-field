@@ -126,7 +126,7 @@ function runTransition(Layer, fromLevel, toLevel, optimized) {
   const toRange = lodRangeForStableLevel(toLevel);
   const rangeChanged = oldTopology.levelRange.minLevel !== toRange.minLevel || oldTopology.levelRange.maxLevel !== toRange.maxLevel;
   const oldGeometry = new Map(pyramid.samplingGeometries);
-  const oldContributions = pyramid.contributions;
+  const oldRelations = pyramid.centeredRelations;
   const oldTotalWeights = pyramid.totalWeights;
   const oldTemporal = layer.temporal;
   let replacementCalls = 0;
@@ -145,8 +145,8 @@ function runTransition(Layer, fromLevel, toLevel, optimized) {
         if (nextTopology.directPairs.has(level)) check(nextTopology.directPairs.get(level) === relation, `L${fromLevel}->L${toLevel} reuses direct pairs L${level}`);
       }
       pyramid.setTopology(nextTopology, { preserveCompatibleState: true });
-      for (const [level, plan] of oldContributions) {
-        if (pyramid.contributions.has(level)) check(pyramid.contributions.get(level) === plan, `L${fromLevel}->L${toLevel} reuses centered contributions L${level}`);
+      for (const [level, relation] of oldRelations) {
+        if (pyramid.centeredRelations.has(level)) check(pyramid.centeredRelations.get(level) === relation, `L${fromLevel}->L${toLevel} reuses centered aggregation relation L${level}`);
       }
       for (const [level, weights] of oldTotalWeights) {
         if (pyramid.totalWeights.has(level)) check(pyramid.totalWeights.get(level) === weights, `L${fromLevel}->L${toLevel} reuses totalWeight L${level}`);
