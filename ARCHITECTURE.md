@@ -106,7 +106,8 @@ available. Metadata and the small immutable support sidecar may load while the
 basemap starts. After MapLibre renders the initial tiles, the application asks
 only for source frame 0; weather custom layers are created as soon as that
 frame is validated. The remaining frames prefetch sequentially in the
-background and playback enables after that full prefetch, while timeline jumps
+background; the opening adjacent pair is then warmed again in the bounded LRU
+before playback enables. Timeline jumps
 request their required source frames without blanking the last valid weather.
 The request generation guard prevents late frame loads from committing an older
 timeline target. This is a startup/network priority policy, not a renderer

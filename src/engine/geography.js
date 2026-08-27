@@ -168,6 +168,11 @@ export function beginActiveWeatherLoad({ onTiming = null } = {}) {
       const field = await this.loadSequence(0);
       if (field.frameCount === undefined) return field;
       await sequenceLoad.prefetchFrames(Array.from({ length: field.frameCount - 1 }, (_, index) => index + 1), { concurrency });
+      // The bounded LRU intentionally cannot retain all 19 frames. Restore
+      // the opening adjacent pair after the forward pass so enabled playback
+      // can start at t=0 without an avoidable on-demand stall.
+      await sequenceLoad.requestSourceFrame(0);
+      await sequenceLoad.requestSourceFrame(1);
       return field;
     }
   };
