@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { setActiveWeatherField } from '../src/engine/geography.js';
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
 import { buildCenteredContributions, evaluateDirectWeatherSummary, aggregateWeatherSummary, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
-import { GeographicLodTopology, lodRangeForStableLevel } from '../src/engine/geographic-lod.js';
+import { GeographicLodTopology, lodRangeForStableLevel, mercatorXForIndex, mercatorYForIndex } from '../src/engine/geographic-lod.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
@@ -29,9 +29,17 @@ const optimizedPyramid = new GeographicWeatherPyramid(Float32Array, topology);
 const densePyramid = new GeographicWeatherPyramid(Float32Array, topology);
 for (const level of [11, 12, 13]) densePyramid.centeredRelations.set(level, buildCenteredContributions(topology.levels.get(level), topology.levels.get(level - 1)));
 const optimizedGeometry = optimizedPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
-const denseGeometry = { ...optimizedGeometry };
+const denseLevelData = topology.levels.get(13);
+const denseLongitudes = new Float64Array(denseLevelData.count);
+const denseLatitudes = new Float64Array(denseLevelData.count);
+for (let index = 0; index < denseLevelData.count; index++) {
+  denseLongitudes[index] = mercatorXForIndex(denseLevelData, index) * 360 - 180;
+  const mercatorY = mercatorYForIndex(denseLevelData, index);
+  denseLatitudes[index] = Math.atan(Math.sinh(Math.PI * (1 - 2 * mercatorY))) * 180 / Math.PI;
+}
+const densePreparedGeometry = weather.prepareSamplingGeometry(denseLongitudes, denseLatitudes);
+const denseGeometry = { ...densePreparedGeometry };
 delete denseGeometry.potentialActiveIndices;
-delete denseGeometry.potentialWeatherMask;
 
 function denseChain(pyramid, frame, minimumLevel) {
   let summary = evaluateDirectWeatherSummary(pyramid.levels.get(13), frame, null, Float32Array, denseGeometry, pyramid.totalWeights.get(13));

@@ -8,7 +8,7 @@ import {
   RAIN_COVERAGE_THRESHOLDS_MMH,
   GeographicWeatherPyramid
 } from '../src/engine/geographic-weather-pyramid.js';
-import { GeographicLodTopology, lodRangeForStableLevel, canonicalWindowFromMercatorBounds, lngLatToMercator } from '../src/engine/geographic-lod.js';
+import { GeographicLodTopology, lodRangeForStableLevel, canonicalWindowFromMercatorBounds, lngLatToMercator, mercatorXForIndex, mercatorYForIndex } from '../src/engine/geographic-lod.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
@@ -36,7 +36,17 @@ const fusedPyramid = new GeographicWeatherPyramid(Float32Array, topology);
 const oldPyramid = new GeographicWeatherPyramid(Float32Array, topology);
 for (const level of [11, 12, 13]) oldPyramid.centeredRelations.set(level, buildCenteredContributions(topology.levels.get(level), topology.levels.get(level - 1)));
 const geometry = fusedPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
-const oldGeometry = oldPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
+const oldLevelData = topology.levels.get(13);
+const oldLongitudes = new Float64Array(oldLevelData.count);
+const oldLatitudes = new Float64Array(oldLevelData.count);
+for (let index = 0; index < oldLevelData.count; index++) {
+  oldLongitudes[index] = mercatorXForIndex(oldLevelData, index) * 360 - 180;
+  const mercatorY = mercatorYForIndex(oldLevelData, index);
+  oldLatitudes[index] = Math.atan(Math.sinh(Math.PI * (1 - 2 * mercatorY))) * 180 / Math.PI;
+}
+const oldGeometryPrepared = weather.prepareSamplingGeometry(oldLongitudes, oldLatitudes);
+const oldGeometry = { ...oldGeometryPrepared };
+delete oldGeometry.potentialActiveIndices;
 
 function oldChain(frame, minimumLevel, reusable = null) {
   let summary = evaluateDirectWeatherSummary(
@@ -47,6 +57,10 @@ function oldChain(frame, minimumLevel, reusable = null) {
     oldGeometry,
     oldPyramid.totalWeights.get(13)
   );
+  // Keep the dense-reference values but use the same immutable active set for
+  // renderer packing, so this verifier compares representation rather than
+  // intentionally rendering every guaranteed-dry canonical sample.
+  summary.potentialActiveIndices = geometry.potentialActiveIndices;
   const summaries = { 13: summary };
   for (let level = 12; level >= minimumLevel; level--) {
     summary = aggregateWeatherSummary(
@@ -172,7 +186,7 @@ for (const sequence of [testTimes, reverseTimes]) {
 
 // The active sets and reconstructed spatial geometry are shared by every temporal frame.
 if (geometry.potentialActiveIndices.length !== 53567) console.log(`observed L13 potential-active count=${geometry.potentialActiveIndices.length}`);
-if (geometry.potentialActiveIndices.length !== oldGeometry.potentialActiveIndices.length) throw new Error('old and fused prepared geometries have different active sets');
+if (geometry.potentialActiveIndices.length !== oldGeometryPrepared.potentialActiveIndices.length) throw new Error('old and fused prepared geometries have different active sets');
 
 // A generic RealWeatherField has no explicit rain-only batch capability. It must retain the old L13 path.
 const fallbackField = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));

@@ -8,7 +8,7 @@ import {
   RAIN_COVERAGE_THRESHOLDS_MMH,
   GeographicWeatherPyramid
 } from '../src/engine/geographic-weather-pyramid.js';
-import { GeographicLodTopology, lodRangeForStableLevel } from '../src/engine/geographic-lod.js';
+import { GeographicLodTopology, lodRangeForStableLevel, mercatorXForIndex, mercatorYForIndex } from '../src/engine/geographic-lod.js';
 import { mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
@@ -36,9 +36,17 @@ const densePyramid = new GeographicWeatherPyramid(Float32Array, topology);
 const denseRelations = new Map();
 for (let level = 12; level >= 10; level--) denseRelations.set(level + 1, buildCenteredContributions(topology.levels.get(level + 1), topology.levels.get(level)));
 const optimizedGeometry = optimizedPyramid.prepareSamplingGeometry(13, weather.prepareFrame(0));
-const denseGeometry = { ...optimizedGeometry };
+const denseLongitudes = new Float64Array(topology.levels.get(13).count);
+const denseLatitudes = new Float64Array(topology.levels.get(13).count);
+for (let index = 0; index < topology.levels.get(13).count; index++) {
+  const levelData = topology.levels.get(13);
+  denseLongitudes[index] = mercatorXForIndex(levelData, index) * 360 - 180;
+  const mercatorY = mercatorYForIndex(levelData, index);
+  denseLatitudes[index] = Math.atan(Math.sinh(Math.PI * (1 - 2 * mercatorY))) * 180 / Math.PI;
+}
+const densePreparedGeometry = weather.prepareSamplingGeometry(denseLongitudes, denseLatitudes);
+const denseGeometry = { ...densePreparedGeometry };
 delete denseGeometry.potentialActiveIndices;
-delete denseGeometry.potentialWeatherMask;
 
 function denseChain(pyramid, frame, minimumLevel) {
   let summary = evaluateDirectWeatherSummary(pyramid.levels.get(13), frame, null, Float32Array, denseGeometry, pyramid.totalWeights.get(13));
@@ -96,6 +104,95 @@ function comparePreparedTemporal(frame, geometry) {
   }
 }
 
+function compareCompactAndDenseGeometry() {
+  if (optimizedGeometry.kind !== 'compact-rectangular' || optimizedGeometry.baseIndex) {
+    throw new Error('regular sequence geometry is not compact and axis-separable.');
+  }
+  if (densePreparedGeometry.kind !== 'dense-generic' || !densePreparedGeometry.baseIndex) {
+    throw new Error('dense geometry reference was not materialized through the generic path.');
+  }
+  if (optimizedGeometry.width * optimizedGeometry.height !== densePreparedGeometry.baseIndex.length) {
+    throw new Error('compact/dense geometry sample count differs.');
+  }
+  let activeIndex = 0;
+  for (let index = 0; index < densePreparedGeometry.baseIndex.length; index++) {
+    const column = index % optimizedGeometry.width;
+    const row = (index - column) / optimizedGeometry.width;
+    const sourceColumn = optimizedGeometry.sourceColumn[column];
+    const sourceRow = optimizedGeometry.sourceRow[row];
+    const compactInside = sourceColumn !== 0xffffffff && sourceRow !== 0xffffffff;
+    const denseBaseIndex = densePreparedGeometry.baseIndex[index];
+    if (compactInside !== (denseBaseIndex !== 0xffffffff)) {
+      throw new Error(`compact/dense inside status differs at sample ${index}.`);
+    }
+    if (compactInside) {
+      const compactBaseIndex = sourceRow * densePreparedGeometry.sourceWidth + sourceColumn;
+      if (compactBaseIndex !== denseBaseIndex
+        || optimizedGeometry.longitudeFraction[column] !== densePreparedGeometry.longitudeFraction[index]
+        || optimizedGeometry.latitudeFraction[row] !== densePreparedGeometry.latitudeFraction[index]) {
+        throw new Error(`compact/dense lookup differs at sample ${index}.`);
+      }
+    }
+    if (optimizedGeometry.potentialActiveIndices[activeIndex] === index) activeIndex++;
+  }
+  if (activeIndex !== optimizedGeometry.potentialActiveIndices.length) {
+    throw new Error('compact geometry active-index traversal is not row-major.');
+  }
+  if (optimizedGeometry.potentialActiveIndices.length !== densePreparedGeometry.potentialActiveIndices.length) {
+    throw new Error('compact/dense potential-active counts differ.');
+  }
+  for (let index = 0; index < optimizedGeometry.potentialActiveIndices.length; index++) {
+    if (optimizedGeometry.potentialActiveIndices[index] !== densePreparedGeometry.potentialActiveIndices[index]) {
+      throw new Error(`compact/dense potential-active index differs at ${index}.`);
+    }
+  }
+  const frame = weather.prepareFrame(0);
+  const compactRain = frame.preparedSourceFrame(optimizedGeometry, 0);
+  const denseRain = frame.preparedSourceFrame(densePreparedGeometry, 0);
+  if (compactRain.length !== denseRain.length) throw new Error('compact/dense prepared rain counts differ.');
+  for (let index = 0; index < compactRain.length; index++) {
+    if (compactRain[index] !== denseRain[index]) throw new Error(`compact/dense prepared rain differs at ${index}.`);
+  }
+}
+
+function compareCompactLevelGeometry(level) {
+  const levelData = topology.levels.get(level);
+  const compact = optimizedPyramid.prepareSamplingGeometry(level, weather.prepareFrame(0));
+  const longitudes = new Float64Array(levelData.count);
+  const latitudes = new Float64Array(levelData.count);
+  for (let index = 0; index < levelData.count; index++) {
+    longitudes[index] = mercatorXForIndex(levelData, index) * 360 - 180;
+    const mercatorY = mercatorYForIndex(levelData, index);
+    latitudes[index] = Math.atan(Math.sinh(Math.PI * (1 - 2 * mercatorY))) * 180 / Math.PI;
+  }
+  const dense = weather.prepareSamplingGeometry(longitudes, latitudes);
+  if (compact.kind !== 'compact-rectangular' || compact.baseIndex || compact.width * compact.height !== levelData.count) {
+    throw new Error(`L${level} sequence geometry is not compact rectangular.`);
+  }
+  if (compact.potentialActiveIndices.length !== dense.potentialActiveIndices.length) {
+    throw new Error(`L${level} compact/dense active count differs.`);
+  }
+  for (let index = 0; index < levelData.count; index++) {
+    const column = index % compact.width;
+    const row = (index - column) / compact.width;
+    const sourceColumn = compact.sourceColumn[column];
+    const sourceRow = compact.sourceRow[row];
+    const compactInside = sourceColumn !== 0xffffffff && sourceRow !== 0xffffffff;
+    const denseBase = dense.baseIndex[index];
+    if (compactInside !== (denseBase !== 0xffffffff)) throw new Error(`L${level} inside status differs at ${index}.`);
+    if (compactInside && (sourceRow * dense.sourceWidth + sourceColumn !== denseBase
+      || compact.longitudeFraction[column] !== dense.longitudeFraction[index]
+      || compact.latitudeFraction[row] !== dense.latitudeFraction[index])) {
+      throw new Error(`L${level} lookup differs at ${index}.`);
+    }
+  }
+  for (let index = 0; index < compact.potentialActiveIndices.length; index++) {
+    if (compact.potentialActiveIndices[index] !== dense.potentialActiveIndices[index]) {
+      throw new Error(`L${level} active index differs at ${index}.`);
+    }
+  }
+}
+
 function compareSummary(level, optimized, dense) {
   const differences = [];
   const compare = (name, left, right) => differences.push([name, maxDifference(left, right)]);
@@ -129,6 +226,8 @@ const temporalBoundaryTimes = [
   ...Array.from({ length: time.count - 1 }, (_, index) => (index + 0.75) / (time.count - 1)),
   ...interpolatedTimes
 ];
+compareCompactAndDenseGeometry();
+for (const level of [10, 11, 12]) compareCompactLevelGeometry(level);
 for (const normalizedTime of [...temporalBoundaryTimes, ...temporalBoundaryTimes].reverse()) {
   comparePreparedTemporal(weather.prepareFrame(normalizedTime), optimizedGeometry);
 }

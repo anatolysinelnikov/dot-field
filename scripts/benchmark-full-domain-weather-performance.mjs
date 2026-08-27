@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { geographicPreparedIntensityAtGeometry, geographicPrepareTemporalSampling, setActiveWeatherField } from '../src/engine/geography.js';
-import { RealWeatherSequence } from '../src/engine/real-weather.js';
+import { RealWeatherField, RealWeatherSequence } from '../src/engine/real-weather.js';
 import {
   aggregateWeatherSummary,
   buildCenteredContributions,
@@ -13,7 +13,9 @@ import {
 } from '../src/engine/geographic-weather-pyramid.js';
 import {
   GeographicLodTopology,
-  lodRangeForStableLevel
+  lodRangeForStableLevel,
+  mercatorXForIndex,
+  mercatorYForIndex
 } from '../src/engine/geographic-lod.js';
 import { mapDotsWeatherSummary, GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { mapSquaresWeatherSummary, GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
@@ -80,11 +82,30 @@ function installDenseAggregationReference(pyramid) {
   }
 }
 
-function denseGeometry(geometry) {
-  if (!geometry?.potentialActiveIndices) return geometry;
-  const copy = { ...geometry };
+function denseGeometry(levelData) {
+  const prepared = legacyRectangularGeometry(levelData);
+  const copy = { ...prepared };
   delete copy.potentialActiveIndices;
   return copy;
+}
+
+function legacyRectangularGeometry(levelData) {
+  const axisLongitudes = new Float64Array(levelData.width);
+  const axisLatitudes = new Float64Array(levelData.height);
+  for (let column = 0; column < levelData.width; column++) {
+    axisLongitudes[column] = mercatorXForIndex(levelData, column) * 360 - 180;
+  }
+  for (let row = 0; row < levelData.height; row++) {
+    const mercatorY = levelData.minJ + row * levelData.spacing;
+    axisLatitudes[row] = Math.atan(Math.sinh(Math.PI * (1 - 2 * mercatorY))) * 180 / Math.PI;
+  }
+  return RealWeatherField.prototype.prepareRectangularSamplingGeometry.call(
+    weather,
+    axisLongitudes,
+    axisLatitudes,
+    levelData.width,
+    levelData.height
+  );
 }
 
 function benchmarkSpatialCachePattern(geometry, name, positions) {
@@ -404,7 +425,7 @@ const directProbePyramid = new GeographicWeatherPyramid(Float32Array, directProb
 const directProbeFrame = weather.prepareFrame(6.5 / 18);
 const directProbeBoundaryFrame = weather.prepareFrame(7.5 / 18);
 const directProbeGeometry = directProbePyramid.prepareSamplingGeometry(13, directProbeFrame);
-const directProbeUncachedGeometry = denseGeometry(directProbeGeometry);
+const directProbeUncachedGeometry = denseGeometry(directProbePyramid.levels.get(13));
 const directProbeActiveIndices = directProbeGeometry.potentialActiveIndices;
 const directProbeSummary = { current: null };
 const evaluateProbe = (frame) => {
@@ -452,7 +473,26 @@ for (let frameIndex = 0; frameIndex < weather.frameCount; frameIndex++) {
 const cacheBytesPerFrame = directProbeGeometry.potentialActiveIndices.length * Float64Array.BYTES_PER_ELEMENT;
 console.log(`direct L13 prepared temporal probe: active=${directProbeGeometry.potentialActiveIndices.length}; sparse uncached=${sparseUncachedDirectMs.toFixed(3)}ms; spatial source-pair acquisition=${sourcePairCacheBuildMs.toFixed(3)}ms; compatibility batch materialization=${compatibilityBatchMs.toFixed(3)}ms; cold direct summary=${coldDirectMs.toFixed(3)}ms; steady direct summary=${steadyDirectMs.toFixed(3)}ms; one-new-frame boundary=${providerBoundaryMs.toFixed(3)}ms`);
 console.log(`direct L13 cache memory: per-source-frame=${mib(cacheBytesPerFrame)}; representative pair=${mib(cacheBytesPerFrame * 2)}; retained=${mib(spatialCacheBytes(directProbeGeometry))} (${directProbeGeometry.spatialRainCache.size} cached frames); unbounded-reference-all-${weather.frameCount}=${mib(cacheBytesPerFrame * weather.frameCount)}`);
-console.log(`direct L13 memory: provider-binary=${mib(rainFramesMmh.byteLength)}; prepared-geometry-base=${mib(weather.samplingGeometryBytes(directProbeGeometry))}; normal-production-temporal-scratch=${mib(normalTemporalScratchBytes)}; lazy-compatibility-batch-scratch=${mib(compatibilityBatchScratchBytes)}`);
+console.log(`direct L13 memory: provider-binary=${mib(rainFramesMmh.byteLength)}; prepared-geometry-base=${mib(weather.samplingGeometryBytes(directProbeGeometry))}; potential-active-indices=${mib(directProbeGeometry.potentialActiveIndices.byteLength)}; normal-production-temporal-scratch=${mib(normalTemporalScratchBytes)}; lazy-compatibility-batch-scratch=${mib(compatibilityBatchScratchBytes)}`);
+for (const level of [10, 11, 12, 13]) {
+  const levelTopology = makeTopology(10);
+  const levelPyramid = new GeographicWeatherPyramid(Float32Array, levelTopology);
+  const levelData = levelPyramid.levelDataFor(level);
+  const preparationTimes = [];
+  const legacyPreparationTimes = [];
+  for (let run = 0; run < WARMUP + REPEATS; run++) {
+    levelPyramid.samplingGeometries.clear();
+    const started = performance.now();
+    const geometry = levelPyramid.prepareSamplingGeometry(level, weather.prepareFrame(0));
+    if (run >= WARMUP) preparationTimes.push(performance.now() - started);
+    const legacyStarted = performance.now();
+    const legacyGeometry = legacyRectangularGeometry(levelData);
+    if (run >= WARMUP) legacyPreparationTimes.push(performance.now() - legacyStarted);
+    if (run === WARMUP + REPEATS - 1) {
+      console.log(`sampling geometry L${level}: dimensions=${geometry.width}x${geometry.height}; count=${levelData.count}; dense-reference-base=${mib(weather.samplingGeometryBytes(legacyGeometry))}; compact-base=${mib(weather.samplingGeometryBytes(geometry))}; potential-active-indices=${mib(geometry.potentialActiveIndices.byteLength)}; compact-preparation-median=${median(preparationTimes).toFixed(3)}ms; dense-reference-preparation-median=${median(legacyPreparationTimes).toFixed(3)}ms`);
+    }
+  }
+}
 const forwardPositions = [...Array.from({ length: weather.frameCount - 1 }, (_, index) => index + 0.25), weather.frameCount - 1];
 const reversePositions = [...Array.from({ length: weather.frameCount - 1 }, (_, index) => weather.frameCount - 1.25 - index), 0];
 const adjacentScrubPositions = [0.25, 1.25, 0.25, 1.25, 2.25, 1.25, 2.25, 3.25, 2.25, 3.25, 4.25, 3.25, 4.25, 5.25, 4.25, 5.25, 6.25, 5.25, 6.25, 7.25];
@@ -472,12 +512,12 @@ for (const stableLevel of LEVELS) {
   const pyramid = new GeographicWeatherPyramid(Float32Array, topology);
   const frame = weather.prepareFrame(0.347);
   const geometry = pyramid.prepareSamplingGeometry(13, frame);
-  const dense = denseGeometry(geometry);
+  const dense = denseGeometry(pyramid.levels.get(13));
   const optimized = benchmarkChain(pyramid, frame, stableLevel, geometry);
   const sparseUncached = benchmarkSparseUncachedChain(pyramid, frame, stableLevel, dense, geometry.potentialActiveIndices);
   const legacyPyramid = new GeographicWeatherPyramid(Float32Array, topology);
   installDenseAggregationReference(legacyPyramid);
-  const legacyGeometry = denseGeometry(legacyPyramid.prepareSamplingGeometry(13, frame));
+  const legacyGeometry = denseGeometry(legacyPyramid.levels.get(13));
   const legacyResult = benchmarkLegacyChain(legacyPyramid, frame, stableLevel, legacyGeometry);
   const optimizedSummary = optimized.summaries;
   const fusedPyramid = new GeographicWeatherPyramid(Float32Array, topology);

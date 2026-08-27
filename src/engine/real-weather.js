@@ -9,6 +9,8 @@ const SEQUENCE_SCHEMA_VERSION = 'dot-field-netcdf-sequence-v1';
 const SEQUENCE_DIMENSIONS = Object.freeze(['time', 'latitude', 'longitude']);
 const SEQUENCE_BINARY_FILENAME = 'rain.f32';
 const SPATIAL_RAIN_CACHE_LIMIT = 4;
+const COMPACT_RECTANGULAR_GEOMETRY = 'compact-rectangular';
+const DENSE_GENERIC_GEOMETRY = 'dense-generic';
 
 function fail(message) {
   throw new Error(`Real weather CSV validation failed: ${message}`);
@@ -383,11 +385,88 @@ export class RealWeatherSequence extends RealWeatherField {
       && geometry.longitudeSpacing === this.longitudeSpacing
       && geometry.latitudeStart === this.latitudes[0]
       && geometry.latitudeSpacing === this.latitudeSpacing
-      && geometry.potentialWeatherMask === this.potentialWeatherMask;
+      && geometry.potentialWeatherMask === this.potentialWeatherMask
+      && (geometry.kind === COMPACT_RECTANGULAR_GEOMETRY || geometry.kind === DENSE_GENERIC_GEOMETRY);
   }
 
   prepareSamplingGeometry(longitudes, latitudes, reusable = null) {
-    return super.prepareSamplingGeometry(longitudes, latitudes, reusable);
+    const geometry = super.prepareSamplingGeometry(longitudes, latitudes, reusable);
+    geometry.kind = DENSE_GENERIC_GEOMETRY;
+    return geometry;
+  }
+
+  prepareRectangularSamplingGeometry(longitudes, latitudes, width, height, reusable = null) {
+    if (width !== longitudes.length || height !== latitudes.length) {
+      throw new Error('Rectangular sampling geometry dimensions must match the packed axis lengths.');
+    }
+    const geometry = reusable?.kind === COMPACT_RECTANGULAR_GEOMETRY
+      && reusable.width === width
+      && reusable.height === height
+      ? reusable
+      : {
+        kind: COMPACT_RECTANGULAR_GEOMETRY,
+        width,
+        height,
+        count: width * height,
+        sourceColumn: new Uint32Array(width),
+        longitudeFraction: new Float64Array(width),
+        sourceRow: new Uint32Array(height),
+        latitudeFraction: new Float64Array(height)
+      };
+    geometry.kind = COMPACT_RECTANGULAR_GEOMETRY;
+    geometry.width = width;
+    geometry.height = height;
+    geometry.count = width * height;
+    geometry.sourceColumn.fill(OUTSIDE_SOURCE_INDEX);
+    geometry.sourceRow.fill(OUTSIDE_SOURCE_INDEX);
+    this.setSamplingGeometryMetadata(geometry);
+
+    for (let column = 0; column < width; column++) {
+      const longitude = longitudes[column];
+      if (longitude < this.bounds.west || longitude > this.bounds.east) continue;
+      const position = this.locate(this.longitudes, longitude);
+      geometry.sourceColumn[column] = position.index;
+      geometry.longitudeFraction[column] = position.fraction;
+    }
+    for (let row = 0; row < height; row++) {
+      const latitude = latitudes[row];
+      if (latitude < this.bounds.south || latitude > this.bounds.north) continue;
+      const position = this.locate(this.latitudes, latitude);
+      geometry.sourceRow[row] = position.index;
+      geometry.latitudeFraction[row] = position.fraction;
+    }
+
+    const activeIndices = this.potentialWeatherMask ? [] : null;
+    for (let row = 0; row < height; row++) {
+      const sourceRow = geometry.sourceRow[row];
+      if (sourceRow === OUTSIDE_SOURCE_INDEX) continue;
+      const rowOffset = row * width;
+      for (let column = 0; column < width; column++) {
+        const sourceColumn = geometry.sourceColumn[column];
+        if (sourceColumn === OUTSIDE_SOURCE_INDEX) continue;
+        const baseIndex = sourceRow * this.longitudes.length + sourceColumn;
+        const x1y0 = baseIndex + 1;
+        const x0y1 = baseIndex + this.longitudes.length;
+        const x1y1 = x0y1 + 1;
+        if (activeIndices && (this.potentialWeatherMask[baseIndex] || this.potentialWeatherMask[x1y0]
+          || this.potentialWeatherMask[x0y1] || this.potentialWeatherMask[x1y1])) {
+          activeIndices.push(rowOffset + column);
+        }
+      }
+    }
+    this.finishSamplingGeometry(geometry, activeIndices);
+    this.setSamplingGeometryMetadata(geometry);
+    return geometry;
+  }
+
+  samplingGeometryBytes(geometry) {
+    if (geometry?.kind === COMPACT_RECTANGULAR_GEOMETRY) {
+      return geometry.sourceColumn.byteLength
+        + geometry.longitudeFraction.byteLength
+        + geometry.sourceRow.byteLength
+        + geometry.latitudeFraction.byteLength;
+    }
+    return super.samplingGeometryBytes(geometry);
   }
 
   prepareFrame(time) {
@@ -456,12 +535,27 @@ export class RealWeatherSequence extends RealWeatherField {
     const values = new Float64Array(activeIndices.length);
     for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
       const index = activeIndices[activeIndex];
-      const baseIndex = geometry.baseIndex[index];
+      let baseIndex;
+      let longitudeFraction;
+      let latitudeFraction;
+      if (geometry.kind === COMPACT_RECTANGULAR_GEOMETRY) {
+        const column = index % geometry.width;
+        const row = (index - column) / geometry.width;
+        const sourceColumn = geometry.sourceColumn[column];
+        const sourceRow = geometry.sourceRow[row];
+        baseIndex = sourceRow * this.longitudes.length + sourceColumn;
+        longitudeFraction = geometry.longitudeFraction[column];
+        latitudeFraction = geometry.latitudeFraction[row];
+      } else {
+        baseIndex = geometry.baseIndex[index];
+        longitudeFraction = geometry.longitudeFraction[index];
+        latitudeFraction = geometry.latitudeFraction[index];
+      }
       const x1y0 = baseIndex + 1;
       const x0y1 = baseIndex + geometry.sourceWidth;
       const x1y1 = x0y1 + 1;
       values[activeIndex] = this.interpolateRain(frameIndex, baseIndex, x1y0, x0y1, x1y1,
-        geometry.longitudeFraction[index], geometry.latitudeFraction[index]);
+        longitudeFraction, latitudeFraction);
     }
     geometry.spatialRainCache.set(frameIndex, values);
     while (geometry.spatialRainCache.size > SPATIAL_RAIN_CACHE_LIMIT) {
@@ -496,8 +590,24 @@ export class RealWeatherSequence extends RealWeatherField {
     output.rainMmh = 0;
     output.storm = 0;
     output.hail = 0;
-    const baseIndex = geometry.baseIndex[index];
-    if (baseIndex === OUTSIDE_SOURCE_INDEX) return output;
+    let baseIndex;
+    let longitudeFraction;
+    let latitudeFraction;
+    if (geometry.kind === COMPACT_RECTANGULAR_GEOMETRY) {
+      const column = index % geometry.width;
+      const row = (index - column) / geometry.width;
+      const sourceColumn = geometry.sourceColumn[column];
+      const sourceRow = geometry.sourceRow[row];
+      if (sourceColumn === OUTSIDE_SOURCE_INDEX || sourceRow === OUTSIDE_SOURCE_INDEX) return output;
+      baseIndex = sourceRow * this.longitudes.length + sourceColumn;
+      longitudeFraction = geometry.longitudeFraction[column];
+      latitudeFraction = geometry.latitudeFraction[row];
+    } else {
+      baseIndex = geometry.baseIndex[index];
+      if (baseIndex === OUTSIDE_SOURCE_INDEX) return output;
+      longitudeFraction = geometry.longitudeFraction[index];
+      latitudeFraction = geometry.latitudeFraction[index];
+    }
     if (geometry.potentialActiveIndices) {
       const activeIndex = sortedIndexOf(geometry.potentialActiveIndices, index);
       if (activeIndex < 0) return output;
@@ -509,8 +619,6 @@ export class RealWeatherSequence extends RealWeatherField {
     const x1y0 = baseIndex + 1;
     const x0y1 = baseIndex + geometry.sourceWidth;
     const x1y1 = x0y1 + 1;
-    const longitudeFraction = geometry.longitudeFraction[index];
-    const latitudeFraction = geometry.latitudeFraction[index];
     const rain0 = this.interpolateRain(frame.frame0, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
     const rain1 = this.interpolateRain(frame.frame1, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
     output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;

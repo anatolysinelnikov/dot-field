@@ -197,18 +197,19 @@ and absent storm/hail channels; the fetched binary byte length must match
 exactly. Geographic axes are constructed deterministically from metadata.
 `RealWeatherSequence` keeps
 the existing bilinear spatial sampler and presents temporal frames that
-linearly blend source frames; prepared geometry remains a `Uint32Array`
-source-cell index plus two `Float64Array` interpolation fractions (20
-bytes/sample), reusable across all 19 frames. Sequence geometry lazily owns a
-bounded four-entry LRU of Float64 spatial rain arrays aligned with its
-potentially-active canonical indices, keeping the adjacent source-frame pair
-needed by playback while allowing old frames to be recomputed after wide
-scrubs. Regular row-major
-canonical levels prepare this geometry axis-separably: one longitude
-conversion and source-axis lookup per column, and one latitude conversion and
-source-axis lookup per row, followed by packed lookup-array filling. Providers
-that cannot accept this rectangular contract retain the dense generic fallback.
-The sequence derives its potential-active set during the same packed fill.
+linearly blend source frames. For regular row-major rectangular canonical
+levels, prepared geometry is a compact axis-separable descriptor: one source
+column index and one Float64 longitude fraction per canonical column, plus one
+source row index and one Float64 latitude fraction per canonical row. The
+row-major canonical index remains implicit, so the retained lookup storage is
+O(width + height), rather than a dense source-cell index and two fractions per
+sample. The sequence derives its potential-active set during the same packed
+axis traversal. Sequence geometry lazily owns a bounded four-entry LRU of
+Float64 spatial rain arrays aligned with its potentially-active canonical
+indices, keeping the adjacent source-frame pair needed by playback while
+allowing old frames to be recomputed after wide scrubs. Providers that cannot
+accept this rectangular contract, and the sequence's arbitrary point-batch
+API, retain the dense generic fallback.
 These arrays are computation caches rather than a new weather representation;
 the single-point sampler remains the semantic reference path.
 
@@ -494,10 +495,12 @@ behavior.
 The application and Dots/Squares retain compact level descriptors rather than
 sample arrays. Provider sampling geometry derives the regular packed grid axes
 separately: longitude and source-column lookup are prepared once per column,
-latitude and source-row lookup once per row, and packed per-sample lookup data
-is filled from those results. It does not materialize dense geographic
-coordinate batches or one geographic coordinate array per canonical sample in
-topology.
+latitude and source-row lookup once per row, and the row-major sample index
+combines those axis lookups at sampling time. The regular sequence therefore
+does not retain a dense per-sample source-cell index or fraction arrays. It
+still does not materialize dense geographic coordinate batches or one
+geographic coordinate array per canonical sample in topology; generic
+non-rectangular providers retain their appropriate dense fallback.
 
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD

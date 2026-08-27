@@ -40,6 +40,24 @@ function sameObjectArrays(left, right, names) {
     && left.rainCoverageWeight.every((values, index) => sameArray(values, right.rainCoverageWeight[index]));
 }
 
+function samePreparedGeometry(dense, compact) {
+  if (!dense?.baseIndex || compact?.kind !== 'compact-rectangular'
+    || dense.baseIndex.length !== compact.width * compact.height) return false;
+  for (let index = 0; index < dense.baseIndex.length; index++) {
+    const column = index % compact.width;
+    const row = (index - column) / compact.width;
+    const sourceColumn = compact.sourceColumn[column];
+    const sourceRow = compact.sourceRow[row];
+    const compactInside = sourceColumn !== 0xffffffff && sourceRow !== 0xffffffff;
+    const denseBase = dense.baseIndex[index];
+    if (compactInside !== (denseBase !== 0xffffffff)) return false;
+    if (compactInside && (sourceRow * dense.sourceWidth + sourceColumn !== denseBase
+      || compact.longitudeFraction[column] !== dense.longitudeFraction[index]
+      || compact.latitudeFraction[row] !== dense.latitudeFraction[index])) return false;
+  }
+  return sameArray(dense.potentialActiveIndices, compact.potentialActiveIndices);
+}
+
 function installDenseGeometryFallback(pyramid) {
   pyramid.prepareSamplingGeometry = (level, frame) => {
     const existing = pyramid.samplingGeometries.get(level);
@@ -199,10 +217,7 @@ for (let windowIndex = 0; windowIndex < testWindows.length; windowIndex++) {
     const referenceLevel = stableLevel <= 13 ? 13 : stableLevel;
     const oldGeometry = oldPyramid.prepareSamplingGeometry(referenceLevel, frame0);
     const optimizedGeometry = optimizedPyramid.prepareSamplingGeometry(referenceLevel, frame0);
-    check(sameArray(oldGeometry.baseIndex, optimizedGeometry.baseIndex)
-      && sameArray(oldGeometry.longitudeFraction, optimizedGeometry.longitudeFraction)
-      && sameArray(oldGeometry.latitudeFraction, optimizedGeometry.latitudeFraction)
-      && sameArray(oldGeometry.potentialActiveIndices, optimizedGeometry.potentialActiveIndices), `window ${windowIndex} stable L${stableLevel} sampling geometry and potential-active set match exactly`);
+    check(samePreparedGeometry(oldGeometry, optimizedGeometry), `window ${windowIndex} stable L${stableLevel} sampling geometry and potential-active set match exactly`);
     const requested = [...Array(range.maxLevel - range.minLevel + 1)].map((_, index) => range.minLevel + index);
     const old0 = oldPyramid.evaluate(requested, frame0);
     const optimized0 = optimizedPyramid.evaluate(requested, frame0);
