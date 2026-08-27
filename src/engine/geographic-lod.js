@@ -19,6 +19,8 @@ const MAX_GRID_SIZE = 2 ** MAX_GRID_LEVEL;
 const MAX_MERCATOR_LATITUDE = 85.05112878;
 const COARSE_CANONICAL_STEP = 2 ** (MAX_GRID_LEVEL - MIN_GRID_LEVEL);
 const COARSE_MERCATOR_STEP = 1 / 2 ** MIN_GRID_LEVEL;
+const DEFAULT_TOPOLOGY_MIN_LEVEL = 13;
+const DEFAULT_TOPOLOGY_MAX_LEVEL = 13;
 
 export function lngLatToMercator(longitude, latitude) {
   const clampedLatitude = clamp(latitude, -MAX_MERCATOR_LATITUDE, MAX_MERCATOR_LATITUDE);
@@ -112,6 +114,32 @@ export function canonicalWindowsEqual(left, right) {
   return Boolean(left && right)
     && left.minX === right.minX && left.maxX === right.maxX
     && left.minY === right.minY && left.maxY === right.maxY;
+}
+
+export function normalizeLodRange(range = { minLevel: DEFAULT_TOPOLOGY_MIN_LEVEL, maxLevel: DEFAULT_TOPOLOGY_MAX_LEVEL }) {
+  const minLevel = Number(range.minLevel);
+  const maxLevel = Number(range.maxLevel);
+  if (!Number.isInteger(minLevel) || !Number.isInteger(maxLevel)
+    || minLevel < MIN_GRID_LEVEL || maxLevel > MAX_DISPLAY_GRID_LEVEL || maxLevel < minLevel) {
+    throw new Error(`LOD range must be contiguous and between L${MIN_GRID_LEVEL} and L${MAX_DISPLAY_GRID_LEVEL}.`);
+  }
+  return Object.freeze({ minLevel, maxLevel });
+}
+
+export function lodRangesEqual(left, right) {
+  return Boolean(left && right) && left.minLevel === right.minLevel && left.maxLevel === right.maxLevel;
+}
+
+export function lodRangeForStableLevel(level) {
+  const stableLevel = Number(level);
+  if (!Number.isInteger(stableLevel) || stableLevel < MIN_GRID_LEVEL || stableLevel > MAX_DISPLAY_GRID_LEVEL) {
+    throw new Error(`Stable LOD must be between L${MIN_GRID_LEVEL} and L${MAX_DISPLAY_GRID_LEVEL}.`);
+  }
+  if (stableLevel <= 11) return normalizeLodRange({ minLevel: 10, maxLevel: 13 });
+  if (stableLevel === 12) return normalizeLodRange({ minLevel: 11, maxLevel: 13 });
+  if (stableLevel === 13) return normalizeLodRange({ minLevel: 12, maxLevel: 14 });
+  if (stableLevel === 14) return normalizeLodRange({ minLevel: 13, maxLevel: 15 });
+  return normalizeLodRange({ minLevel: 14, maxLevel: 15 });
 }
 
 // Convert an application-owned visible Mercator envelope to a deterministic
@@ -215,10 +243,11 @@ function buildDirectPairs(lower, higher) {
 // Canonical positions and one-parent ownership for visual LOD morphs. This is
 // deliberately independent from centered weather-summary contributions.
 export class GeographicLodTopology {
-  constructor(canonicalWindow = canonicalSupport) {
+  constructor(canonicalWindow = canonicalSupport, levelRange) {
     this.canonicalWindow = normalizeCanonicalWindow(canonicalWindow);
+    this.levelRange = normalizeLodRange(levelRange);
     this.levels = new Map();
-    for (let level = MIN_GRID_LEVEL; level <= MAX_DISPLAY_GRID_LEVEL; level++) {
+    for (let level = this.levelRange.minLevel; level <= this.levelRange.maxLevel; level++) {
       const selection = selectMercatorGridSamples(level, this.canonicalWindow);
       const canonicalAnchors = new Float64Array(selection.samples.length * 2);
       for (let index = 0; index < selection.samples.length; index++) {
@@ -233,19 +262,31 @@ export class GeographicLodTopology {
       });
     }
     this.transitionParents = new Map();
-    for (let level = MIN_GRID_LEVEL + 1; level <= MAX_DISPLAY_GRID_LEVEL; level++) {
+    for (let level = this.levelRange.minLevel + 1; level <= this.levelRange.maxLevel; level++) {
       this.transitionParents.set(level, buildTransitionParents(this.levels.get(level), this.levels.get(level - 1)));
     }
     this.directPairs = new Map();
-    for (let level = MIN_GRID_LEVEL + 1; level <= MAX_DISPLAY_GRID_LEVEL; level++) {
+    for (let level = this.levelRange.minLevel + 1; level <= this.levelRange.maxLevel; level++) {
       this.directPairs.set(level, buildDirectPairs(this.levels.get(level - 1), this.levels.get(level)));
     }
   }
 
-  samplesFor(level) { return this.levels.get(level).samples; }
-  transitionParentsFor(fineLevel) { return this.transitionParents.get(fineLevel) || null; }
+  levelDataFor(level) {
+    const levelData = this.levels.get(level);
+    if (!levelData) throw new Error(`LOD L${level} is not materialized in the active topology range.`);
+    return levelData;
+  }
+
+  samplesFor(level) { return this.levelDataFor(level).samples; }
+  transitionParentsFor(fineLevel) {
+    const parents = this.transitionParents.get(fineLevel);
+    if (!parents) throw new Error(`LOD transition parent data for L${fineLevel} is not materialized.`);
+    return parents;
+  }
   directPairsFor(lowerLevel, higherLevel) {
     if (higherLevel !== lowerLevel + 1) throw new Error('Direct grid pairs require adjacent levels.');
-    return this.directPairs.get(higherLevel);
+    const pairs = this.directPairs.get(higherLevel);
+    if (!pairs) throw new Error(`LOD direct-pair data for L${lowerLevel}↔L${higherLevel} is not materialized.`);
+    return pairs;
   }
 }

@@ -5,8 +5,10 @@ import {
   MAX_LOGICAL_SAMPLING_ZOOM,
   canonicalWindowFromMercatorBounds,
   canonicalWindowsEqual,
+  GeographicLodTopology,
   lngLatToMercator,
   logicalZoomLatitudeAdjustment,
+  lodRangeForStableLevel,
   rawZoomForLogicalSamplingZoom,
   zoomToMercatorGridLevel
 } from './engine/geographic-lod.js';
@@ -129,11 +131,11 @@ const state = {
   weatherQueued: false,
   renderMode: 'raw'
 };
-const geographicWeatherPyramid = new GeographicWeatherPyramid();
-const weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid);
-const squaresLayer = new GeographicSquaresLayer(geographicWeatherPyramid);
+let geographicWeatherPyramid = null;
+let weatherLayer = null;
+let squaresLayer = null;
 const rawLayer = new RawWeatherLayer(rawWeatherField);
-const geographicLayers = [rawLayer, squaresLayer, weatherLayer];
+let geographicLayers = [rawLayer];
 const VALID_RENDER_MODES = new Set(['raw', 'dots', 'squares']);
 let lastMapErrorSignature = '';
 
@@ -211,6 +213,15 @@ function applyCanonicalWindow(canonicalWindow) {
   return true;
 }
 
+function applyStableTopologyRange(level) {
+  const range = lodRangeForStableLevel(level);
+  if (!geographicWeatherPyramid.setLevelRange(range)) return false;
+  weatherLayer.setTopology(geographicWeatherPyramid.topology);
+  squaresLayer.setTopology(geographicWeatherPyramid.topology);
+  commitSamples(level, geographicWeatherPyramid.samplesFor(level));
+  return true;
+}
+
 function updateCanonicalWindow() {
   if (!state.mapReady) return;
   const bounds = visibleMercatorBounds();
@@ -279,6 +290,19 @@ function commitSamples(level, samples) {
 }
 
 function initializeWeatherLayer() {
+  if (state.mapReady) return;
+  const initialBounds = visibleMercatorBounds();
+  if (!initialBounds) throw new Error('Initial camera bounds are unavailable for weather topology initialization.');
+  const initialLevel = zoomToMercatorGridLevel(state.logicalSamplingZoom);
+  const initialWindow = canonicalWindowFromMercatorBounds(initialBounds);
+  geographicWeatherPyramid = new GeographicWeatherPyramid(
+    Float32Array,
+    new GeographicLodTopology(initialWindow, lodRangeForStableLevel(initialLevel))
+  );
+  weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid);
+  squaresLayer = new GeographicSquaresLayer(geographicWeatherPyramid);
+  geographicLayers = [rawLayer, squaresLayer, weatherLayer];
+  state.canonicalWindow = initialWindow;
   const styleLayers = map.getStyle().layers || [];
   const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');
   for (const layer of geographicLayers) {
@@ -375,12 +399,10 @@ function initializeWeatherLayer() {
     map.moveLayer(MAPTILER_WATER_TINT_ID, rawLayer.id);
   }
 
-  if (state.mapReady) return;
   state.mapReady = true;
   applyRenderMode();
   rebaseCamera();
-  updateCanonicalWindow();
-  rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
+  rebuildSamples(initialLevel);
 }
 
 function startAdjacentTransition(level, now) {
@@ -448,6 +470,7 @@ function updateLODTransition(now) {
     state.pendingCanonicalWindow = null;
     applyCanonicalWindow(pendingWindow);
   }
+  applyStableTopologyRange(transition.toLevel);
   if (state.desiredLevel !== state.lod.level) startAdjacentTransition(state.desiredLevel, now);
 }
 

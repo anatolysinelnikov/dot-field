@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { setActiveWeatherField } from '../src/engine/geography.js';
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
-import { selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
+import { GeographicLodTopology, selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
 import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
@@ -68,7 +68,7 @@ function unchangedDiscrete(frame, level, digest) {
 
 function verifyDiscreteLayer(Layer) {
   const level = 13;
-  const layer = new Layer(new GeographicWeatherPyramid());
+  const layer = new Layer(new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 15 })));
   layer.setActive(true);
   layer.setSamples(selectMercatorGridSamples(level).samples, 0);
   pairMatches(layer.temporal, 0, `${Layer.name} start`);

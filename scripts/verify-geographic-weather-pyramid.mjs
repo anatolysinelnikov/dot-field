@@ -6,7 +6,7 @@ import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geogra
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { DOTS_STRONG_RAIN_FULL_MMH, dotsStrongRainMmhToRadius, rainMmhToRadius } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadii } from '../src/engine/hazard-renderer.js';
-import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, mercatorToLngLat, selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
+import { GeographicLodTopology, MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, mercatorToLngLat, selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
 import { GeographicScalarLattice, SCALAR_GRID_LEVEL } from '../src/engine/geographic-scalar-lattice.js';
 
 const LEVELS = [10, 11, 12, 13, 14, 15];
@@ -85,7 +85,8 @@ for (const longitudeIndex of [0, Math.floor(field.longitudes.length / 2), field.
 }
 console.log(`representative exact source-node error: ${sourceNodeError}`); check(sourceNodeError <= FLOAT64_TOLERANCE, 'source nodes preserve rain, storm, and hail values');
 
-const pyramid = new GeographicWeatherPyramid(); const referencePyramid = new GeographicWeatherPyramid(Float64Array);
+const fullTopology = new GeographicLodTopology(undefined, { minLevel: MIN_GRID_LEVEL, maxLevel: MAX_DISPLAY_GRID_LEVEL });
+const pyramid = new GeographicWeatherPyramid(Float32Array, fullTopology); const referencePyramid = new GeographicWeatherPyramid(Float64Array, fullTopology);
 const summaries = referencePyramid.evaluate(LEVELS, frame); const float32Summaries = pyramid.evaluate(LEVELS, frame);
 check(float32Summaries[15].rainWeightedSumMmh instanceof Float32Array, 'production summaries use Float32 storage at L15');
 for (const requested of [[12, 13], [13, 14], [14, 15]]) {
@@ -203,5 +204,5 @@ console.log(`L14<->L15 transition memory: two temporal summaries=${mib((count14 
 
 const dotsSource = fs.readFileSync(new URL('../src/engine/geographic-dots-layer.js', import.meta.url), 'utf8'); const appSource = fs.readFileSync(new URL('../src/app.js', import.meta.url), 'utf8'); const htmlSource = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 check(!dotsSource.includes('setStrongFullMmh') && !appSource.includes('dotsStrong') && !htmlSource.includes('dotsStrong'), 'Dots strong-rain tuning UI and mutable state are removed'); check(DOTS_STRONG_RAIN_FULL_MMH === 35, 'Dots strong-rain full saturation is fixed at 35 mm/h');
-const shared = new GeographicWeatherPyramid(); check(new GeographicDotsLayer(shared).weatherPyramid === new GeographicSquaresLayer(shared).weatherPyramid, 'Dots and Squares share one GeographicWeatherPyramid instance');
+const shared = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 13 })); check(new GeographicDotsLayer(shared).weatherPyramid === new GeographicSquaresLayer(shared).weatherPyramid, 'Dots and Squares share one GeographicWeatherPyramid instance');
 console.log(failures ? `VERIFICATION FAILED: ${failures}` : 'VERIFICATION PASSED'); if (failures) process.exitCode = 1;

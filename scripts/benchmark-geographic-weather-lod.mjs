@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { prepareGeographicFieldFrame, setActiveWeatherField } from '../src/engine/geography.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
-import { selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
+import { GeographicLodTopology, selectMercatorGridSamples } from '../src/engine/geographic-lod.js';
 import { evaluateDirectWeatherSummary, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
@@ -18,7 +18,7 @@ function median(values) {
 }
 
 function benchmarkDirectLevel(level) {
-  const pyramid = new GeographicWeatherPyramid();
+  const pyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 15 }));
   const levelData = pyramid.levels.get(level);
   const frame = prepareGeographicFieldFrame(0.347);
   const started = performance.now();
@@ -57,7 +57,7 @@ for (const level of [13, 14, 15]) {
 }
 
 function metricLayer(Layer, fromLevel, toLevel) {
-  const pyramid = new GeographicWeatherPyramid();
+  const pyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 15 }));
   const layer = new Layer(pyramid);
   layer.setActive(true);
   const fromSamples = selectMercatorGridSamples(fromLevel).samples;

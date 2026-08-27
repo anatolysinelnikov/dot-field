@@ -9,7 +9,9 @@ import {
   MAX_GRID_LEVEL,
   GeographicLodTopology,
   canonicalWindowsEqual,
-  normalizeCanonicalWindow
+  lodRangesEqual,
+  normalizeCanonicalWindow,
+  normalizeLodRange
 } from './geographic-lod.js';
 
 // L13 is the nearest practical dyadic Mercator scale to the current parsed
@@ -178,26 +180,41 @@ export class GeographicWeatherPyramid {
     this.topology = topology;
     this.levels = topology.levels;
     this.contributions = new Map();
-    for (let level = MIN_GRID_LEVEL + 1; level <= WEATHER_REFERENCE_LEVEL; level++) {
+    for (let level = Math.max(MIN_GRID_LEVEL + 1, topology.levelRange.minLevel + 1); level <= Math.min(WEATHER_REFERENCE_LEVEL, topology.levelRange.maxLevel); level++) {
+      if (!this.levels.has(level - 1)) continue;
       this.contributions.set(level, buildCenteredContributions(this.levels.get(level), this.levels.get(level - 1)));
     }
     this.samplingGeometries = new Map();
   }
 
   setCanonicalWindow(canonicalWindow) {
+    return this.setConfiguration(canonicalWindow, this.topology.levelRange);
+  }
+
+  setLevelRange(levelRange) {
+    return this.setConfiguration(this.topology.canonicalWindow, levelRange);
+  }
+
+  setConfiguration(canonicalWindow, levelRange) {
     const nextWindow = normalizeCanonicalWindow(canonicalWindow);
-    if (canonicalWindowsEqual(this.topology.canonicalWindow, nextWindow)) return false;
-    const nextTopology = new GeographicLodTopology(nextWindow);
-    this.setTopology(nextTopology);
+    const nextRange = normalizeLodRange(levelRange);
+    if (canonicalWindowsEqual(this.topology.canonicalWindow, nextWindow) && lodRangesEqual(this.topology.levelRange, nextRange)) return false;
+    this.setTopology(new GeographicLodTopology(nextWindow, nextRange));
     return true;
   }
 
+  levelDataFor(level) {
+    const levelData = this.levels.get(level);
+    if (!levelData) throw new Error(`LOD L${level} is not materialized in the active topology range.`);
+    return levelData;
+  }
+
   samplesFor(level) {
-    return this.levels.get(level).samples;
+    return this.levelDataFor(level).samples;
   }
 
   topologyFor(level) {
-    const levelData = this.levels.get(level);
+    const levelData = this.levelDataFor(level);
     return {
       samples: levelData.samples,
       contributionsToParent: this.contributions.get(level) || null
@@ -228,6 +245,8 @@ export class GeographicWeatherPyramid {
     const aggregateRequested = uniqueRequested.filter((level) => level <= WEATHER_REFERENCE_LEVEL);
     if (aggregateRequested.length) {
       const minimumAggregateLevel = Math.min(...aggregateRequested);
+      this.levelDataFor(WEATHER_REFERENCE_LEVEL);
+      for (let level = minimumAggregateLevel; level <= WEATHER_REFERENCE_LEVEL; level++) this.levelDataFor(level);
       let summary = evaluateDirectWeatherSummary(
         this.levels.get(WEATHER_REFERENCE_LEVEL),
         frame,
@@ -237,10 +256,12 @@ export class GeographicWeatherPyramid {
       );
       summaries[WEATHER_REFERENCE_LEVEL] = summary;
       for (let level = WEATHER_REFERENCE_LEVEL - 1; level >= minimumAggregateLevel; level--) {
+        const contributions = this.contributions.get(level + 1);
+        if (!contributions) throw new Error(`LOD L${level} aggregation requires an unbroken L13 reference chain.`);
         summary = aggregateWeatherSummary(
           this.levels.get(level),
           summary,
-          this.contributions.get(level + 1),
+          contributions,
           reusableStates?.[level],
           this.summaryArrayType
         );
@@ -249,6 +270,7 @@ export class GeographicWeatherPyramid {
     }
     for (const level of uniqueRequested) {
       if (level > WEATHER_REFERENCE_LEVEL) {
+        this.levelDataFor(level);
         summaries[level] = evaluateDirectWeatherSummary(
           this.levels.get(level),
           frame,

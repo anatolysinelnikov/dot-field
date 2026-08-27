@@ -4,6 +4,7 @@ import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH, aggregateWeathe
 import { mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
+import { GeographicLodTopology } from '../src/engine/geographic-lod.js';
 
 const TOLERANCE = 1e-12;
 let failures = 0;
@@ -103,7 +104,8 @@ check(field.isSamplingGeometryCompatible(geometry), 'prepared geometry records c
 check(!('rainMmh' in geometry) && !('storm' in geometry) && !('hail' in geometry), 'prepared geometry does not cache weather values');
 console.log(`batch stencil: ${geometry.baseIndex.length} samples, ${field.samplingGeometryBytes(geometry)} bytes, ${field.samplingGeometryBytes(geometry) / geometry.baseIndex.length} bytes/sample`);
 
-const pyramid = new GeographicWeatherPyramid(Float64Array);
+const fullTopology = new GeographicLodTopology(undefined, { minLevel: 10, maxLevel: 15 });
+const pyramid = new GeographicWeatherPyramid(Float64Array, fullTopology);
 const preparedSummaries = new Map();
 const directSummaryErrors = [];
 for (const level of [13, 14, 15]) {
@@ -128,7 +130,7 @@ for (const level of [13, 14, 15]) {
 check(pyramid.prepareSamplingGeometry(15, frame) === pyramid.samplingGeometries.get(15), 'same-grid L15 stencil is reused by identity');
 check(pyramid.samplingGeometries.size === 3, 'pyramid owns one stencil for each direct level only');
 
-const ordinary = new GeographicWeatherPyramid(Float64Array).evaluate([13], frame)[13];
+const ordinary = new GeographicWeatherPyramid(Float64Array, fullTopology).evaluate([13], frame)[13];
 let aggregate = preparedSummaries.get(13);
 let ordinaryAggregate = ordinary;
 for (const level of [12, 11, 10]) {

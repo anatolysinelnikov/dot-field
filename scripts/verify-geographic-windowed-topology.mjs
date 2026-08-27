@@ -5,7 +5,9 @@ import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/
 import {
   GeographicLodTopology,
   MAX_GRID_LEVEL,
-  MIN_GRID_LEVEL
+  MIN_GRID_LEVEL,
+  lodRangeForStableLevel,
+  normalizeLodRange
 } from '../src/engine/geographic-lod.js';
 import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
@@ -30,7 +32,7 @@ function maxError(left, right) {
 }
 
 function sumCounts(topology) {
-  return LEVELS.reduce((total, level) => total + topology.samplesFor(level).length, 0);
+  return [...topology.levels.values()].reduce((total, levelData) => total + levelData.samples.length, 0);
 }
 
 function alignedInteriorWindows(support) {
@@ -80,7 +82,7 @@ function verifyHierarchy(topology, name) {
   let invalidParents = 0;
   let invalidPairs = 0;
   let contributionWeightError = 0;
-  for (let level = MIN_GRID_LEVEL; level < MAX_GRID_LEVEL; level++) {
+  for (let level = topology.levelRange.minLevel; level < topology.levelRange.maxLevel; level++) {
     const lower = topology.levels.get(level);
     const higher = topology.levels.get(level + 1);
     const higherIds = new Set(higher.samples.map((sample) => sample.id));
@@ -89,7 +91,7 @@ function verifyHierarchy(topology, name) {
     for (const parentIndex of parents.parentIndexByChild) if (parentIndex < 0 || parentIndex >= lower.samples.length) invalidParents++;
     const pairs = topology.directPairsFor(level, level + 1);
     for (const pair of pairs) if (pair < -1 || pair >= Math.max(lower.samples.length, higher.samples.length)) invalidPairs++;
-    if (level + 1 <= 13) {
+    if (level + 1 <= 13 && topology.levelRange.minLevel <= level) {
       const contributions = pyramid.topologyFor(level + 1).contributionsToParent;
       for (let child = 0; child < contributions.offsets.length - 1; child++) {
         let weight = 0;
@@ -131,60 +133,67 @@ function summaryAt(summary, index) {
   };
 }
 
-function verifyWeatherInvariance(fullPyramid, window, name) {
-  const windowPyramid = new GeographicWeatherPyramid(Float64Array, new GeographicLodTopology(window));
+function verifyWeatherInvariance(window, name) {
+  const fullRange = normalizeLodRange({ minLevel: 10, maxLevel: 15 });
+  const fullReference = new GeographicWeatherPyramid(Float64Array, new GeographicLodTopology(window, fullRange));
   const times = [0, 0.173, 0.5, 0.923, 1];
-  let maximumSummaryError = 0;
-  let maximumDotsError = 0;
-  let maximumSquaresError = 0;
-  let comparisons = 0;
-  for (const time of times) {
-    const full = fullPyramid.evaluate(LEVELS, prepareGeographicFieldFrame(time));
-    const active = windowPyramid.evaluate(LEVELS, prepareGeographicFieldFrame(time));
-    for (const level of LEVELS) {
-      const fullById = new Map(full[level].samples.map((sample, index) => [sample.id, index]));
-      const activeSamples = active[level].samples;
-      const interior = activeSamples.map((sample, index) => [sample, index]).filter(([sample]) =>
-        sample.canonicalX > window.minX + L10_STEP && sample.canonicalX < window.maxX - L10_STEP
-        && sample.canonicalY > window.minY + L10_STEP && sample.canonicalY < window.maxY - L10_STEP
-      );
-      for (const [sample, activeIndex] of interior) {
-        const fullIndex = fullById.get(sample.id);
-        if (fullIndex === undefined) continue;
-        const activeSummary = summaryAt(active[level], activeIndex);
-        const fullSummary = summaryAt(full[level], fullIndex);
-        maximumSummaryError = Math.max(maximumSummaryError, summaryError(activeSummary, fullSummary));
-        const activeDots = mapDotsWeatherSummary(activeSummary);
-        const fullDots = mapDotsWeatherSummary(fullSummary);
-        const activeSquares = mapSquaresWeatherSummary(activeSummary);
-        const fullSquares = mapSquaresWeatherSummary(fullSummary);
-        maximumDotsError = Math.max(maximumDotsError, maxError(activeDots.rainRadius, fullDots.rainRadius), maxError(activeDots.strongRadius, fullDots.strongRadius), maxError(activeDots.stormRadius, fullDots.stormRadius), maxError(activeDots.hailRadius, fullDots.hailRadius));
-        maximumSquaresError = Math.max(maximumSquaresError, maxError(activeSquares.rainWetMeanMmh, fullSquares.rainWetMeanMmh), maxError(activeSquares.rainCoverage, fullSquares.rainCoverage), maxError(activeSquares.stormCoverage, fullSquares.stormCoverage), maxError(activeSquares.hailCoverage, fullSquares.hailCoverage));
-        comparisons++;
+  for (const stableLevel of LEVELS) {
+    const range = lodRangeForStableLevel(stableLevel);
+    const bounded = new GeographicWeatherPyramid(Float64Array, new GeographicLodTopology(window, range));
+    let maximumSummaryError = 0;
+    let maximumDotsError = 0;
+    let maximumSquaresError = 0;
+    let comparisons = 0;
+    for (const time of times) {
+      const reference = fullReference.evaluate([...Array(range.maxLevel - range.minLevel + 1)].map((_, index) => range.minLevel + index), prepareGeographicFieldFrame(time));
+      const active = bounded.evaluate([...Array(range.maxLevel - range.minLevel + 1)].map((_, index) => range.minLevel + index), prepareGeographicFieldFrame(time));
+      for (const level of Object.keys(active).map(Number).filter(Number.isInteger)) {
+        const fullById = new Map(reference[level].samples.map((sample, index) => [sample.id, index]));
+        const activeSamples = active[level].samples;
+        const interior = activeSamples.map((sample, index) => [sample, index]).filter(([sample]) =>
+          sample.canonicalX > window.minX + L10_STEP && sample.canonicalX < window.maxX - L10_STEP
+          && sample.canonicalY > window.minY + L10_STEP && sample.canonicalY < window.maxY - L10_STEP
+        );
+        for (const [sample, activeIndex] of interior) {
+          const fullIndex = fullById.get(sample.id);
+          if (fullIndex === undefined) continue;
+          const activeSummary = summaryAt(active[level], activeIndex);
+          const fullSummary = summaryAt(reference[level], fullIndex);
+          maximumSummaryError = Math.max(maximumSummaryError, summaryError(activeSummary, fullSummary));
+          const activeDots = mapDotsWeatherSummary(activeSummary);
+          const fullDots = mapDotsWeatherSummary(fullSummary);
+          const activeSquares = mapSquaresWeatherSummary(activeSummary);
+          const fullSquares = mapSquaresWeatherSummary(fullSummary);
+          maximumDotsError = Math.max(maximumDotsError, maxError(activeDots.rainRadius, fullDots.rainRadius), maxError(activeDots.strongRadius, fullDots.strongRadius), maxError(activeDots.stormRadius, fullDots.stormRadius), maxError(activeDots.hailRadius, fullDots.hailRadius));
+          maximumSquaresError = Math.max(maximumSquaresError, maxError(activeSquares.rainWetMeanMmh, fullSquares.rainWetMeanMmh), maxError(activeSquares.rainCoverage, fullSquares.rainCoverage), maxError(activeSquares.stormCoverage, fullSquares.stormCoverage), maxError(activeSquares.hailCoverage, fullSquares.hailCoverage));
+          comparisons++;
+        }
       }
     }
+    console.log(`${name} stable L${stableLevel} range ${range.minLevel}..${range.maxLevel}: comparisons=${comparisons}, summary=${maximumSummaryError}, Dots=${maximumDotsError}, Squares=${maximumSquaresError}`);
+    check(comparisons > 0 && maximumSummaryError <= TOLERANCE && maximumDotsError <= TOLERANCE && maximumSquaresError <= TOLERANCE, `${name} stable L${stableLevel} bounded range matches same-window all-level baseline`);
   }
-  console.log(`${name} weather invariance: comparisons=${comparisons}, summary=${maximumSummaryError}, Dots=${maximumDotsError}, Squares=${maximumSquaresError}`);
-  check(comparisons > 0 && maximumSummaryError <= TOLERANCE && maximumDotsError <= TOLERANCE && maximumSquaresError <= TOLERANCE, `${name} interior weather summaries and mappings match full-support baseline`);
 }
 
 const field = parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8'));
 setActiveWeatherField(field);
-const fullPyramid = new GeographicWeatherPyramid(Float64Array);
-const windows = alignedInteriorWindows(fullPyramid.topology.canonicalWindow);
-const topologyA = new GeographicLodTopology(windows[0]);
-const topologyB = new GeographicLodTopology(windows[1]);
-const topologyC = new GeographicLodTopology(windows[2]);
-console.log(`support canonical bounds: ${JSON.stringify(fullPyramid.topology.canonicalWindow)}`);
+const supportTopology = new GeographicLodTopology(undefined, { minLevel: MIN_GRID_LEVEL, maxLevel: MIN_GRID_LEVEL });
+const windows = alignedInteriorWindows(supportTopology.canonicalWindow);
+const fullRange = normalizeLodRange({ minLevel: MIN_GRID_LEVEL, maxLevel: MAX_GRID_LEVEL });
+const fullPyramid = new GeographicWeatherPyramid(Float64Array, new GeographicLodTopology(windows[0], fullRange));
+const topologyA = new GeographicLodTopology(windows[0], fullRange);
+const topologyB = new GeographicLodTopology(windows[1], fullRange);
+const topologyC = new GeographicLodTopology(windows[2], fullRange);
+console.log(`support canonical bounds (L10-only diagnostic): ${JSON.stringify(supportTopology.canonicalWindow)}`);
 console.log(`window A: ${JSON.stringify(topologyA.canonicalWindow)}`);
 console.log(`window B: ${JSON.stringify(topologyB.canonicalWindow)}`);
 console.log(`window C: ${JSON.stringify(topologyC.canonicalWindow)}`);
 
 verifyIdentity(topologyA, topologyB);
 const originalA = selectionDigest(topologyA);
-let roundTripTopology = new GeographicLodTopology(topologyA.canonicalWindow);
-roundTripTopology = new GeographicLodTopology(topologyB.canonicalWindow);
-roundTripTopology = new GeographicLodTopology(topologyA.canonicalWindow);
+let roundTripTopology = new GeographicLodTopology(topologyA.canonicalWindow, fullRange);
+roundTripTopology = new GeographicLodTopology(topologyB.canonicalWindow, fullRange);
+roundTripTopology = new GeographicLodTopology(topologyA.canonicalWindow, fullRange);
 const roundTripSelection = selectionDigest(roundTripTopology);
 check(JSON.stringify(roundTripSelection) === JSON.stringify(originalA), 'A → B → A selection preserves exact row/order determinism');
 const unchangedTopology = new GeographicWeatherPyramid(Float64Array, topologyA);
@@ -192,9 +201,37 @@ const originalTopology = unchangedTopology.topology;
 check(unchangedTopology.setCanonicalWindow(topologyA.canonicalWindow) === false && unchangedTopology.topology === originalTopology, 'unchanged snapped window does not rebuild the topology');
 for (const [name, topology] of [['A', topologyA], ['B', topologyB], ['C', topologyC]]) verifyHierarchy(topology, `window ${name}`);
 
-verifyWeatherInvariance(fullPyramid, topologyA.canonicalWindow, 'window A');
-verifyWeatherInvariance(fullPyramid, topologyB.canonicalWindow, 'window B');
-verifyWeatherInvariance(fullPyramid, topologyC.canonicalWindow, 'window C');
+for (const stableLevel of LEVELS) {
+  const range = lodRangeForStableLevel(stableLevel);
+  const topology = new GeographicLodTopology(topologyA.canonicalWindow, range);
+  const expectedLevels = LEVELS.filter((level) => level >= range.minLevel && level <= range.maxLevel);
+  const actualLevels = [...topology.levels.keys()];
+  check(JSON.stringify(actualLevels) === JSON.stringify(expectedLevels), `stable L${stableLevel} materializes exactly ${range.minLevel}..${range.maxLevel}`);
+  check(topology.levels.has(stableLevel), `stable L${stableLevel} current level is materialized`);
+  check(stableLevel === MIN_GRID_LEVEL || topology.levels.has(stableLevel - 1), `stable L${stableLevel} lower adjacent target is available when valid`);
+  check(stableLevel === MAX_GRID_LEVEL || topology.levels.has(stableLevel + 1), `stable L${stableLevel} upper adjacent target is available when valid`);
+  check(stableLevel <= 13 ? topology.levels.has(13) : true, `stable L${stableLevel} retains the L13 reference when required`);
+  verifyHierarchy(topology, `stable L${stableLevel}`);
+}
+
+function verifyRangeRoundTrip(window, firstRange, middleRange, name) {
+  const original = new GeographicLodTopology(window, firstRange);
+  const middle = new GeographicLodTopology(window, middleRange);
+  const final = new GeographicLodTopology(window, firstRange);
+  for (let level = firstRange.minLevel; level <= firstRange.maxLevel; level++) {
+    const originalSamples = original.samplesFor(level);
+    const finalSamples = final.samplesFor(level);
+    check(JSON.stringify(originalSamples.map((sample) => [sample.id, sample.mercator, sample.lngLat]))
+      === JSON.stringify(finalSamples.map((sample) => [sample.id, sample.mercator, sample.lngLat])), `${name} L${level} returns exactly after range round-trip`);
+  }
+  check(middle.levels.size === middleRange.maxLevel - middleRange.minLevel + 1, `${name} intermediate range is contiguous and bounded`);
+}
+
+verifyRangeRoundTrip(topologyA.canonicalWindow, { minLevel: 11, maxLevel: 13 }, { minLevel: 10, maxLevel: 13 }, 'L11..L13 → L10..L13 → L11..L13');
+verifyRangeRoundTrip(topologyA.canonicalWindow, { minLevel: 12, maxLevel: 14 }, { minLevel: 13, maxLevel: 15 }, 'L12..L14 → L13..L15 → L12..L14');
+verifyWeatherInvariance(topologyA.canonicalWindow, 'window A');
+verifyWeatherInvariance(topologyB.canonicalWindow, 'window B');
+verifyWeatherInvariance(topologyC.canonicalWindow, 'window C');
 
 const sharedPyramid = new GeographicWeatherPyramid(Float64Array, topologyA);
 const dots = new GeographicDotsLayer(sharedPyramid);
@@ -214,17 +251,27 @@ squares.setSamples(sharedPyramid.samplesFor(13), 0.5);
 const switchedFrame = geographicTemporalFrameAt(0.5);
 check(dots.temporal && squares.temporal && dots.temporal.index === switchedFrame.index && squares.temporal.index === switchedFrame.index, 'topology replacement restores both renderers at the current non-zero weather time');
 check(oldDotsTemporal !== dots.temporal && oldSquaresTemporal !== squares.temporal, 'topology replacement does not reuse incompatible temporal arrays');
+const oldRangeTemporal = { dots: dots.temporal, squares: squares.temporal };
+check(sharedPyramid.setLevelRange(lodRangeForStableLevel(14)), 'shared pyramid replaces its materialized range after a stable LOD change');
+dots.setTopology(sharedPyramid.topology);
+squares.setTopology(sharedPyramid.topology);
+dots.setSamples(sharedPyramid.samplesFor(14), 0.5);
+squares.setSamples(sharedPyramid.samplesFor(14), 0.5);
+check(dots.temporal && squares.temporal && dots.temporal.index === switchedFrame.index && squares.temporal.index === switchedFrame.index, 'range replacement restores both renderers at the current non-zero weather time');
+check(oldRangeTemporal.dots !== dots.temporal && oldRangeTemporal.squares !== squares.temporal, 'range replacement does not reuse incompatible temporal arrays');
 
-const fixedCount = sumCounts(fullPyramid.topology);
+const fixedWindowTopology = new GeographicLodTopology(topologyB.canonicalWindow, fullRange);
+const fixedCount = sumCounts(fixedWindowTopology);
 const summaryAndAnchorBytes = (topology) => sumCounts(topology) * (SUMMARY_BYTES_PER_SAMPLE + ANCHOR_BYTES_PER_SAMPLE);
 console.log('topology counts and typed summary+anchor memory:');
-for (const [name, topology] of [['full support', fullPyramid.topology], ['initial/large', topologyA], ['tighter L13', topologyB], ['L14', topologyC], ['L15', new GeographicLodTopology({ minX: windows[1].minX + L10_STEP, maxX: windows[1].maxX - L10_STEP, minY: windows[1].minY + L10_STEP, maxY: windows[1].maxY - L10_STEP })]]) {
-  const counts = LEVELS.map((level) => topology.samplesFor(level).length);
+for (const [name, topology] of [['all-level same-window', fullPyramid.topology], ['initial/large', topologyA], ['tighter L13', topologyB], ['L14', topologyC], ['L15', new GeographicLodTopology({ minX: windows[1].minX + L10_STEP, maxX: windows[1].maxX - L10_STEP, minY: windows[1].minY + L10_STEP, maxY: windows[1].maxY - L10_STEP }, { minLevel: 14, maxLevel: 15 })]]) {
+  const counts = LEVELS.map((level) => topology.levels.has(level) ? topology.samplesFor(level).length : '—');
   const bytes = summaryAndAnchorBytes(topology);
   console.log(`${name}: ${counts.map((count, index) => `L${LEVELS[index]}=${count}`).join(', ')}; approx=${(bytes / 1024 / 1024).toFixed(3)} MiB`);
 }
-const windowedCounts = sumCounts(topologyB);
-console.log(`all-level active topology reduction at tighter L13 window: ${(100 * (1 - windowedCounts / fixedCount)).toFixed(2)}%; fixed/windowed typed summary+anchor bytes=${(summaryAndAnchorBytes(fullPyramid.topology) / 1024 / 1024).toFixed(3)}/${(summaryAndAnchorBytes(topologyB) / 1024 / 1024).toFixed(3)} MiB`);
+const windowedTopology = new GeographicLodTopology(topologyB.canonicalWindow, lodRangeForStableLevel(13));
+const windowedCounts = sumCounts(windowedTopology);
+console.log(`same-window L13 active topology reduction: ${(100 * (1 - windowedCounts / fixedCount)).toFixed(2)}%; fixed/windowed typed summary+anchor bytes=${(summaryAndAnchorBytes(fixedWindowTopology) / 1024 / 1024).toFixed(3)}/${(summaryAndAnchorBytes(windowedTopology) / 1024 / 1024).toFixed(3)} MiB`);
 check(windowedCounts < fixedCount, 'windowed topology materializes fewer canonical samples than fixed support');
 
 console.log(failures ? `VERIFICATION FAILED: ${failures}` : 'VERIFICATION PASSED');
