@@ -47,11 +47,11 @@ function samePreparedGeometry(dense, compact) {
     const column = index % compact.width;
     const row = (index - column) / compact.width;
     const sourceColumn = compact.sourceColumn[column];
-    const sourceRow = compact.sourceRow[row];
-    const compactInside = sourceColumn !== 0xffffffff && sourceRow !== 0xffffffff;
+    const sourceRowBase = compact.sourceRowBase[row];
+    const compactInside = sourceColumn !== 0xffffffff && sourceRowBase !== 0xffffffff;
     const denseBase = dense.baseIndex[index];
     if (compactInside !== (denseBase !== 0xffffffff)) return false;
-    if (compactInside && (sourceRow * dense.sourceWidth + sourceColumn !== denseBase
+    if (compactInside && (sourceRowBase + sourceColumn !== denseBase
       || compact.longitudeFraction[column] !== dense.longitudeFraction[index]
       || compact.latitudeFraction[row] !== dense.latitudeFraction[index])) return false;
   }

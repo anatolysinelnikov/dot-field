@@ -119,14 +119,14 @@ function compareCompactAndDenseGeometry() {
     const column = index % optimizedGeometry.width;
     const row = (index - column) / optimizedGeometry.width;
     const sourceColumn = optimizedGeometry.sourceColumn[column];
-    const sourceRow = optimizedGeometry.sourceRow[row];
-    const compactInside = sourceColumn !== 0xffffffff && sourceRow !== 0xffffffff;
+    const sourceRowBase = optimizedGeometry.sourceRowBase[row];
+    const compactInside = sourceColumn !== 0xffffffff && sourceRowBase !== 0xffffffff;
     const denseBaseIndex = densePreparedGeometry.baseIndex[index];
     if (compactInside !== (denseBaseIndex !== 0xffffffff)) {
       throw new Error(`compact/dense inside status differs at sample ${index}.`);
     }
     if (compactInside) {
-      const compactBaseIndex = sourceRow * densePreparedGeometry.sourceWidth + sourceColumn;
+      const compactBaseIndex = sourceRowBase + sourceColumn;
       if (compactBaseIndex !== denseBaseIndex
         || optimizedGeometry.longitudeFraction[column] !== densePreparedGeometry.longitudeFraction[index]
         || optimizedGeometry.latitudeFraction[row] !== densePreparedGeometry.latitudeFraction[index]) {
@@ -176,11 +176,11 @@ function compareCompactLevelGeometry(level) {
     const column = index % compact.width;
     const row = (index - column) / compact.width;
     const sourceColumn = compact.sourceColumn[column];
-    const sourceRow = compact.sourceRow[row];
-    const compactInside = sourceColumn !== 0xffffffff && sourceRow !== 0xffffffff;
+    const sourceRowBase = compact.sourceRowBase[row];
+    const compactInside = sourceColumn !== 0xffffffff && sourceRowBase !== 0xffffffff;
     const denseBase = dense.baseIndex[index];
     if (compactInside !== (denseBase !== 0xffffffff)) throw new Error(`L${level} inside status differs at ${index}.`);
-    if (compactInside && (sourceRow * dense.sourceWidth + sourceColumn !== denseBase
+    if (compactInside && (sourceRowBase + sourceColumn !== denseBase
       || compact.longitudeFraction[column] !== dense.longitudeFraction[index]
       || compact.latitudeFraction[row] !== dense.latitudeFraction[index])) {
       throw new Error(`L${level} lookup differs at ${index}.`);

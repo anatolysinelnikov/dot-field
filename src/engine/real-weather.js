@@ -410,7 +410,7 @@ export class RealWeatherSequence extends RealWeatherField {
         count: width * height,
         sourceColumn: new Uint32Array(width),
         longitudeFraction: new Float64Array(width),
-        sourceRow: new Uint32Array(height),
+        sourceRowBase: new Uint32Array(height),
         latitudeFraction: new Float64Array(height)
       };
     geometry.kind = COMPACT_RECTANGULAR_GEOMETRY;
@@ -418,33 +418,38 @@ export class RealWeatherSequence extends RealWeatherField {
     geometry.height = height;
     geometry.count = width * height;
     geometry.sourceColumn.fill(OUTSIDE_SOURCE_INDEX);
-    geometry.sourceRow.fill(OUTSIDE_SOURCE_INDEX);
+    geometry.sourceRowBase.fill(OUTSIDE_SOURCE_INDEX);
     this.setSamplingGeometryMetadata(geometry);
+    const sourceWidth = this.longitudes.length;
+    const sourceColumnIndices = geometry.sourceColumn;
+    const sourceRowBases = geometry.sourceRowBase;
+    const longitudeFractions = geometry.longitudeFraction;
+    const latitudeFractions = geometry.latitudeFraction;
 
     for (let column = 0; column < width; column++) {
       const longitude = longitudes[column];
       if (longitude < this.bounds.west || longitude > this.bounds.east) continue;
       const position = this.locate(this.longitudes, longitude);
-      geometry.sourceColumn[column] = position.index;
-      geometry.longitudeFraction[column] = position.fraction;
+      sourceColumnIndices[column] = position.index;
+      longitudeFractions[column] = position.fraction;
     }
     for (let row = 0; row < height; row++) {
       const latitude = latitudes[row];
       if (latitude < this.bounds.south || latitude > this.bounds.north) continue;
       const position = this.locate(this.latitudes, latitude);
-      geometry.sourceRow[row] = position.index;
-      geometry.latitudeFraction[row] = position.fraction;
+      sourceRowBases[row] = position.index * sourceWidth;
+      latitudeFractions[row] = position.fraction;
     }
 
     const activeIndices = this.potentialWeatherMask ? [] : null;
     for (let row = 0; row < height; row++) {
-      const sourceRow = geometry.sourceRow[row];
-      if (sourceRow === OUTSIDE_SOURCE_INDEX) continue;
+      const sourceRowBase = sourceRowBases[row];
+      if (sourceRowBase === OUTSIDE_SOURCE_INDEX) continue;
       const rowOffset = row * width;
       for (let column = 0; column < width; column++) {
-        const sourceColumn = geometry.sourceColumn[column];
+        const sourceColumn = sourceColumnIndices[column];
         if (sourceColumn === OUTSIDE_SOURCE_INDEX) continue;
-        const baseIndex = sourceRow * this.longitudes.length + sourceColumn;
+        const baseIndex = sourceRowBase + sourceColumn;
         const x1y0 = baseIndex + 1;
         const x0y1 = baseIndex + this.longitudes.length;
         const x1y1 = x0y1 + 1;
@@ -463,7 +468,7 @@ export class RealWeatherSequence extends RealWeatherField {
     if (geometry?.kind === COMPACT_RECTANGULAR_GEOMETRY) {
       return geometry.sourceColumn.byteLength
         + geometry.longitudeFraction.byteLength
-        + geometry.sourceRow.byteLength
+        + geometry.sourceRowBase.byteLength
         + geometry.latitudeFraction.byteLength;
     }
     return super.samplingGeometryBytes(geometry);
@@ -542,8 +547,8 @@ export class RealWeatherSequence extends RealWeatherField {
         const column = index % geometry.width;
         const row = (index - column) / geometry.width;
         const sourceColumn = geometry.sourceColumn[column];
-        const sourceRow = geometry.sourceRow[row];
-        baseIndex = sourceRow * this.longitudes.length + sourceColumn;
+        const sourceRowBase = geometry.sourceRowBase[row];
+        baseIndex = sourceRowBase + sourceColumn;
         longitudeFraction = geometry.longitudeFraction[column];
         latitudeFraction = geometry.latitudeFraction[row];
       } else {
@@ -597,9 +602,9 @@ export class RealWeatherSequence extends RealWeatherField {
       const column = index % geometry.width;
       const row = (index - column) / geometry.width;
       const sourceColumn = geometry.sourceColumn[column];
-      const sourceRow = geometry.sourceRow[row];
-      if (sourceColumn === OUTSIDE_SOURCE_INDEX || sourceRow === OUTSIDE_SOURCE_INDEX) return output;
-      baseIndex = sourceRow * this.longitudes.length + sourceColumn;
+      const sourceRowBase = geometry.sourceRowBase[row];
+      if (sourceColumn === OUTSIDE_SOURCE_INDEX || sourceRowBase === OUTSIDE_SOURCE_INDEX) return output;
+      baseIndex = sourceRowBase + sourceColumn;
       longitudeFraction = geometry.longitudeFraction[column];
       latitudeFraction = geometry.latitudeFraction[row];
     } else {
