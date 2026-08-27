@@ -5,7 +5,7 @@ import {
   aggregateWeatherSummary,
   buildCenteredContributions,
   evaluateDirectWeatherSummary,
-  RAIN_COVERAGE_THRESHOLDS_MMH,
+  rainCoverageWeightForThreshold,
   GeographicWeatherPyramid
 } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicLodTopology, lodRangeForStableLevel, mercatorXForIndex, mercatorYForIndex } from '../src/engine/geographic-lod.js';
@@ -199,11 +199,8 @@ function compareSummary(level, optimized, dense) {
   compare('totalWeight', optimized.totalWeight, dense.totalWeight);
   compare('rainWeightedSumMmh', optimized.rainWeightedSumMmh, dense.rainWeightedSumMmh);
   compare('rainMaxMmh', optimized.rainMaxMmh, dense.rainMaxMmh);
-  for (let index = 0; index < RAIN_COVERAGE_THRESHOLDS_MMH.length; index++) {
-    compare(`rainCoverageWeight@${RAIN_COVERAGE_THRESHOLDS_MMH[index]}`, optimized.rainCoverageWeight[index], dense.rainCoverageWeight[index]);
-  }
-  for (const name of ['stormCoverageWeight', 'stormWeightedSeverity', 'stormMaxSeverity', 'hailCoverageWeight', 'hailWeightedSeverity', 'hailMaxSeverity']) {
-    compare(name, optimized[name], dense[name]);
+  for (const threshold of [0.05, 2.5]) {
+    compare(`rainCoverageWeight@${threshold}`, rainCoverageWeightForThreshold(optimized, threshold), rainCoverageWeightForThreshold(dense, threshold));
   }
   const dots = mapDotsWeatherSummary(optimized);
   const denseDots = mapDotsWeatherSummary(dense);

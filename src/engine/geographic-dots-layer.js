@@ -5,7 +5,7 @@ import {
   dotsStrongRainMmhToRadiusFraction,
   rainMmhToRadiusFraction
 } from './precipitation-mapping.js';
-import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH, WEATHER_REFERENCE_LEVEL } from './geographic-weather-pyramid.js';
+import { GeographicWeatherPyramid, WEATHER_REFERENCE_LEVEL, rainCoverageWeightForThreshold, WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY } from './geographic-weather-pyramid.js';
 import { canonicalWindowsEqual, MAX_GRID_LEVEL, mercatorXForIndex, mercatorYForIndex } from './geographic-lod.js';
 import { geographicHazardRadii, geographicHazardRadiusForSeverity } from './hazard-renderer.js';
 
@@ -60,15 +60,6 @@ const STORM = unitShape(circularPoints(8).map((point, index) => {
 export function areaLinearRadius(startRadius, endRadius, progress) {
   return Math.sqrt(startRadius * startRadius + (endRadius * endRadius - startRadius * startRadius) * progress);
 }
-
-function coverageIndex(threshold) {
-  const index = RAIN_COVERAGE_THRESHOLDS_MMH.indexOf(threshold);
-  if (index < 0) throw new Error(`Missing shared rain coverage threshold ${threshold}.`);
-  return index;
-}
-
-const RAIN_COVERAGE_INDEX = coverageIndex(0.05);
-const STRONG_COVERAGE_INDEX = coverageIndex(2.5);
 
 function positiveMean(weightedSeverity, coverageWeight) {
   return coverageWeight > 0 ? weightedSeverity / coverageWeight : 0;
@@ -136,15 +127,18 @@ export function mapDotsWeatherSummary(summary, reusable = null) {
   const isDirectPointSummary = summary.level >= REFERENCE_GRID_LEVEL;
   const directHazardValue = { storm: 0, hail: 0 };
   const directHazard = { stormRadius: 0, hailRadius: 0 };
+  const rainCoverageWeights = rainCoverageWeightForThreshold(summary, 0.05);
+  const strongCoverageWeights = rainCoverageWeightForThreshold(summary, 2.5);
+  const hazardsUnavailable = summary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY;
   const count = activeIndices ? activeIndices.length : summary.levelData.count;
   const spacing = summary.levelData.spacing;
   for (let position = 0; position < count; position++) {
     const index = activeIndices ? activeIndices[position] : position;
     const total = summary.totalWeight[index];
-    const rainCoverageWeight = summary.rainCoverageWeight[RAIN_COVERAGE_INDEX][index];
+    const rainCoverageWeight = rainCoverageWeights[index];
     const rainCoverage = summaryCoverage(summary, rainCoverageWeight, index);
     const wetMeanMmh = positiveMean(summary.rainWeightedSumMmh[index], rainCoverageWeight);
-    const strongCoverage = summaryCoverage(summary, summary.rainCoverageWeight[STRONG_COVERAGE_INDEX][index], index);
+    const strongCoverage = summaryCoverage(summary, strongCoverageWeights[index], index);
     state.rainRadius[index] = spacing * Math.sqrt(rainCoverage) * rainMmhToRadiusFraction(wetMeanMmh);
     if (isDirectPointSummary) {
       const rainMmh = total > 0 ? summary.rainWeightedSumMmh[index] / total : 0;
@@ -154,6 +148,11 @@ export function mapDotsWeatherSummary(summary, reusable = null) {
         * dotsStrongRainMmhToRadiusFraction(summary.rainMaxMmh[index]);
     }
 
+    if (hazardsUnavailable) {
+      state.stormRadius[index] = 0;
+      state.hailRadius[index] = 0;
+      continue;
+    }
     const hailCoverageWeight = summary.hailCoverageWeight[index];
     const hailCoverage = summaryCoverage(summary, hailCoverageWeight, index);
     const hailMean = positiveMean(summary.hailWeightedSeverity[index], hailCoverageWeight);

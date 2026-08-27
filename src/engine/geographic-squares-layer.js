@@ -1,18 +1,12 @@
 import { prepareGeographicFieldFrame } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
-import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH } from './geographic-weather-pyramid.js';
+import { GeographicWeatherPyramid, rainCoverageWeightForThreshold, WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY } from './geographic-weather-pyramid.js';
 import { canonicalWindowsEqual, MAX_GRID_LEVEL, mercatorXForIndex, mercatorYForIndex } from './geographic-lod.js';
 import { RAIN_VISIBILITY_SHADER, STRONG_RAIN_SHADER } from './precipitation-mapping.js';
 
 const INSTANCE_STRIDE = 18;
 const CELL_VERTICES = new Float32Array([-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5]);
 
-function coverageIndex(threshold) {
-  const index = RAIN_COVERAGE_THRESHOLDS_MMH.indexOf(threshold);
-  if (index < 0) throw new Error(`Missing shared rain coverage threshold ${threshold}.`);
-  return index;
-}
-const RAIN_COVERAGE_INDEX = coverageIndex(0.05);
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 
 function retainedLevelData(previousTopology, nextTopology, levelData) {
@@ -80,14 +74,25 @@ export function mapSquaresWeatherSummary(summary, reusable = null) {
   const activeIndices = summary.potentialActiveIndices;
   prepareMappedActiveSet(state, activeIndices);
   const count = activeIndices ? activeIndices.length : summary.levelData.count;
+  const rainWeights = rainCoverageWeightForThreshold(summary, 0.05);
+  const hazardsUnavailable = summary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY;
   for (let position = 0; position < count; position++) {
     const index = activeIndices ? activeIndices[position] : position;
     const total = summary.totalWeight[index];
-    const rainWeight = summary.rainCoverageWeight[RAIN_COVERAGE_INDEX][index];
-    const stormWeight = summary.stormCoverageWeight[index];
-    const hailWeight = summary.hailCoverageWeight[index];
+    const rainWeight = rainWeights[index];
     state.rainCoverage[index] = total > 0 ? rainWeight / total : 0;
     state.rainWetMeanMmh[index] = rainWeight > 0 ? summary.rainWeightedSumMmh[index] / rainWeight : 0;
+    if (hazardsUnavailable) {
+      state.stormCoverage[index] = 0;
+      state.stormMeanSeverity[index] = 0;
+      state.stormMaxSeverity[index] = 0;
+      state.hailCoverage[index] = 0;
+      state.hailMeanSeverity[index] = 0;
+      state.hailMaxSeverity[index] = 0;
+      continue;
+    }
+    const stormWeight = summary.stormCoverageWeight[index];
+    const hailWeight = summary.hailCoverageWeight[index];
     state.stormCoverage[index] = total > 0 ? stormWeight / total : 0;
     state.stormMeanSeverity[index] = stormWeight > 0 ? summary.stormWeightedSeverity[index] / stormWeight : 0;
     state.stormMaxSeverity[index] = summary.stormMaxSeverity[index];

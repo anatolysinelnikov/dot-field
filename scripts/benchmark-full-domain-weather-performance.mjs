@@ -560,9 +560,11 @@ for (const stableLevel of LEVELS) {
   const sparseSquaresMetrics = buildSquaresInstances(pyramid, stableLevel, oldMappedSquares);
   const fusedSquaresMetrics = buildSquaresInstances(fusedPyramid, stableLevel, fusedMappedSquares);
   const totalSamples = [...pyramid.levels.values()].reduce((sum, levelData) => sum + levelData.count, 0);
-  const summaryBytes = totalSamples * pyramid.summaryMemoryBytesPerSample();
-  const l13SummaryBytes = pyramid.levelDataFor(13).count * pyramid.summaryMemoryBytesPerSample();
-  const fusedSummaryBytes = summaryBytes - l13SummaryBytes;
+  const genericSummaryBytes = totalSamples * pyramid.summaryMemoryBytesPerSample();
+  const compactSummaryBytes = totalSamples * 4 * Float32Array.BYTES_PER_ELEMENT;
+  const sharedTotalWeightBytes = totalSamples * Float32Array.BYTES_PER_ELEMENT;
+  const l13CompactSummaryBytes = pyramid.levelDataFor(13).count * 4 * Float32Array.BYTES_PER_ELEMENT;
+  const fusedCompactSummaryBytes = compactSummaryBytes - l13CompactSummaryBytes;
   const activeCount = geometry.potentialActiveIndices?.length ?? geometry.baseIndex.length;
   const activeSummaryIndices = optimizedSummary[stableLevel].potentialActiveIndices;
   const activeSummaryCount = activeSummaryIndices?.length ?? pyramid.levelDataFor(stableLevel).count;
@@ -577,6 +579,6 @@ for (const stableLevel of LEVELS) {
   console.log(`L${stableLevel}: Dots mapping ms dense-reference=${legacyDotsMappingMs.toFixed(3)} separable=${dotsMappingMs.toFixed(3)} fused=${fusedDotsMappingMs.toFixed(3)}; instances dense-reference=${legacyDotsInstanceMs.toFixed(3)} separable=${dotsInstanceMs.toFixed(3)} fused=${fusedDotsInstanceMs.toFixed(3)}; counts dense-reference=${JSON.stringify(denseDotsMetrics.counts)} separable=${JSON.stringify(sparseDotsMetrics.counts)} fused=${JSON.stringify(fusedDotsMetrics.counts)}; bytes dense-reference=${denseDotsMetrics.bytes} separable=${sparseDotsMetrics.bytes} fused=${fusedDotsMetrics.bytes}`);
   console.log(`L${stableLevel}: Squares mapping ms dense-reference=${legacySquaresMappingMs.toFixed(3)} separable=${squaresMappingMs.toFixed(3)} fused=${fusedSquaresMappingMs.toFixed(3)}; instances dense-reference=${legacySquaresInstanceMs.toFixed(3)} separable=${squaresInstanceMs.toFixed(3)} fused=${fusedSquaresInstanceMs.toFixed(3)}; count dense-reference=${denseSquaresMetrics.count} separable=${sparseSquaresMetrics.count} fused=${fusedSquaresMetrics.count}; packedBytes dense-reference=${denseSquaresMetrics.packedBytes} separable=${sparseSquaresMetrics.packedBytes} fused=${fusedSquaresMetrics.packedBytes}; allocatedBytes dense-reference=${denseSquaresMetrics.allocatedBytes} separable=${sparseSquaresMetrics.allocatedBytes} fused=${fusedSquaresMetrics.allocatedBytes}`);
   console.log(`L${stableLevel}: total weather-to-instance-preparation ms dense-reference=${denseTotalPreparationMs.toFixed(3)} separable=${sparseTotalPreparationMs.toFixed(3)} fused=${fusedTotalPreparationMs.toFixed(3)}`);
-  console.log(`L${stableLevel}: physical summary memory one-keyframe old=${mib(summaryBytes)} fused=${mib(fusedSummaryBytes)}; normal two-keyframe old=${mib(summaryBytes * 2)} fused=${mib(fusedSummaryBytes * 2)}; eliminated L13=${mib(l13SummaryBytes)} per keyframe; active-index list=${mib(activeIndexBytes)} source union mask=${mib(weather.potentialWeatherMask?.byteLength || 0)} Dots/Squares mapped=${mib(pyramid.levelDataFor(stableLevel).count * (4 + 8) * Float32Array.BYTES_PER_ELEMENT)}`);
+  console.log(`L${stableLevel}: summary fields bytes/sample generic=60 compact-rain-only=16; shared totalWeight=4 (reported once); one-keyframe generic=${mib(genericSummaryBytes)} compact=${mib(compactSummaryBytes)} fused-compact=${mib(fusedCompactSummaryBytes)}; normal two-keyframe generic=${mib(genericSummaryBytes * 2)} compact=${mib(compactSummaryBytes * 2)}; shared totalWeight cache=${mib(sharedTotalWeightBytes)}; fused omitted L13 compact=${mib(l13CompactSummaryBytes)}; active-index list=${mib(activeIndexBytes)} spatial-source-cache=${mib(spatialCacheBytes(geometry))} prepared-geometry=${mib(weather.samplingGeometryBytes(geometry))} Dots/Squares mapped=${mib(pyramid.levelDataFor(stableLevel).count * (4 + 8) * Float32Array.BYTES_PER_ELEMENT)}`);
   if (stableLevel === 10) console.log(`L${stableLevel}: dense-vs-optimized sample check=${denseSummary[stableLevel].rainWeightedSumMmh[0] === optimizedSummary[stableLevel].rainWeightedSumMmh[0]}`);
 }

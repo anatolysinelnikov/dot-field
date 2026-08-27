@@ -213,6 +213,28 @@ API, retain the dense generic fallback.
 These arrays are computation caches rather than a new weather representation;
 the single-point sampler remains the semantic reference path.
 
+### Physical weather-summary profiles
+
+`geographic-weather-pyramid.js` retains the generic hazard-capable physical
+summary contract: weighted rain, maximum rain, all seven rain-coverage
+thresholds, and storm/hail coverage, weighted severity, and maxima. Providers
+may explicitly advertise the `rain-only-display` summary profile. The current
+prepared real-weather sequence does so together with explicit unavailable storm
+and hail channels; selection is a provider capability, never a renderer choice
+or an inference from a zero-valued frame.
+
+That compact profile is shared by Dots and Squares and contains only weighted
+rain, maximum rain, and coverage weights at 0.05 and 2.5 mm/h. Its mutable
+Float32 temporal fields therefore use 16 bytes/sample, rather than the generic
+hazard-capable 60 bytes/sample. `totalWeight` remains a separately cached,
+shared Float32 array and is not duplicated into temporal summaries. Compact
+summaries deliberately have no storm or hail arrays: their absence means those
+physical channels are unavailable, so renderers map their hazard output to zero
+without owning provider semantics. Generic and future hazard-capable providers
+continue to use the full contract. Renderers resolve each profile-supported
+rain coverage array once before their sample loop; temporal reconstruction
+remains provider-owned.
+
 `geography.js` is the renderer-facing adapter. It loads and activates the
 sequence before map initialization and converts the shared point interface to
 geographic longitude/latitude. It falls back to the checked-in

@@ -34,7 +34,9 @@ function sameArray(left, right) {
 }
 
 function sameObjectArrays(left, right, names) {
-  const scalarNames = names || ['totalWeight', 'rainWeightedSumMmh', 'rainMaxMmh', 'stormCoverageWeight', 'stormWeightedSeverity', 'stormMaxSeverity', 'hailCoverageWeight', 'hailWeightedSeverity', 'hailMaxSeverity'];
+  const scalarNames = names || ['totalWeight', 'rainWeightedSumMmh', 'rainMaxMmh', ...(
+    left.profile === 'rain-only-display' ? [] : ['stormCoverageWeight', 'stormWeightedSeverity', 'stormMaxSeverity', 'hailCoverageWeight', 'hailWeightedSeverity', 'hailMaxSeverity']
+  )];
   return scalarNames.every((name) => sameArray(left[name], right[name]))
     && left.rainCoverageWeight.length === right.rainCoverageWeight.length
     && left.rainCoverageWeight.every((values, index) => sameArray(values, right.rainCoverageWeight[index]));

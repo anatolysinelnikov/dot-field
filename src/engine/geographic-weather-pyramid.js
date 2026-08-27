@@ -35,6 +35,9 @@ export const RAIN_COVERAGE_THRESHOLDS_MMH = Object.freeze([
   10.0,
   50.0
 ]);
+export const WEATHER_SUMMARY_PROFILE_GENERIC = 'generic';
+export const WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY = 'rain-only-display';
+const COMPACT_RAIN_COVERAGE_THRESHOLDS_MMH = Object.freeze([0.05, 2.5]);
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 const AGGREGATION_RELATION_CACHE_LIMIT = 12;
 const centeredContributionRelationCache = new Map();
@@ -64,9 +67,11 @@ export function aggregationRelationCacheStats() {
   };
 }
 
-function summaryMatchesLevel(summary, levelData, ArrayType) {
+function summaryMatchesLevel(summary, levelData, ArrayType, profile) {
   return summary?.totalWeight?.length === levelData.count
-    && summary.rainCoverageWeight?.length === RAIN_COVERAGE_THRESHOLDS_MMH.length
+    && summary.profile === profile
+    && summary.rainCoverageWeight?.length === (profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY
+      ? COMPACT_RAIN_COVERAGE_THRESHOLDS_MMH.length : RAIN_COVERAGE_THRESHOLDS_MMH.length)
     && summary.totalWeight.constructor === ArrayType
     && summary.rainCoverageWeight[0]?.constructor === ArrayType;
 }
@@ -76,6 +81,7 @@ function zeroWeatherFields(summary, activeIndices = null) {
     summary.rainWeightedSumMmh.fill(0);
     summary.rainMaxMmh.fill(0);
     for (const coverage of summary.rainCoverageWeight) coverage.fill(0);
+    if (summary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) return;
     summary.stormCoverageWeight.fill(0);
     summary.stormWeightedSeverity.fill(0);
     summary.stormMaxSeverity.fill(0);
@@ -88,6 +94,7 @@ function zeroWeatherFields(summary, activeIndices = null) {
     summary.rainWeightedSumMmh[index] = 0;
     summary.rainMaxMmh[index] = 0;
     for (const coverage of summary.rainCoverageWeight) coverage[index] = 0;
+    if (summary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) continue;
     summary.stormCoverageWeight[index] = 0;
     summary.stormWeightedSeverity[index] = 0;
     summary.stormMaxSeverity[index] = 0;
@@ -97,8 +104,8 @@ function zeroWeatherFields(summary, activeIndices = null) {
   }
 }
 
-export function createWeatherSummary(levelData, reusable = null, ArrayType = Float32Array, totalWeight = null) {
-  if (summaryMatchesLevel(reusable, levelData, ArrayType)) {
+export function createWeatherSummary(levelData, reusable = null, ArrayType = Float32Array, totalWeight = null, profile = WEATHER_SUMMARY_PROFILE_GENERIC) {
+  if (summaryMatchesLevel(reusable, levelData, ArrayType, profile)) {
     reusable.level = levelData.level;
     reusable.levelData = levelData;
     if (totalWeight) {
@@ -109,7 +116,8 @@ export function createWeatherSummary(levelData, reusable = null, ArrayType = Flo
   }
 
   const length = levelData.count;
-  return {
+  const summary = {
+    profile,
     level: levelData.level,
     levelData,
     totalWeight: totalWeight || new ArrayType(length),
@@ -118,14 +126,30 @@ export function createWeatherSummary(levelData, reusable = null, ArrayType = Flo
     potentialActiveIndicesInitialized: false,
     rainWeightedSumMmh: new ArrayType(length),
     rainMaxMmh: new ArrayType(length),
-    rainCoverageWeight: RAIN_COVERAGE_THRESHOLDS_MMH.map(() => new ArrayType(length)),
-    stormCoverageWeight: new ArrayType(length),
-    stormWeightedSeverity: new ArrayType(length),
-    stormMaxSeverity: new ArrayType(length),
-    hailCoverageWeight: new ArrayType(length),
-    hailWeightedSeverity: new ArrayType(length),
-    hailMaxSeverity: new ArrayType(length)
+    rainCoverageWeight: (profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY
+      ? COMPACT_RAIN_COVERAGE_THRESHOLDS_MMH : RAIN_COVERAGE_THRESHOLDS_MMH).map(() => new ArrayType(length))
   };
+  if (profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) return summary;
+  summary.stormCoverageWeight = new ArrayType(length);
+  summary.stormWeightedSeverity = new ArrayType(length);
+  summary.stormMaxSeverity = new ArrayType(length);
+  summary.hailCoverageWeight = new ArrayType(length);
+  summary.hailWeightedSeverity = new ArrayType(length);
+  summary.hailMaxSeverity = new ArrayType(length);
+  return summary;
+}
+
+export function rainCoverageWeightForThreshold(summary, threshold) {
+  const thresholds = summary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY
+    ? COMPACT_RAIN_COVERAGE_THRESHOLDS_MMH : RAIN_COVERAGE_THRESHOLDS_MMH;
+  const index = thresholds.indexOf(threshold);
+  if (index < 0) throw new Error(`Weather summary profile ${summary.profile} does not support rain coverage threshold ${threshold}.`);
+  return summary.rainCoverageWeight[index];
+}
+
+function summaryProfileForFrame(frame) {
+  return frame?.weatherSummaryProfile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY
+    ? WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY : WEATHER_SUMMARY_PROFILE_GENERIC;
 }
 
 function initializeDirectTotalWeight(summary) {
@@ -481,7 +505,8 @@ export function buildAggregationSetup(topology, ArrayType = Float32Array, reuse 
 }
 
 export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, ArrayType = Float32Array, samplingGeometry = null, totalWeight = null) {
-  const summary = createWeatherSummary(levelData, reusable, ArrayType, totalWeight);
+  const profile = summaryProfileForFrame(frame);
+  const summary = createWeatherSummary(levelData, reusable, ArrayType, totalWeight, profile);
   initializeDirectTotalWeight(summary);
   const activeIndices = samplingGeometry?.potentialActiveIndices ?? null;
   const previousActiveIndices = summary.potentialActiveIndices;
@@ -516,11 +541,15 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
       geographicPreparedIntensityAtXY(frame, longitude, latitude, value);
     }
     const rainMmh = value.rainMmh;
-    const storm = value.storm;
-    const hail = value.hail;
-
     summary.rainWeightedSumMmh[index] = rainMmh;
     summary.rainMaxMmh[index] = rainMmh;
+    if (profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) {
+      summary.rainCoverageWeight[0][index] = rainMmh >= 0.05 ? 1 : 0;
+      summary.rainCoverageWeight[1][index] = rainMmh >= 2.5 ? 1 : 0;
+      continue;
+    }
+    const storm = value.storm;
+    const hail = value.hail;
     for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
       summary.rainCoverageWeight[thresholdIndex][index] = rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0;
     }
@@ -534,8 +563,53 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
   return summary;
 }
 
+function aggregateRainOnlyWeatherSummary(parentLevel, childSummary, contributions, reusable, ArrayType, totalWeight) {
+  const summary = createWeatherSummary(parentLevel, reusable, ArrayType, totalWeight, WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY);
+  initializeAggregateTotalWeight(summary, childSummary, contributions);
+  const activeIndices = activeIndicesForAggregate(summary, childSummary, contributions);
+  zeroWeatherFields(summary, activeIndices);
+  const activeChildren = childSummary.potentialActiveIndices;
+  const childCount = childSummary.levelData.count;
+  const accumulate = (parentIndex, childIndex, weight) => {
+    summary.rainWeightedSumMmh[parentIndex] += weight * childSummary.rainWeightedSumMmh[childIndex];
+    summary.rainCoverageWeight[0][parentIndex] += weight * childSummary.rainCoverageWeight[0][childIndex];
+    summary.rainCoverageWeight[1][parentIndex] += weight * childSummary.rainCoverageWeight[1][childIndex];
+    if (weight * childSummary.totalWeight[childIndex] > 0) {
+      summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], childSummary.rainMaxMmh[childIndex]);
+    }
+  };
+  for (let activeChild = 0; activeChild < (activeChildren ? activeChildren.length : childCount); activeChild++) {
+    const childIndex = activeChildren ? activeChildren[activeChild] : activeChild;
+    if (contributions.kind !== 'separable-centered') {
+      for (let contributionIndex = contributions.offsets[childIndex]; contributionIndex < contributions.offsets[childIndex + 1]; contributionIndex++) {
+        accumulate(contributions.parentIndices[contributionIndex], childIndex, contributions.weights[contributionIndex]);
+      }
+      continue;
+    }
+    const column = childIndex % contributions.fineWidth;
+    const row = Math.floor(childIndex / contributions.fineWidth);
+    const xCount = contributions.x.candidateCounts[column];
+    const yCount = contributions.y.candidateCounts[row];
+    const axisWeight = (contributions.x.rawCandidateCounts[column] === 1 ? 1 : 0.5)
+      * (contributions.y.rawCandidateCounts[row] === 1 ? 1 : 0.5);
+    const weight = axisWeight / (axisWeight * xCount * yCount);
+    const xBase = column * 2;
+    const yBase = row * 2;
+    for (let xOffset = 0; xOffset < xCount; xOffset++) {
+      const parentX = contributions.x.candidateIndices[xBase + xOffset];
+      for (let yOffset = 0; yOffset < yCount; yOffset++) {
+        accumulate(contributions.y.candidateIndices[yBase + yOffset] * contributions.coarseWidth + parentX, childIndex, weight);
+      }
+    }
+  }
+  return summary;
+}
+
 export function aggregateWeatherSummary(parentLevel, childSummary, contributions, reusable = null, ArrayType = Float32Array, totalWeight = null) {
-  const summary = createWeatherSummary(parentLevel, reusable, ArrayType, totalWeight);
+  if (childSummary.profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) {
+    return aggregateRainOnlyWeatherSummary(parentLevel, childSummary, contributions, reusable, ArrayType, totalWeight);
+  }
+  const summary = createWeatherSummary(parentLevel, reusable, ArrayType, totalWeight, childSummary.profile || WEATHER_SUMMARY_PROFILE_GENERIC);
   initializeAggregateTotalWeight(summary, childSummary, contributions);
   const activeIndices = activeIndicesForAggregate(summary, childSummary, contributions);
   zeroWeatherFields(summary, activeIndices);
@@ -613,12 +687,12 @@ export function aggregateWeatherSummary(parentLevel, childSummary, contributions
 export function evaluateFusedRainAggregateSummary(parentLevel, frame, samplingGeometry, contributions, reusable = null, ArrayType = Float32Array, totalWeight = null) {
   const activeChildren = samplingGeometry?.potentialActiveIndices;
   if (!activeChildren) throw new Error('Fused rain aggregation requires prepared potential-active indices.');
-  if (frame?.supportsRainOnlyPreparedTemporalSampling !== true) {
+  if (frame?.weatherSummaryProfile !== WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) {
     throw new Error('Fused rain aggregation requires an explicit rain-only prepared temporal capability.');
   }
   const temporalRain = geographicPrepareTemporalSampling(frame, samplingGeometry);
   if (!temporalRain) throw new Error('Fused rain aggregation requires prepared temporal sampling.');
-  const summary = createWeatherSummary(parentLevel, reusable, ArrayType, totalWeight);
+  const summary = createWeatherSummary(parentLevel, reusable, ArrayType, totalWeight, WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY);
   const childSummary = { potentialActiveIndices: activeChildren };
   const activeIndices = activeIndicesForAggregate(summary, childSummary, contributions);
   zeroWeatherFields(summary, activeIndices);
@@ -634,10 +708,8 @@ export function evaluateFusedRainAggregateSummary(parentLevel, frame, samplingGe
         const parentIndex = contributions.parentIndices[contributionIndex];
         const weight = contributions.weights[contributionIndex];
         summary.rainWeightedSumMmh[parentIndex] += weight * rainForSummary;
-        for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-          summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight
-            * (rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0);
-        }
+        summary.rainCoverageWeight[0][parentIndex] += weight * (rainMmh >= 0.05 ? 1 : 0);
+        summary.rainCoverageWeight[1][parentIndex] += weight * (rainMmh >= 2.5 ? 1 : 0);
         if (weight > 0) summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], rainForSummary);
       }
       continue;
@@ -659,10 +731,8 @@ export function evaluateFusedRainAggregateSummary(parentLevel, frame, samplingGe
         const parentIndex = relation.y.candidateIndices[yBase + yOffset] * relation.coarseWidth + parentX;
         const weight = axisWeight / totalCandidateWeight;
         summary.rainWeightedSumMmh[parentIndex] += weight * rainForSummary;
-        for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
-          summary.rainCoverageWeight[thresholdIndex][parentIndex] += weight
-            * (rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex] ? 1 : 0);
-        }
+        summary.rainCoverageWeight[0][parentIndex] += weight * (rainMmh >= 0.05 ? 1 : 0);
+        summary.rainCoverageWeight[1][parentIndex] += weight * (rainMmh >= 2.5 ? 1 : 0);
         if (weight > 0) summary.rainMaxMmh[parentIndex] = Math.max(summary.rainMaxMmh[parentIndex], rainForSummary);
       }
     }
@@ -731,7 +801,7 @@ export class GeographicWeatherPyramid {
   }
 
   summaryMemoryBytesPerSample() {
-    return (3 + RAIN_COVERAGE_THRESHOLDS_MMH.length + 6) * this.summaryArrayType.BYTES_PER_ELEMENT;
+    return (2 + RAIN_COVERAGE_THRESHOLDS_MMH.length + 6) * this.summaryArrayType.BYTES_PER_ELEMENT;
   }
 
   prepareSamplingGeometry(level, frame) {
@@ -760,7 +830,7 @@ export class GeographicWeatherPyramid {
       for (let level = minimumAggregateLevel; level <= WEATHER_REFERENCE_LEVEL; level++) this.levelDataFor(level);
       const samplingGeometry = this.prepareSamplingGeometry(WEATHER_REFERENCE_LEVEL, frame);
       const useFusedRainPath = uniqueRequested.every((level) => level < WEATHER_REFERENCE_LEVEL)
-        && frame?.supportsRainOnlyPreparedTemporalSampling === true
+        && frame?.weatherSummaryProfile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY
         && typeof frame.prepareTemporalSampling === 'function'
         && samplingGeometry?.potentialActiveIndices
         && this.centeredRelations.has(WEATHER_REFERENCE_LEVEL);

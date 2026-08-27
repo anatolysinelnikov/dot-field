@@ -4,7 +4,7 @@ import { setActiveWeatherField, prepareGeographicFieldFrame } from '../src/engin
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 import { canonicalCoordinatesForIndex, GeographicLodTopology, canonicalWindowFromMercatorBounds, lngLatToMercator, mercatorToLngLat, mercatorXForIndex, mercatorYForIndex } from '../src/engine/geographic-lod.js';
-import { GeographicWeatherPyramid, RAIN_COVERAGE_THRESHOLDS_MMH } from '../src/engine/geographic-weather-pyramid.js';
+import { GeographicWeatherPyramid, rainCoverageWeightForThreshold } from '../src/engine/geographic-weather-pyramid.js';
 
 const root = new URL('../data/generated/202608262200/', import.meta.url);
 const metadata = JSON.parse(fs.readFileSync(new URL('metadata.json', root), 'utf8'));
@@ -59,12 +59,10 @@ const local = Array.from({ length: summary.levelData.count }, (_, index) => inde
   return Math.abs(coordinates.canonicalX - nearestCoordinates.canonicalX) <= step * 2
     && Math.abs(coordinates.canonicalY - nearestCoordinates.canonicalY) <= step * 2;
 });
-const coverageIndex = (threshold) => RAIN_COVERAGE_THRESHOLDS_MMH.indexOf(threshold);
 const localCounts = {
   positive: local.filter((index) => summary.rainWeightedSumMmh[index] > 0).length,
-  atLeast005: local.filter((index) => summary.rainCoverageWeight[coverageIndex(0.05)][index] > 0).length,
-  atLeast1: local.filter((index) => summary.rainCoverageWeight[coverageIndex(1)][index] > 0).length,
-  atLeast25: local.filter((index) => summary.rainCoverageWeight[coverageIndex(2.5)][index] > 0).length,
+  atLeast005: local.filter((index) => rainCoverageWeightForThreshold(summary, 0.05)[index] > 0).length,
+  atLeast25: local.filter((index) => rainCoverageWeightForThreshold(summary, 2.5)[index] > 0).length,
   atLeast5: local.filter((index) => summary.rainMaxMmh[index] >= 5).length
 };
 
@@ -95,7 +93,7 @@ assert(targetX >= visibleBounds.minX && targetX <= visibleBounds.maxX && targetY
 assert(targetX * 2 ** 15 >= canonicalWindow.minX && targetX * 2 ** 15 <= canonicalWindow.maxX && targetY * 2 ** 15 >= canonicalWindow.minY && targetY * 2 ** 15 <= canonicalWindow.maxY, 'northern source lies inside the recorded active canonical window');
 const nearestLngLat = mercatorToLngLat(mercatorXForIndex(summary.levelData, nearest.index), mercatorYForIndex(summary.levelData, nearest.index));
 assert(summary.level === 13 && summary.rainWeightedSumMmh[nearest.index] > 5 && summary.rainMaxMmh[nearest.index] > 5, `nearest L13 sample ${nearestCoordinates.canonicalX}:${nearestCoordinates.canonicalY} reconstructs strong rain`);
-assert(localCounts.positive > 0 && localCounts.atLeast005 > 0 && localCounts.atLeast1 > 0 && localCounts.atLeast25 > 0 && localCounts.atLeast5 > 0, `L13 local neighborhood retains rain thresholds ${JSON.stringify(localCounts)}`);
+assert(localCounts.positive > 0 && localCounts.atLeast005 > 0 && localCounts.atLeast25 > 0 && localCounts.atLeast5 > 0, `L13 local neighborhood retains compact rain thresholds ${JSON.stringify(localCounts)}`);
 assert(dotsRainInstances > 0 && dotsStrongInstances > 0, `Dots maps and retains northern rain (${dotsRainInstances}) and strong rain (${dotsStrongInstances}) instances`);
 assert(squaresRainInstances > 0, `Squares retains ${squaresRainInstances} northern rain instances`);
 console.log(JSON.stringify({ source: { x: sourceX, y: sourceY, lon: sourceLongitude, lat: sourceLatitude, frame: frameIndex, mmh: sourceValue }, canonicalWindow, nearest: { id: `${nearestCoordinates.canonicalX}:${nearestCoordinates.canonicalY}`, canonicalX: nearestCoordinates.canonicalX, canonicalY: nearestCoordinates.canonicalY, lngLat: nearestLngLat, rainMmh: summary.rainWeightedSumMmh[nearest.index] }, localCounts, dots: { rainInstances: dotsRainInstances, strongInstances: dotsStrongInstances, rainRadius: dotsMapped.rainRadius[nearest.index], strongRadius: dotsMapped.strongRadius[nearest.index] }, squares: { rainInstances: squaresRainInstances, rainWetMeanMmh: squaresMapped.rainWetMeanMmh[nearest.index], rainCoverage: squaresMapped.rainCoverage[nearest.index] } }, null, 2));

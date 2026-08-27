@@ -306,6 +306,9 @@ export class RealWeatherSequenceFrame {
     // This explicit capability is limited to the current rain-only sequence;
     // generic fields must continue through the full channel-aware path.
     this.supportsRainOnlyPreparedTemporalSampling = true;
+    this.weatherSummaryProfile = 'rain-only-display';
+    this.stormAvailable = false;
+    this.hailAvailable = false;
   }
 
   isSamplingGeometryCompatible(geometry) {

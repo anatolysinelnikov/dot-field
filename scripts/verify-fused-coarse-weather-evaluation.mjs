@@ -5,7 +5,8 @@ import {
   aggregateWeatherSummary,
   buildCenteredContributions,
   evaluateDirectWeatherSummary,
-  RAIN_COVERAGE_THRESHOLDS_MMH,
+  WEATHER_SUMMARY_PROFILE_GENERIC,
+  rainCoverageWeightForThreshold,
   GeographicWeatherPyramid
 } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicLodTopology, lodRangeForStableLevel, canonicalWindowFromMercatorBounds, lngLatToMercator, mercatorXForIndex, mercatorYForIndex } from '../src/engine/geographic-lod.js';
@@ -49,9 +50,11 @@ const oldGeometry = { ...oldGeometryPrepared };
 delete oldGeometry.potentialActiveIndices;
 
 function oldChain(frame, minimumLevel, reusable = null) {
+  const genericFrame = Object.create(frame);
+  genericFrame.weatherSummaryProfile = WEATHER_SUMMARY_PROFILE_GENERIC;
   let summary = evaluateDirectWeatherSummary(
     oldPyramid.levels.get(13),
-    frame,
+    genericFrame,
     reusable?.[13] || null,
     Float32Array,
     oldGeometry,
@@ -86,17 +89,17 @@ function maximumDifference(left, right) {
 function compareSummary(level, fused, old) {
   if (!fused || !old) throw new Error(`missing L${level} summary`);
   const fields = [
-    'totalWeight', 'rainWeightedSumMmh', 'rainMaxMmh',
-    'stormCoverageWeight', 'stormWeightedSeverity', 'stormMaxSeverity',
-    'hailCoverageWeight', 'hailWeightedSeverity', 'hailMaxSeverity'
+    'totalWeight', 'rainWeightedSumMmh', 'rainMaxMmh'
   ];
   let maximum = 0;
   for (const field of fields) maximum = Math.max(maximum, maximumDifference(fused[field], old[field]));
   let classificationChanges = 0;
-  for (let threshold = 0; threshold < RAIN_COVERAGE_THRESHOLDS_MMH.length; threshold++) {
-    maximum = Math.max(maximum, maximumDifference(fused.rainCoverageWeight[threshold], old.rainCoverageWeight[threshold]));
+  for (const threshold of [0.05, 2.5]) {
+    const fusedCoverage = rainCoverageWeightForThreshold(fused, threshold);
+    const oldCoverage = rainCoverageWeightForThreshold(old, threshold);
+    maximum = Math.max(maximum, maximumDifference(fusedCoverage, oldCoverage));
     for (let index = 0; index < fused.levelData.count; index++) {
-      if ((fused.rainCoverageWeight[threshold][index] > 0) !== (old.rainCoverageWeight[threshold][index] > 0)) classificationChanges++;
+      if ((fusedCoverage[index] > 0) !== (oldCoverage[index] > 0)) classificationChanges++;
     }
   }
   if (maximum > 1e-6 || classificationChanges) throw new Error(`L${level} fused summary differs: max=${maximum}, classifications=${classificationChanges}`);
