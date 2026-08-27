@@ -29,8 +29,8 @@ const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
 const renderModeSelector = document.querySelector('#renderModeSelector');
 const renderModeButtons = [...renderModeSelector.querySelectorAll('[data-render-mode]')];
-const rawPhenomenaControl = document.querySelector('#rawPhenomenaControl');
-const rawPhenomena = document.querySelector('#rawPhenomena');
+const hazards = document.querySelector('#hazards');
+const weatherTimestamp = document.querySelector('#weatherTimestamp');
 const lodDiagnostics = document.querySelector('#lodDiagnostics');
 const rawTooltip = document.querySelector('#rawTooltip');
 const rawTooltipContent = document.querySelector('#rawTooltipContent');
@@ -49,7 +49,13 @@ const initialMinZoom =
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 
 const activeWeatherField = await loadActiveWeatherField();
-const rawWeatherField = activeWeatherField.rawFrame;
+const sourceFrameCount = Number.isInteger(activeWeatherField.frameCount) ? activeWeatherField.frameCount : 1;
+const rawWeatherField = typeof activeWeatherField.exactSourceFrameAt === 'function'
+  ? activeWeatherField.exactSourceFrameAt(0)
+  : activeWeatherField.rawFrame;
+const sourceTimestamps = Array.isArray(activeWeatherField.timestamps)
+  ? activeWeatherField.timestamps
+  : [];
 
 async function loadMapTilerKey() {
   try {
@@ -132,7 +138,10 @@ const state = {
   resettingView: false,
   mapReady: false,
   weatherQueued: false,
-  renderMode: 'raw'
+  renderMode: 'raw',
+  hazardsVisible: true,
+  rawFrameIndex: 0,
+  rawTimeChanged: false
 };
 let geographicWeatherPyramid = null;
 let weatherLayer = null;
@@ -141,6 +150,69 @@ const rawLayer = new RawWeatherLayer(rawWeatherField);
 let geographicLayers = [rawLayer];
 const VALID_RENDER_MODES = new Set(['raw', 'dots', 'squares']);
 let lastMapErrorSignature = '';
+
+const TIMESTAMP_MONTHS = Object.freeze(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
+
+function providerTimestampParts(timestamp) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?/.exec(timestamp || '');
+  if (!match) return null;
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4]),
+    minute: Number(match[5]),
+    second: Number(match[6] || 0),
+    millisecond: Number((match[7] || '').slice(0, 3).padEnd(3, '0') || 0)
+  };
+}
+
+function providerTimestampMilliseconds(timestamp) {
+  const parts = providerTimestampParts(timestamp);
+  if (parts) return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second, parts.millisecond);
+  const parsed = Date.parse(timestamp || '');
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatProviderTimestamp(timestamp) {
+  const parts = providerTimestampParts(timestamp);
+  if (parts) return `${String(parts.day).padStart(2, '0')} ${TIMESTAMP_MONTHS[parts.month - 1]}  ${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
+  const milliseconds = providerTimestampMilliseconds(timestamp);
+  if (milliseconds === null) return '—';
+  const date = new Date(milliseconds);
+  return `${String(date.getUTCDate()).padStart(2, '0')} ${TIMESTAMP_MONTHS[date.getUTCMonth()]}  ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`;
+}
+
+function sourceFrameIndexForNormalizedTime(normalizedTime) {
+  if (sourceFrameCount <= 1) return 0;
+  return Math.round(clamp(normalizedTime, 0, 1) * (sourceFrameCount - 1));
+}
+
+function normalizedTimeForSourceFrame(frameIndex) {
+  return sourceFrameCount <= 1 ? 0 : frameIndex / (sourceFrameCount - 1);
+}
+
+function updateTimestamp() {
+  if (!sourceTimestamps.length) {
+    weatherTimestamp.textContent = '—';
+    return;
+  }
+  if (state.renderMode === 'raw') {
+    weatherTimestamp.textContent = formatProviderTimestamp(sourceTimestamps[state.rawFrameIndex]);
+    return;
+  }
+  const sourcePosition = clamp(state.time / LOOP_SECONDS, 0, 1) * (sourceTimestamps.length - 1);
+  const frame0 = Math.floor(sourcePosition);
+  const frame1 = Math.min(frame0 + 1, sourceTimestamps.length - 1);
+  const progress = sourcePosition - frame0;
+  const time0 = providerTimestampMilliseconds(sourceTimestamps[frame0]);
+  const time1 = providerTimestampMilliseconds(sourceTimestamps[frame1]);
+  if (time0 === null || time1 === null) {
+    weatherTimestamp.textContent = formatProviderTimestamp(sourceTimestamps[frame0]);
+    return;
+  }
+  weatherTimestamp.textContent = formatProviderTimestamp(new Date(time0 + (time1 - time0) * progress).toISOString());
+}
 
 function cameraState() {
   return {
@@ -503,25 +575,57 @@ function applyRenderMode() {
   const time = state.time / LOOP_SECONDS;
   const rawActive = mode === 'raw';
   rawLayer.setActive(rawActive);
-  rawLayer.setPhenomena(rawPhenomena.checked);
+  rawLayer.setHazards(state.hazardsVisible);
   weatherLayer.setActive(mode === 'dots');
+  weatherLayer.setHazardsVisible(state.hazardsVisible);
   squaresLayer.setActive(mode === 'squares');
-  if (rawActive) return;
+  squaresLayer.setHazardsVisible(state.hazardsVisible);
+  if (rawActive) {
+    updateTimestamp();
+    return;
+  }
   if (mode === 'dots') {
     weatherLayer.updateWeather(time);
   }
   else if (mode === 'squares') squaresLayer.updateWeather(time);
+  updateTimestamp();
+}
+
+function setRawFrame(frameIndex, commitTime = false) {
+  const nextFrameIndex = clamp(frameIndex, 0, sourceFrameCount - 1);
+  state.rawFrameIndex = nextFrameIndex;
+  const frame = typeof activeWeatherField.exactSourceFrameAt === 'function'
+    ? activeWeatherField.exactSourceFrameAt(nextFrameIndex)
+    : rawWeatherField;
+  rawLayer.setFrame(frame);
+  timeSlider.value = String(normalizedTimeForSourceFrame(nextFrameIndex));
+  if (commitTime) {
+    state.time = normalizedTimeForSourceFrame(nextFrameIndex) * LOOP_SECONDS;
+    state.rawTimeChanged = true;
+  }
+  refreshHighlightedRawCell();
+  updateTimestamp();
 }
 
 function setRenderMode(mode) {
   if (!VALID_RENDER_MODES.has(mode)) return;
+  if (mode === state.renderMode) return;
+  const enteringRaw = mode === 'raw';
+  const leavingRaw = state.renderMode === 'raw' && !enteringRaw;
+  if (enteringRaw) {
+    if (state.playing) setPlaying(false);
+    state.rawTimeChanged = false;
+    setRawFrame(sourceFrameIndexForNormalizedTime(state.time / LOOP_SECONDS));
+  }
   state.renderMode = mode;
   renderModeSelector.dataset.mode = mode;
-  rawPhenomenaControl.hidden = mode !== 'raw';
-  if (mode !== 'raw') dismissRawTooltip();
+  if (leavingRaw) timeSlider.value = String(clamp(state.time / LOOP_SECONDS, 0, 1));
+  if (leavingRaw) dismissRawTooltip();
   for (const button of renderModeButtons) {
     button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
   }
+  playPause.disabled = mode === 'raw';
+  playPause.setAttribute('aria-disabled', String(mode === 'raw'));
   applyRenderMode();
 }
 
@@ -544,6 +648,12 @@ function positionRawTooltip(point) {
 
 function showRawTooltip(cell, point) {
   rawLayer.setHighlightedCell(cell);
+  updateRawTooltipContent(cell);
+  rawTooltip.hidden = false;
+  positionRawTooltip(point);
+}
+
+function updateRawTooltipContent(cell) {
   rawTooltipContent.textContent = [
     `lon: ${cell.lon.toFixed(5)}`,
     `lat: ${cell.lat.toFixed(5)}`,
@@ -551,8 +661,18 @@ function showRawTooltip(cell, point) {
     `thunderstorm: ${cell.thunderstorm}`,
     `hail: ${cell.hail}`
   ].join('\n');
-  rawTooltip.hidden = false;
-  positionRawTooltip(point);
+}
+
+function refreshHighlightedRawCell() {
+  const cellKey = selectedRawCellKey || (rawLayer.highlightedCell && rawCellKey(rawLayer.highlightedCell));
+  if (!cellKey) return;
+  const [longitudeIndex, latitudeIndex] = cellKey.split(':').map(Number);
+  const field = rawLayer.field;
+  const cell = field.rawCellAt(field.longitudes[longitudeIndex], field.latitudes[latitudeIndex]);
+  if (!cell) return dismissRawTooltip();
+  if (selectedRawCellKey) selectedRawCell = cell;
+  rawLayer.setHighlightedCell(cell);
+  updateRawTooltipContent(cell);
 }
 
 function dismissRawTooltip() {
@@ -569,7 +689,7 @@ function updateRawTooltipPosition() {
 
 function updateRawHover(event) {
   if (state.renderMode !== 'raw' || selectedRawCell || rawMapDragging) return;
-  const cell = rawWeatherField.rawCellAt(event.lngLat.lng, event.lngLat.lat);
+  const cell = rawLayer.field.rawCellAt(event.lngLat.lng, event.lngLat.lat);
   if (!cell) {
     dismissRawTooltip();
     return;
@@ -580,7 +700,7 @@ function updateRawHover(event) {
 function selectRawCell(event) {
   if (state.renderMode !== 'raw') return;
   if (selectedRawCell) return dismissRawTooltip();
-  const cell = rawWeatherField.rawCellAt(event.lngLat.lng, event.lngLat.lat);
+  const cell = rawLayer.field.rawCellAt(event.lngLat.lng, event.lngLat.lat);
   if (!cell) return dismissRawTooltip();
   selectedRawCell = cell;
   selectedRawCellKey = rawCellKey(cell);
@@ -588,10 +708,24 @@ function selectRawCell(event) {
 }
 
 function setPlaying(playing) {
-  state.playing = playing;
-  playPause.dataset.state = playing ? 'playing' : 'paused';
-  playPause.setAttribute('aria-label', playing ? 'Pause' : 'Play');
-  if (playing) wakeApplicationFrame();
+  const nextPlaying = Boolean(playing) && state.renderMode !== 'raw';
+  state.playing = nextPlaying;
+  playPause.disabled = state.renderMode === 'raw';
+  playPause.setAttribute('aria-disabled', String(state.renderMode === 'raw'));
+  playPause.dataset.state = nextPlaying ? 'playing' : 'paused';
+  playPause.setAttribute('aria-label', nextPlaying ? 'Pause' : 'Play');
+  if (nextPlaying) wakeApplicationFrame();
+}
+
+function updateTimeFromTimelineValue(value) {
+  const normalizedTime = clamp(Number(value), 0, 1);
+  if (state.renderMode === 'raw') {
+    setRawFrame(sourceFrameIndexForNormalizedTime(normalizedTime), true);
+    return;
+  }
+  state.time = normalizedTime * LOOP_SECONDS;
+  queueWeatherUpdate();
+  updateTimestamp();
 }
 
 function updateTimelineFromPointer(clientX) {
@@ -599,13 +733,12 @@ function updateTimelineFromPointer(clientX) {
   const min = Number(timeSlider.min);
   const max = Number(timeSlider.max);
   const value = clamp(min + (clientX - rect.left) / rect.width * (max - min), min, max);
-  timeSlider.value = String(value);
-  state.time = Number(timeSlider.value) * LOOP_SECONDS;
-  queueWeatherUpdate();
+  updateTimeFromTimelineValue(value);
 }
 
 let scrubbingPointerId = null;
 playPause.addEventListener('click', () => {
+  if (state.renderMode === 'raw') return;
   if (!state.playing && state.time >= LOOP_SECONDS) {
     state.time = 0;
     timeSlider.value = '0';
@@ -629,8 +762,11 @@ resetView.addEventListener('click', resetMapView);
 for (const button of renderModeButtons) {
   button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
 }
-rawPhenomena.addEventListener('change', () => {
-  if (state.renderMode === 'raw') rawLayer.setPhenomena(rawPhenomena.checked);
+hazards.addEventListener('change', () => {
+  state.hazardsVisible = hazards.checked;
+  rawLayer.setHazards(state.hazardsVisible);
+  weatherLayer?.setHazardsVisible(state.hazardsVisible);
+  squaresLayer?.setHazardsVisible(state.hazardsVisible);
 });
 document.addEventListener('pointerdown', (event) => {
   if (!rawTooltip.hidden && !mapContainer.contains(event.target) && !rawTooltip.contains(event.target)) dismissRawTooltip();
@@ -649,8 +785,7 @@ timeSlider.addEventListener('pointermove', (event) => {
   if (event.pointerId === scrubbingPointerId) updateTimelineFromPointer(event.clientX);
 });
 timeSlider.addEventListener('input', () => {
-  state.time = Number(timeSlider.value) * LOOP_SECONDS;
-  queueWeatherUpdate();
+  updateTimeFromTimelineValue(timeSlider.value);
 });
 for (const eventName of ['pointerup', 'pointercancel']) {
   timeSlider.addEventListener(eventName, (event) => {
@@ -752,7 +887,12 @@ function frame(now) {
   }
   if (reachedEndpoint) setPlaying(false);
   updateLODTransition(now);
-  if (!state.scrubbing) timeSlider.value = String(state.time / LOOP_SECONDS);
+  if (!state.scrubbing) {
+    timeSlider.value = state.renderMode === 'raw'
+      ? String(normalizedTimeForSourceFrame(state.rawFrameIndex))
+      : String(state.time / LOOP_SECONDS);
+  }
+  updateTimestamp();
   if ((state.playing && !state.scrubbing) || state.lodTransition) wakeApplicationFrame();
 }
 

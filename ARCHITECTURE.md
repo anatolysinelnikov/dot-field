@@ -105,9 +105,12 @@ It creates the RAW, Dots, and Squares geographic custom layers once after the
 style loads and
 changes their active state instead of recreating the map or layers when the
 render mode changes. RAW is the initial mode and playback starts paused; the
-selector order is RAW, Dots, Squares. The `Явления` control is visible only in
-RAW mode. `GeographicScalarLayer` is deliberately not instantiated or added to
-MapLibre in this temporary active-mode configuration.
+selector order is RAW, Dots, Squares. The shared `Hazards` control is always
+visible and is a presentation-only preference applied to RAW, Dots, and
+Squares. The centered timestamp control is owned by the application and uses
+provider metadata as its temporal authority. `GeographicScalarLayer` is
+deliberately not instantiated or added to MapLibre in this temporary active-mode
+configuration.
 
 The MapTiler Dataviz Dark Globe basemap, native label and
 administrative-boundary ordering, water tint/boundary context, camera controls,
@@ -133,8 +136,13 @@ lazily synchronizes that representation to the exact global time before its
 next repaint, while preserving time, play/pause state, camera state, and
 logical weather zoom. Inactive layers retain lightweight topology/LOD state but
 do not evaluate weather, rebuild instance data, or upload temporal GPU data.
-RAW is intentionally static and never participates in temporal evaluation.
-Dots and Squares read out their active LOD/sample count. Blur and Areas retain
+Dots and Squares read out their active LOD/sample count. RAW uses the global
+timeline as a discrete source-frame selector and never interpolates between
+provider frames; entering RAW selects the nearest exact frame without changing
+the stored continuous application time. A manual RAW timeline change commits
+that exact frame time, while switching back without such a change restores the
+previous continuous Dots/Squares time. Playback is disabled while RAW is active.
+Dots and Squares retain continuous temporal interpolation. Blur and Areas retain
 their fixed-support implementation for a later task but have no active UI or
 runtime routing here.
 
@@ -225,14 +233,14 @@ streams the second-pass crop without loading all frames at once.
 ## RAW source-grid diagnostic — `src/engine/raw-weather-layer.js`
 
 The source-of-truth weather data is defined at geographic source nodes. RAW is a
-separate static diagnostic representation of the first sequence source frame on
-the `1051 × 719` exported provider grid: it interprets each source-node value as a
+separate exact-frame diagnostic representation on the `1051 × 719` exported
+provider grid: it interprets each source-node value as a
 piecewise-constant midpoint cell
 (half-spacing at the outer edges), draws raw `mmh > 0` cells as solid opaque
 blue. The rain-only sequence has no storm or hail, so RAW has no phenomenon
 markers. These RAW cell boundaries are diagnostic, not assumed meteorological
-boundaries. Values between source nodes use the shared bilinear reconstruction;
-RAW does not constrain Dots, Squares, Blur, or Areas. RAW never calls the
+boundaries. Dots, Squares, Blur, and Areas use the shared reconstructed field;
+RAW itself does not interpolate between source frames or source nodes. RAW never calls the
 shared bilinear sampler, Mercator LOD, L14 scalar lattice, reconstruction,
 smoothing, aggregation, or renderer mappings. The layer stores only nonzero
 drawing geometry for performance; zero cells remain inspectable through the
@@ -242,8 +250,18 @@ RAW interaction is application-owned: pointer coordinates select the source cell
 directly from the loaded longitude/latitude axes, including zero-valued cells.
 Hover shows a diagnostic tooltip and click/tap pins it; Escape, outside clicks,
 or clicking the selected cell again dismiss it. Tooltip values are raw source
-coordinates, three-decimal mm/h, and integer phenomenon codes. RAW currently
-does not advance with playback: it intentionally shows only source frame 0.
+coordinates, three-decimal mm/h, and integer phenomenon codes. The sequence
+adapter exposes `exactSourceFrameAt(index)`, which returns a cached frame object
+sharing immutable axes, cell bounds, and channel metadata while selecting the
+corresponding source-value slice. The layer updates its existing buffers when
+the exact frame changes, so RAW remains a source diagnostic without rerouting
+through temporal interpolation.
+
+The shared `Hazards` preference only controls presentation: RAW skips or draws
+storm/hail geometry, Dots skips or draws hazard glyphs, and Squares gates only
+the hazard shader compositing. Physical hazard summaries and packed instance
+values remain intact, and changing the preference does not trigger weather
+evaluation.
 
 ## Shared geographic Mercator topology — `src/engine/geographic-lod.js`
 

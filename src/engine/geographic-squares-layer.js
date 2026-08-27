@@ -112,7 +112,7 @@ function makeProgram(gl, shaderData) {
     'in vec2 a_vertex;\nin vec2 a_center;\nin vec4 a_values0;\nin vec4 a_values1;\nin vec4 a_hazards0;\nin vec4 a_hazards1;\nuniform float u_temporalProgress;\nuniform float u_spacing;\nout vec4 v_values;\nout vec4 v_hazards;\nvoid main() {\n  v_values = mix(a_values0, a_values1, u_temporalProgress);\n  v_hazards = mix(a_hazards0, a_hazards1, u_temporalProgress);\n  gl_Position = projectTile(a_center + a_vertex * u_spacing);\n}'
   ].join('\n');
   const fragmentSource = [
-    '#version 300 es', 'precision highp float;', 'in vec4 v_values;\nin vec4 v_hazards;\nuniform float u_opacity;\nout vec4 fragColor;',
+    '#version 300 es', 'precision highp float;', 'in vec4 v_values;\nin vec4 v_hazards;\nuniform float u_opacity;\nuniform float u_hazardsVisible;\nout vec4 fragColor;',
     `${RAIN_VISIBILITY_SHADER}
 ${STRONG_RAIN_SHADER}
 float strength(float value, float threshold) { return smoothstep(threshold * 0.45, 0.93, value); }
@@ -123,11 +123,11 @@ void main() {
   float alpha = rain;
   float stormStrength = strength(v_values.w, 0.075);
   float stormPeak = strength(v_hazards.x, 0.075);
-  float storm = clamp(v_values.z, 0.0, 1.0) * max(stormStrength, stormPeak);
+  float storm = u_hazardsVisible * clamp(v_values.z, 0.0, 1.0) * max(stormStrength, stormPeak);
   if (storm > 0.0) { color = mix(color, vec3(1.0, 0.0, 1.0), mix(0.45, 1.0, pow(max(stormStrength, stormPeak), 0.47))); alpha = max(alpha, storm); }
   float hailStrength = strength(v_hazards.z, 0.11);
   float hailPeak = strength(v_hazards.w, 0.11);
-  float hail = clamp(v_hazards.y, 0.0, 1.0) * max(hailStrength, hailPeak);
+  float hail = u_hazardsVisible * clamp(v_hazards.y, 0.0, 1.0) * max(hailStrength, hailPeak);
   if (hail > 0.0) { color = mix(color, vec3(1.0, 0.831, 0.0), mix(0.5, 1.0, pow(max(hailStrength, hailPeak), 0.47))); alpha = max(alpha, hail); }
   fragColor = vec4(color, alpha * u_opacity);
 }`
@@ -137,7 +137,7 @@ void main() {
   gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'Square weather shader linking failed.');
-  const names = ['a_vertex', 'a_center', 'a_values0', 'a_values1', 'a_hazards0', 'a_hazards1', 'u_temporalProgress', 'u_spacing', 'u_opacity', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'];
+  const names = ['a_vertex', 'a_center', 'a_values0', 'a_values1', 'a_hazards0', 'a_hazards1', 'u_temporalProgress', 'u_spacing', 'u_opacity', 'u_hazardsVisible', 'u_matrix', 'u_projection_fallback_matrix', 'u_projection_matrix', 'u_projection_tile_mercator_coords', 'u_projection_clipping_plane', 'u_projection_transition'];
   return { program, locations: Object.fromEntries(names.map((name) => [name, name.startsWith('a_') ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name)])) };
 }
 
@@ -147,6 +147,7 @@ export class GeographicSquaresLayer {
     this.type = 'custom';
     this.renderingMode = '3d';
     this.active = false;
+    this.hazardsVisible = true;
     this.weatherPyramid = weatherPyramid;
     this.topology = weatherPyramid.topology;
     this.levelData = null;
@@ -235,6 +236,11 @@ export class GeographicSquaresLayer {
       this.instanceDirty[1] = false;
     }
     this.map?.triggerRepaint();
+  }
+
+  setHazardsVisible(visible) {
+    this.hazardsVisible = visible;
+    if (this.active) this.map?.triggerRepaint();
   }
 
   activeLevels() {
@@ -414,6 +420,7 @@ export class GeographicSquaresLayer {
       : this.levelData.level;
     gl.uniform1f(locations.u_spacing, 1 / 2 ** level);
     gl.uniform1f(locations.u_opacity, opacity);
+    gl.uniform1f(locations.u_hazardsVisible, this.hazardsVisible ? 1 : 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
     gl.enableVertexAttribArray(locations.a_vertex);
     gl.vertexAttribPointer(locations.a_vertex, 2, gl.FLOAT, false, 0, 0);

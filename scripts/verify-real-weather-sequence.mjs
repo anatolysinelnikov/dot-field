@@ -43,6 +43,12 @@ for (let index = 0; index < sampleLongitudes.length; index++) {
   assertClose(prepared.hail, 0, `prepared hail ${index}`);
 }
 
+const exactFrame = sequence.exactSourceFrameAt(7);
+assertClose(exactFrame.rawCellAt(longitude, latitude).mmh, sourceValue(7, longitudeIndex, latitudeIndex), 'exact source frame');
+if (exactFrame.timestamp !== timestamps[7]) throw new Error('exact source frame timestamp is not preserved.');
+if (sequence.exactSourceFrameAt(7) !== exactFrame) throw new Error('exact source frame cache is not reused.');
+if (exactFrame.longitudes !== sequence.longitudes || exactFrame.latitudes !== sequence.latitudes) throw new Error('exact source frame duplicated spatial axes.');
+
 const endpoint = geographicTemporalFrameAt(1);
 if (endpoint.index !== 180 || endpoint.nextIndex !== 180 || endpoint.progress !== 0) throw new Error('terminal renderer keyframe is cyclic.');
 const finalSourceFrame = sequence.prepareFrame(1);

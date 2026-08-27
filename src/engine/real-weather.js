@@ -60,7 +60,7 @@ function sortedIndexOf(values, target) {
 }
 
 export class RealWeatherField {
-  constructor({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rainMmh, storm, hail, sourceRowCount, longitudeSpacing, latitudeSpacing }) {
+  constructor({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rainMmh, storm, hail, sourceRowCount, longitudeSpacing, latitudeSpacing, frameIndex = 0, timestamp = null }) {
     this.longitudes = longitudes;
     this.latitudes = latitudes;
     this.mmh = mmh;
@@ -72,6 +72,8 @@ export class RealWeatherField {
     this.sourceRowCount = sourceRowCount;
     this.longitudeSpacing = longitudeSpacing;
     this.latitudeSpacing = latitudeSpacing;
+    this.frameIndex = frameIndex;
+    this.timestamp = timestamp;
     this.bounds = Object.freeze({
       west: longitudes[0], east: longitudes[longitudes.length - 1],
       south: latitudes[0], north: latitudes[latitudes.length - 1]
@@ -366,20 +368,8 @@ export class RealWeatherSequence extends RealWeatherField {
         if (rainFramesMmh[offset + index] > 0) this.potentialWeatherMask[index] = 1;
       }
     }
-    // RAW is intentionally a static diagnostic of the initial source frame.
-    this.rawFrame = new RealWeatherField({
-      longitudes,
-      latitudes,
-      mmh: this.rainFramesMmh.subarray(0, frameSize),
-      thunderstormCode: emptyCodes,
-      hailCode: emptyCodes,
-      rainMmh: this.rainFramesMmh.subarray(0, frameSize),
-      storm: emptyChannel,
-      hail: emptyChannel,
-      sourceRowCount: frameSize,
-      longitudeSpacing,
-      latitudeSpacing
-    });
+    this.rawFrames = new Map();
+    this.rawFrame = this.exactSourceFrameAt(0);
   }
 
   isSamplingGeometryCompatible(geometry) {
@@ -402,6 +392,37 @@ export class RealWeatherSequence extends RealWeatherField {
     const frame0 = Math.floor(sourcePosition);
     const frame1 = Math.min(frame0 + 1, this.frameCount - 1);
     return new RealWeatherSequenceFrame(this, frame0, frame1, sourcePosition - frame0);
+  }
+
+  exactSourceFrameAt(frameIndex) {
+    if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= this.frameCount) {
+      throw new RangeError(`Source frame index must be an integer from 0 to ${this.frameCount - 1}.`);
+    }
+    const cached = this.rawFrames.get(frameIndex);
+    if (cached) return cached;
+    const offset = frameIndex * this.frameSize;
+    const frameValues = this.rainFramesMmh.subarray(offset, offset + this.frameSize);
+    const frame = new RealWeatherField({
+      longitudes: this.longitudes,
+      latitudes: this.latitudes,
+      mmh: frameValues,
+      thunderstormCode: this.thunderstormCode,
+      hailCode: this.hailCode,
+      rainMmh: frameValues,
+      storm: this.storm,
+      hail: this.hail,
+      sourceRowCount: this.frameSize,
+      longitudeSpacing: this.longitudeSpacing,
+      latitudeSpacing: this.latitudeSpacing,
+      frameIndex,
+      timestamp: this.timestamps[frameIndex] ?? null
+    });
+    // Axes and cell bounds are immutable spatial metadata. Keep the exact
+    // frame object small by sharing the already-derived bounds as well.
+    frame.longitudeCellBounds = this.longitudeCellBounds;
+    frame.latitudeCellBounds = this.latitudeCellBounds;
+    this.rawFrames.set(frameIndex, frame);
+    return frame;
   }
 
   interpolateRain(frame, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction) {

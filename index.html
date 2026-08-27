@@ -21,18 +21,21 @@
       <div id="rawTooltipContent"></div>
     </div>
 
-    <div class="render-mode-controls">
-      <div id="renderModeSelector" class="render-mode" role="radiogroup" aria-label="Weather rendering mode" data-mode="raw">
-        <button type="button" role="radio" aria-checked="true" data-render-mode="raw">RAW</button>
-        <button type="button" role="radio" aria-checked="false" data-render-mode="dots">Dots</button>
-        <button type="button" role="radio" aria-checked="false" data-render-mode="squares">Squares</button>
+    <div class="weather-controls">
+      <div id="weatherTimestamp" class="weather-timestamp" aria-live="polite">—</div>
+      <div class="weather-control-row">
+        <label id="hazardsControl" class="hazards-control">
+          <span class="hazards-control-content">
+            <input id="hazards" type="checkbox" checked>
+            <span>Hazards</span>
+          </span>
+        </label>
+        <div id="renderModeSelector" class="render-mode" role="radiogroup" aria-label="Weather rendering mode" data-mode="raw">
+          <button type="button" role="radio" aria-checked="true" data-render-mode="raw">RAW</button>
+          <button type="button" role="radio" aria-checked="false" data-render-mode="dots">Dots</button>
+          <button type="button" role="radio" aria-checked="false" data-render-mode="squares">Squares</button>
+        </div>
       </div>
-      <label id="rawPhenomenaControl" class="area-smooth raw-phenomena">
-        <span class="area-smooth-content">
-          <input id="rawPhenomena" type="checkbox" checked>
-          <span>Hazards</span>
-        </span>
-      </label>
     </div>
 
     <div class="zoom-controls" role="group" aria-label="Map controls">
@@ -44,7 +47,7 @@
     </div>
 
     <section class="controls" aria-label="Playback and timeline controls">
-      <button id="playPause" type="button" data-state="paused" aria-label="Play"></button>
+      <button id="playPause" type="button" data-state="paused" aria-label="Play" disabled></button>
       <label class="time-control">
         <input id="timeSlider" type="range" min="0" max="1" step="any" value="0" aria-label="Animation time">
       </label>

@@ -208,7 +208,7 @@ export class RawWeatherLayer {
     this.field = field;
     this.geometry = buildGeometry(field);
     this.active = false;
-    this.phenomena = true;
+    this.hazardsVisible = true;
     this.highlightedCell = null;
     this.programs = new Map();
   }
@@ -244,10 +244,35 @@ export class RawWeatherLayer {
     this.map?.triggerRepaint();
   }
 
-  setPhenomena(phenomena) {
-    this.phenomena = phenomena;
+  setFrame(field) {
+    if (field === this.field) return;
+    this.field = field;
+    this.geometry = buildGeometry(field);
+    if (this.gl) {
+      this.replaceBufferData(this.gl, this.buffers.precipitation.position, this.geometry.precipitation.vertices);
+      this.replaceBufferData(this.gl, this.buffers.precipitation.color, this.geometry.precipitation.colors);
+      for (const [code, vertices] of Object.entries(this.geometry.thunderstorm)) {
+        this.replaceBufferData(this.gl, this.buffers.thunderstorm[code], vertices);
+      }
+      for (const [code, vertices] of Object.entries(this.geometry.hail)) {
+        this.replaceBufferData(this.gl, this.buffers.hail[code], vertices);
+      }
+      if (this.highlightedCell) this.replaceBufferData(this.gl, this.highlightBuffer, cellOutline(this.field, this.highlightedCell));
+    }
     this.map?.triggerRepaint();
   }
+
+  replaceBufferData(gl, buffer, vertices) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+  }
+
+  setHazards(hazardsVisible) {
+    this.hazardsVisible = hazardsVisible;
+    this.map?.triggerRepaint();
+  }
+
+  setPhenomena(phenomena) { this.setHazards(phenomena); }
 
   setHighlightedCell(cell) {
     this.highlightedCell = cell;
@@ -330,7 +355,7 @@ export class RawWeatherLayer {
     const precipitationProgram = this.colorProgramFor(gl, args.shaderData);
     gl.useProgram(precipitationProgram.program);
     this.draw(gl, precipitationProgram, this.geometry.precipitation.vertices, this.buffers.precipitation.position, null, projection, this.buffers.precipitation.color);
-    if (this.phenomena) {
+    if (this.hazardsVisible) {
       const program = this.programFor(gl, args.shaderData);
       gl.useProgram(program.program);
       for (const [code, vertices] of Object.entries(this.geometry.thunderstorm)) {
