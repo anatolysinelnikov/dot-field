@@ -105,21 +105,27 @@ load independently. MapLibre is constructed as soon as its configuration is
 available. Metadata and the small immutable support sidecar may load while the
 basemap starts. After MapLibre renders the initial tiles, the application asks
 only for source frame 0; weather custom layers are created as soon as that
-frame is validated. The remaining frames prefetch sequentially in the
-background through the same bounded source-frame scheduler used by first load,
-RAW, Dots/Squares temporal requirements, and playback. The scheduler has one
-global fetch slot, not separate interactive and background pools. Current-time
-and adjacent temporal requirements are HIGH; remaining-sequence prefetch is
-LOW. HIGH work is selected before queued LOW work, while a running fetch is
-allowed to finish. Manual scrub submits the latest desired source-frame set
-under a replacement key, so queued requirements unique to older finger
-positions are discarded before fetch; Dots/Squares submit the requested and
-next renderer temporal times as one deduplicated HIGH set. Map movement pauses
-the start of new LOW work but never blocks required current weather. The opening
-adjacent pair is warmed again as LOW work before playback enables. Timeline
-jumps request their required source frames without blanking the last valid
-weather. The request generation guard remains the final barrier preventing late
-availability from committing an older timeline target. This is a
+frame is validated. Playback becomes available when the initial three-frame
+source buffer (0, 1, 2) is ready; it does not wait for all 19 source frames.
+The provider then maintains a rolling source working set through the same
+bounded scheduler used by first load, RAW, Dots/Squares temporal requirements,
+and playback. Its current six-frame horizon is previous source frame, current
+temporal pair, and three frames ahead (clamped at the sequence ends), matching
+the six-entry source LRU. The scheduler has one global fetch slot, not separate
+interactive and background pools. Current-time and adjacent temporal
+requirements are HIGH; rolling-forward work is LOW. HIGH work is selected
+before queued LOW work, while a running fetch is allowed to finish. If playback
+reaches an unavailable required pair, application time holds at the last valid
+weather state until that pair is available, then resumes. Manual scrub submits
+the latest desired source-frame set under a replacement key, so queued
+requirements unique to older finger positions are discarded before fetch;
+Dots/Squares submit the requested and next renderer temporal times as one
+deduplicated HIGH set. After a manual or RAW scrub, the LOW horizon rebases to
+the selected time rather than continuing an old full-sequence list. Map movement
+pauses the start of new LOW work but never blocks required current weather.
+Timeline jumps request their required source frames without blanking the last
+valid weather. The request generation guard remains the final barrier preventing
+late availability from committing an older timeline target. This is a
 startup/network priority policy, not a renderer
 dependency: weather initialization always reads the current camera viewport at
 the time it runs. Startup diagnostics exposed at `window.__dotFieldStartup`
@@ -148,6 +154,30 @@ Local development and the static GitHub Pages deployment both load the same
 runtime `config.local.json` shape. The ignored local file is supplied by the
 developer; the Pages workflow writes the deployment key into the staged site
 artifact only, without adding it to the repository.
+
+### Local LAN compression verification
+
+`scripts/generate-brotli-sidecars.mjs` and `scripts/serve-local.mjs` are
+development-only test tooling, not production hosting. The generator writes
+ignored Brotli-9 `.br` sidecars alongside the logical source frames and support
+mask; the manifest and application continue to request the original `.f32` and
+`.mask` URLs. To test from a phone/tablet on the same LAN, first generate the
+sidecars, then run either mode from the repository root:
+
+```text
+node scripts/generate-brotli-sidecars.mjs
+node scripts/serve-local.mjs --host 0.0.0.0 --port 8000 --compression identity
+node scripts/serve-local.mjs --host 0.0.0.0 --port 8000 --compression br
+```
+
+Open `http://<computer-LAN-IP>:8000/` on the device. The server prints a
+detected Network URL when possible; it is intentionally an HTTP development
+server and must not be exposed to the Internet. In `br` mode, a request for a
+logical source URL such as `rain/frame-000.f32` receives its `.br` sidecar only
+when the client advertises `Accept-Encoding: br`, with `Content-Encoding: br`,
+`Vary: Accept-Encoding`, and the encoded `Content-Length`. Browser fetch
+transparently returns the original exact Float32 bytes; HTTP content coding is
+transport behavior, not a provider-format change.
 
 The finite source forecast traverses from 22:00 to 01:00 in the existing
 18-second UI duration: normalized time 0 samples frame 0 and normalized time 1
@@ -244,7 +274,9 @@ These arrays are computation caches rather than a new weather representation;
 the single-point sampler remains the semantic reference path. The provider-grid
 source-frame cache is a separate six-entry deterministic LRU of Float32 arrays
 (roughly 17.3 MiB at this fixture), rather than the old fixed 54.77 MiB
-monolithic sequence. Frame availability is asynchronous only at the provider
+monolithic sequence. It is the authoritative bounded in-memory temporal
+working set; browser HTTP cache can improve transport latency but is never a
+required second frame store. Frame availability is asynchronous only at the provider
 loading boundary: once the latest required frames are available, provider
 temporal reconstruction, pyramid evaluation, and renderer updates remain
 synchronous. Each downloaded payload is byte/value validated before entering
