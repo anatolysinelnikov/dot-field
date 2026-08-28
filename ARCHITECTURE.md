@@ -243,23 +243,44 @@ application RAF so its progress still completes while paused.
 The reusable local workflow is:
 
 ```text
-manual NC download
+MinIO/S3 provider
+→ local authenticated downloader
 → data/nc/
-→ python3 tools/prepare-latest-real-weather.py
+→ strict offline NetCDF normalization
 → data/generated/current/
-→ metadata/frame loading
-→ temporal/spatial interpolation and sampling
+→ browser loading/interpolation/sampling
+→ renderers
+```
+
+The provider-ingestion boundary is local-only: `tools/download-latest-real-weather.py`
+connects to the configured MinIO/S3-compatible endpoint, selects the newest valid
+`YYYYMMDDHHMM.nc` object by filename timestamp, and atomically downloads it into
+the ignored `data/nc/` directory. Credentials are read from
+`~/.config/dot-field/minio.json`, outside the repository and browser-accessible
+files. The downloader has no NetCDF parsing or weather-field responsibility.
+
+The complete preparation path is:
+
+```text
+MinIO/S3 provider
+→ local authenticated downloader
+→ ignored data/nc/
+→ strict offline NetCDF normalization
+→ ignored data/generated/current/
+→ browser loading/interpolation/sampling
 → RAW / Dots / Squares
 ```
 
-NetCDF parsing is offline/local preprocessing. The preparation command selects
-the newest `YYYYMMDDHHMM.nc` by the timestamp in its filename, invokes the
+NetCDF parsing remains offline/local preprocessing. The preparation command
+selects the newest local `YYYYMMDDHHMM.nc` by filename timestamp, invokes the
 existing converter in strict `--sequence` mode, and atomically publishes a
 complete generated directory. The browser consumes the normalized v2 binary
-transport (`metadata.json`, `support.mask`, and Float32 frame assets), never
-the `.nc` file. Automatic downloading is a future provider-ingestion step and
-does not belong in the browser runtime. Raw NetCDF files and generated assets
-remain outside Git.
+transport (`metadata.json`, `support.mask`, and Float32 frame assets), never the
+`.nc` file. Raw NetCDF files and generated assets remain outside Git. The
+one-click updater is idempotent: when the newest remote NC is already local and
+`metadata.json` records the same `source.filename`, it skips reconversion. Any
+future automatic periodic scheduling should remain a thin layer around this
+same updater. No renderer or weather-field semantics change in this flow.
 
 The current local NC omits precipitation units, so its preparation invocation
 must explicitly add `--assume-units mm/h` after the source semantics have been
