@@ -46,7 +46,8 @@ const zoomOut = document.querySelector('#zoomOut');
 const renderModeSelector = document.querySelector('#renderModeSelector');
 const renderModeButtons = [...renderModeSelector.querySelectorAll('[data-render-mode]')];
 const hazards = document.querySelector('#hazards');
-const weatherTimestamp = document.querySelector('#weatherTimestamp');
+const weatherTimestampValue = document.querySelector('#weatherTimestampValue');
+const weatherTimezone = document.querySelector('#weatherTimezone');
 const lodDiagnostics = document.querySelector('#lodDiagnostics');
 const rawTooltip = document.querySelector('#rawTooltip');
 const rawTooltipContent = document.querySelector('#rawTooltipContent');
@@ -252,6 +253,7 @@ void weatherLoad.metadataReady.then((metadata) => {
 });
 
 const TIMESTAMP_MONTHS = Object.freeze(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
+let displayUtcOffsetHours = Number(weatherTimezone.value);
 
 function providerTimestampParts(timestamp) {
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?/.exec(timestamp || '');
@@ -274,13 +276,11 @@ function providerTimestampMilliseconds(timestamp) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function formatProviderTimestamp(timestamp) {
-  const parts = providerTimestampParts(timestamp);
-  if (parts) return `${String(parts.day).padStart(2, '0')} ${TIMESTAMP_MONTHS[parts.month - 1]}  ${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
+function formatDisplayTimestamp(timestamp) {
   const milliseconds = providerTimestampMilliseconds(timestamp);
   if (milliseconds === null) return '—';
-  const date = new Date(milliseconds);
-  return `${String(date.getUTCDate()).padStart(2, '0')} ${TIMESTAMP_MONTHS[date.getUTCMonth()]}  ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`;
+  const date = new Date(milliseconds + displayUtcOffsetHours * 60 * 60 * 1000);
+  return `${String(date.getUTCDate()).padStart(2, '0')} ${TIMESTAMP_MONTHS[date.getUTCMonth()]} ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`;
 }
 
 function sourceFrameIndexForNormalizedTime(normalizedTime) {
@@ -294,11 +294,11 @@ function normalizedTimeForSourceFrame(frameIndex) {
 
 function updateTimestamp() {
   if (!sourceTimestamps.length) {
-    weatherTimestamp.textContent = '—';
+    weatherTimestampValue.textContent = '—';
     return;
   }
   if (state.renderMode === 'raw') {
-    weatherTimestamp.textContent = formatProviderTimestamp(sourceTimestamps[state.rawFrameIndex]);
+    weatherTimestampValue.textContent = formatDisplayTimestamp(sourceTimestamps[state.rawFrameIndex]);
     return;
   }
   const sourcePosition = clamp(state.time / LOOP_SECONDS, 0, 1) * (sourceTimestamps.length - 1);
@@ -308,11 +308,16 @@ function updateTimestamp() {
   const time0 = providerTimestampMilliseconds(sourceTimestamps[frame0]);
   const time1 = providerTimestampMilliseconds(sourceTimestamps[frame1]);
   if (time0 === null || time1 === null) {
-    weatherTimestamp.textContent = formatProviderTimestamp(sourceTimestamps[frame0]);
+    weatherTimestampValue.textContent = formatDisplayTimestamp(sourceTimestamps[frame0]);
     return;
   }
-  weatherTimestamp.textContent = formatProviderTimestamp(new Date(time0 + (time1 - time0) * progress).toISOString());
+  weatherTimestampValue.textContent = formatDisplayTimestamp(new Date(time0 + (time1 - time0) * progress).toISOString());
 }
+
+weatherTimezone.addEventListener('change', () => {
+  displayUtcOffsetHours = Number(weatherTimezone.value);
+  updateTimestamp();
+});
 
 function cameraState() {
   return {
