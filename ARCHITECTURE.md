@@ -89,10 +89,11 @@ index.html + styles.css
         v
 app.js ----------------------> MapLibre GL JS / Globe camera and basemap
  |                                  |
- +-> real-weather.js --------------------> raw-weather-layer.js
- +-> geographic-lod.js ------------------> geographic-weather-pyramid.js
- |                                           +-> geographic-dots-layer.js
- |                                           +-> geographic-squares-layer.js
+ +-> geography.js -----------------------> real-weather.js ----> raw-weather-layer.js
+ |       |
+ |       +-------------------------------> geographic-lod.js --> geographic-weather-pyramid.js
+ |                                                               +-> geographic-dots-layer.js
+ |                                                               +-> geographic-squares-layer.js
  +-> retained scalar engine (inactive) ----> geographic-scalar-layer.js
 ```
 
@@ -126,8 +127,12 @@ the latest desired source-frame set under a replacement key, so queued
 requirements unique to older finger positions are discarded before fetch;
 Dots/Squares submit the requested and next renderer temporal times as one
 deduplicated HIGH set. Map movement pauses new LOW work but never blocks
-required current weather. After a manual or RAW scrub, the LOW horizon rebases
-to the selected time rather than continuing an old full-sequence list.
+required current weather. After a manual or RAW scrub, the small rolling
+playback horizon rebases to the selected time. Independent cooperative
+full-sequence resident fill continues requesting still-missing frames one at
+a time as LOW work; HIGH interactive requirements always outrank it, map
+movement may pause new LOW work, and there is no giant queued full-sequence
+prefetch request.
 Timeline jumps request their required source frames without blanking the last
 valid weather. The request generation guard remains the final barrier preventing
 late availability from committing an older timeline target. This is a
@@ -344,9 +349,13 @@ and transition ownership while allowing L12 to aggregate from the same retained
 L13 physical summary. Other transitions retain their existing independent
 sampling behavior.
 
-`geography.js` is the renderer-facing adapter. It loads and activates the
-sequence before map initialization and converts the shared point interface to
-geographic longitude/latitude. It falls back to the checked-in
+`geography.js` is the application-facing weather adapter and loading
+orchestration layer. Metadata and support loading may begin before MapLibre
+initialization, but the application controls when the first source frame is
+requested. Source frame 0 is normally requested after the application marks
+the initial basemap ready; the resulting sequence is then activated by the
+geography adapter. It converts the shared point interface to geographic
+longitude/latitude and falls back to the checked-in
 `data/mrl_z3_t+40min_376x239.csv` snapshot only when the local sequence assets
 are unavailable (such as HTTP 404), with one concise warning; malformed
 metadata, inconsistent values/geometry, incorrect support, or an incorrect
@@ -493,13 +502,15 @@ use this state: they remain implemented but inactive on the existing fixed
 support-derived L14 scalar lattice until viewport-windowed scalar
 reconstruction is implemented.
 
-For a multi-frame sequence, `RealWeatherSequence` builds one immutable
-sequence-wide positive source-node union mask while the loaded frames are
-already resident. Each prepared canonical geometry derives a reusable sorted
-set of samples whose four-node bilinear stencil intersects that union. Direct
-weather evaluation visits only that potentially-active set; samples guaranteed
-dry for the entire sequence remain zero. The pyramid propagates the static set
-through its centered aggregate topology, while topology-derived `totalWeight`
+For a multi-frame sequence, the separate packed `support.mask` sidecar delivers
+one immutable sequence-wide positive source-node union. It is decoded
+independently of full source-frame residency and is available before the
+complete 19-frame sequence has loaded. Each prepared canonical geometry derives
+its potentially-active sample set from this immutable support mask; full
+source-frame residency is not required to construct the union. Direct weather
+evaluation visits only that potentially-active set; samples guaranteed dry for
+the entire sequence remain zero. The pyramid propagates the static set through
+its centered aggregate topology, while topology-derived `totalWeight`
 arrays are computed once per topology and retained across temporal keyframes.
 Aggregation therefore skips guaranteed-dry child statistics but preserves every
 dry child in the cached denominators and retains the same summary API and
