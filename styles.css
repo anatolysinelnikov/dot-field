@@ -219,19 +219,16 @@ button:active { transform: translateY(1px); }
 }
 
 .weather-timestamp {
+  position: relative;
   justify-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   width: max-content;
-  min-width: 0;
   padding: 7px 12px;
-  padding-right: 28px;
   border: var(--control-border);
   border-radius: var(--control-radius);
-  appearance: none;
   background-color: var(--control-panel);
-  background-image: linear-gradient(45deg, transparent 50%, #8794a9 50%), linear-gradient(135deg, #8794a9 50%, transparent 50%);
-  background-position: calc(100% - 12px) 50%, calc(100% - 8px) 50%;
-  background-repeat: no-repeat;
-  background-size: 4px 4px, 4px 4px;
   box-shadow: var(--control-shadow);
   backdrop-filter: var(--control-backdrop);
   color: #e5ebf5;
@@ -242,13 +239,26 @@ button:active { transform: translateY(1px); }
   cursor: pointer;
 }
 
-.weather-timestamp:focus-visible {
-  outline: 2px solid #6aa6ff;
-  outline-offset: 2px;
-  border-radius: 3px;
+.weather-timestamp-arrow {
+  color: #8794a9;
+  font-size: 10px;
+  line-height: 1;
+  pointer-events: none;
 }
 
-.weather-timestamp option { background: #141b2a; color: #e5ebf5; }
+.weather-timestamp-select {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.weather-timestamp-select:focus-visible { outline: none; }
+.weather-timestamp-select option { background: #141b2a; color: #e5ebf5; }
 
 .weather-control-row {
   display: flex;
