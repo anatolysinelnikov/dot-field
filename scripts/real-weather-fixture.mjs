@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { decodePackedWeatherSupport, RealWeatherSequence } from '../src/engine/real-weather.js';
 
-export async function loadRealWeatherFixture({ sourceFrameCacheLimit = 19 } = {}) {
+export async function loadRealWeatherFixture({ sourceFrameCacheLimit = 19, retainAllSourceFrames = false } = {}) {
   const root = new URL('../data/generated/202608262200/', import.meta.url);
   const metadata = JSON.parse(await readFile(new URL('metadata.json', root), 'utf8'));
   const grid = metadata.spatial_grid;
@@ -19,7 +19,7 @@ export async function loadRealWeatherFixture({ sourceFrameCacheLimit = 19 } = {}
     longitudeSpacing: grid.longitude_spacing, latitudeSpacing: grid.latitude_spacing,
     timestamps: metadata.time.timestamps,
     potentialWeatherMask: decodePackedWeatherSupport(support.buffer.slice(support.byteOffset, support.byteOffset + support.byteLength), frameSize),
-    sourceFrameCacheLimit
+    sourceFrameCacheLimit, retainAllSourceFrames
   });
   return { metadata, weather, sourceFrames };
 }

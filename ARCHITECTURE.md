@@ -107,22 +107,27 @@ basemap starts. After MapLibre renders the initial tiles, the application asks
 only for source frame 0; weather custom layers are created as soon as that
 frame is validated. Playback becomes available when the initial three-frame
 source buffer (0, 1, 2) is ready; it does not wait for all 19 source frames.
-The provider then maintains a rolling source working set through the same
-bounded scheduler used by first load, RAW, Dots/Squares temporal requirements,
-and playback. Its current six-frame horizon is previous source frame, current
-temporal pair, and three frames ahead (clamped at the sequence ends), matching
-the six-entry source LRU. The scheduler has one global fetch slot, not separate
-interactive and background pools. Current-time and adjacent temporal
-requirements are HIGH; rolling-forward work is LOW. HIGH work is selected
-before queued LOW work, while a running fetch is allowed to finish. If playback
-reaches an unavailable required pair, application time holds at the last valid
-weather state until that pair is available, then resumes. Manual scrub submits
+The active finite sequence then keeps its rolling source horizon through the
+same scheduler and begins a cooperative one-frame-at-a-time LOW fill of the
+remaining sequence after the initial rolling horizon is serviced. Every exact
+Float32 source frame that passes validation is retained for the lifetime of the
+sequence under the `retainAllSourceFrames` policy. The six-entry LRU remains
+available as the bounded default for comparison and for non-resident callers,
+but the active real-weather path eventually retains all 19 source frames. Once
+complete, source timeline jumps are served from resident memory without
+another transport or validation scan. The scheduler has one global fetch slot,
+not separate interactive and background pools. Current-time and adjacent
+temporal requirements are HIGH; rolling-forward and resident-fill work is LOW.
+HIGH work is selected before queued LOW work, while a running fetch is allowed
+to finish. If playback reaches an unavailable required pair, application time
+holds at the last valid weather state until that pair is available, then
+resumes. Manual scrub submits
 the latest desired source-frame set under a replacement key, so queued
 requirements unique to older finger positions are discarded before fetch;
 Dots/Squares submit the requested and next renderer temporal times as one
-deduplicated HIGH set. After a manual or RAW scrub, the LOW horizon rebases to
-the selected time rather than continuing an old full-sequence list. Map movement
-pauses the start of new LOW work but never blocks required current weather.
+deduplicated HIGH set. Map movement pauses new LOW work but never blocks
+required current weather. After a manual or RAW scrub, the LOW horizon rebases
+to the selected time rather than continuing an old full-sequence list.
 Timeline jumps request their required source frames without blanking the last
 valid weather. The request generation guard remains the final barrier preventing
 late availability from committing an older timeline target. This is a
@@ -272,16 +277,20 @@ accept this rectangular contract, and the sequence's arbitrary point-batch
 API, retain the dense generic fallback.
 These arrays are computation caches rather than a new weather representation;
 the single-point sampler remains the semantic reference path. The provider-grid
-source-frame cache is a separate six-entry deterministic LRU of Float32 arrays
-(roughly 17.3 MiB at this fixture), rather than the old fixed 54.77 MiB
-monolithic sequence. It is the authoritative bounded in-memory temporal
-working set; browser HTTP cache can improve transport latency but is never a
-required second frame store. Frame availability is asynchronous only at the provider
-loading boundary: once the latest required frames are available, provider
-temporal reconstruction, pyramid evaluation, and renderer updates remain
-synchronous. Each downloaded payload is byte/value validated before entering
-the LRU, including a re-download after eviction. A source frame is never
-asynchronously evicted during a synchronous evaluation. Optional future
+source-frame cache is a deterministic Float32 residency store. In the active
+finite sequence, it retains every validated frame rather than evicting old
+frames: 19 frames × 3,022,676 bytes = 57,430,844 resident source bytes (about
+54.8 MiB). Browser HTTP cache can improve transport latency but is never a
+required second frame store. The bounded six-entry LRU (about 17.3 MiB for
+this fixture) remains the default policy for comparison. Frame availability is
+asynchronous only at the provider loading boundary: once the latest required
+frames are available, provider temporal reconstruction, pyramid evaluation,
+and renderer updates remain synchronous. Each downloaded payload is
+byte/value validated before entering the residency store, and a resident frame
+is never re-downloaded or revalidated. A source frame is never asynchronously
+evicted during a synchronous evaluation. The prepared spatial rain cache
+remains a separate bounded four-entry cache and is unchanged by source-frame
+residency. Optional future
 phenomena are represented in metadata
 as one mutually-exclusive Uint8 node enum per source frame: 0 none, 1–3 storm,
 4–6 hail, 7 reserved. The current rain-only sequence declares this channel

@@ -363,7 +363,7 @@ export class RealWeatherSequenceFrame {
 }
 
 export class RealWeatherSequence extends RealWeatherField {
-  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, timestamps, potentialWeatherMask = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, onSourceFrameCacheEvent = null }) {
+  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, timestamps, potentialWeatherMask = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
     const frameSize = longitudes.length * latitudes.length;
     const emptyCodes = new Uint8Array(frameSize);
     const emptyChannel = new Float32Array(frameSize);
@@ -385,6 +385,7 @@ export class RealWeatherSequence extends RealWeatherField {
     this.frameSize = frameSize;
     this.timestamps = Object.freeze([...timestamps]);
     this.sourceFrameCacheLimit = sourceFrameCacheLimit;
+    this.retainAllSourceFrames = Boolean(retainAllSourceFrames);
     this.onSourceFrameCacheEvent = typeof onSourceFrameCacheEvent === 'function' ? onSourceFrameCacheEvent : null;
     if (!Number.isInteger(sourceFrameCacheLimit) || sourceFrameCacheLimit < 2) {
       throw new Error('Real weather sequence source-frame cache limit must be an integer of at least 2.');
@@ -426,8 +427,12 @@ export class RealWeatherSequence extends RealWeatherField {
     }
     const values = this.sourceFrames.get(frameIndex);
     if (!values) throw new Error(`Real weather source frame ${frameIndex} is not available.`);
-    this.sourceFrames.delete(frameIndex);
-    this.sourceFrames.set(frameIndex, values);
+    if (!this.retainAllSourceFrames) {
+      this.sourceFrames.delete(frameIndex);
+      this.sourceFrames.set(frameIndex, values);
+    } else {
+      this.sourceFrames.set(frameIndex, values);
+    }
     return values;
   }
 
@@ -450,10 +455,12 @@ export class RealWeatherSequence extends RealWeatherField {
     this.sourceFrames.delete(frameIndex);
     this.sourceFrames.set(frameIndex, values);
     if (validated) this.validatedSourceFrames.add(frameIndex);
-    while (this.sourceFrames.size > this.sourceFrameCacheLimit) {
-      const evictedFrameIndex = this.sourceFrames.keys().next().value;
-      this.sourceFrames.delete(evictedFrameIndex);
-      this.onSourceFrameCacheEvent?.({ type: 'eviction', frameIndex: evictedFrameIndex });
+    if (!this.retainAllSourceFrames) {
+      while (this.sourceFrames.size > this.sourceFrameCacheLimit) {
+        const evictedFrameIndex = this.sourceFrames.keys().next().value;
+        this.sourceFrames.delete(evictedFrameIndex);
+        this.onSourceFrameCacheEvent?.({ type: 'eviction', frameIndex: evictedFrameIndex });
+      }
     }
     this.onSourceFrameCacheEvent?.({ type: 'insertion', frameIndex });
     if (frameIndex === 0 && !this.rawFrame) this.rawFrame = this.exactSourceFrameAt(0);
@@ -973,7 +980,7 @@ async function loadSequenceMetadata(metadataUrl, timing) {
   return validated;
 }
 
-function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getSourceCacheEntryCount, fetchFrame, sourceFrameByteLength }) {
+function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getSourceCacheEntryCount, fetchFrame, sourceFrameByteLength, retainAllSourceFrames }) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('Source-frame fetch concurrency must be a positive integer.');
   const requests = new Map();
   const replacementKeys = new Map();
@@ -1005,6 +1012,11 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getS
     peakSourceCacheEntries: 0,
     sourceCacheBytes: 0,
     peakSourceCacheBytes: 0,
+    sourceFrameCount: frameCount,
+    residentSourceFrameCount: 0,
+    residentSourceBytes: 0,
+    fullSequenceResidencyCompleted: false,
+    retainAllSourceFrames: Boolean(retainAllSourceFrames),
     logicalSourceBytesRequested: 0,
     logicalSourceBytesForStaleFetches: 0,
     latestTargetGeneration: 0,
@@ -1062,6 +1074,9 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getS
     diagnostics.peakSourceCacheEntries = Math.max(diagnostics.peakSourceCacheEntries, entries);
     diagnostics.sourceCacheBytes = entries * sourceFrameByteLength;
     diagnostics.peakSourceCacheBytes = Math.max(diagnostics.peakSourceCacheBytes, diagnostics.sourceCacheBytes);
+    diagnostics.residentSourceFrameCount = entries;
+    diagnostics.residentSourceBytes = diagnostics.sourceCacheBytes;
+    diagnostics.fullSequenceResidencyCompleted = entries === frameCount;
   }
 
   function settleAvailableRequests() {
@@ -1195,7 +1210,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getS
   };
 }
 
-export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, sourceFrameFetchConcurrency = 1 } = {}) {
+export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, sourceFrameFetchConcurrency = 1 } = {}) {
   const timing = typeof onTiming === 'function' ? onTiming : () => {};
   const metadataReady = loadSequenceMetadata(metadataUrl, timing);
   const supportReady = metadataReady.then(async (validated) => {
@@ -1214,7 +1229,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sou
     const sequence = new RealWeatherSequence({
       longitudes, latitudes, frameCount: validated.frameCount,
       longitudeSpacing: validated.longitudeSpacing, latitudeSpacing: validated.latitudeSpacing,
-      timestamps: validated.timestamps, potentialWeatherMask, sourceFrameCacheLimit,
+      timestamps: validated.timestamps, potentialWeatherMask, sourceFrameCacheLimit, retainAllSourceFrames,
       onSourceFrameCacheEvent: (event) => scheduler?.recordCacheEvent(event)
     });
     timing('weather-sequence-construction-complete');
@@ -1227,6 +1242,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sou
       isAvailable: (frameIndex) => sequence.isSourceFrameAvailable(frameIndex),
       getSourceCacheEntryCount: () => sequence.sourceFrames.size,
       sourceFrameByteLength: validated.expectedFrameByteCount,
+      retainAllSourceFrames: sequence.retainAllSourceFrames,
       async fetchFrame(frameIndex) {
       timing(`weather-frame-${frameIndex}-fetch-start`);
       const response = await fetchSequenceAsset(resolveSequenceAssetUrl(metadataUrl, validated.rainFrameAssets[frameIndex]));
@@ -1272,6 +1288,15 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sou
     async prefetchFrames(frameIndices) {
       await requestSourceFrames(frameIndices, { priority: 'low', replaceKey: 'background-prefetch' });
       return sequenceReady;
+    },
+    async fillAllSourceFrames() {
+      const sequence = await sequenceReady;
+      if (sequence.frameCount === undefined || !sequence.retainAllSourceFrames) return sequence;
+      for (let frameIndex = 0; frameIndex < sequence.frameCount; frameIndex++) {
+        if (sequence.isSourceFrameAvailable(frameIndex)) continue;
+        await requestSourceFrames([frameIndex], { priority: 'low' });
+      }
+      return sequence;
     },
     setBackgroundPrefetchPaused(paused) {
       void schedulerReady.then((frameScheduler) => frameScheduler.setBackgroundPrefetchPaused(paused));

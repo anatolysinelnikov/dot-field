@@ -105,7 +105,7 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
   try {
     field = await loadRealWeatherSequence(
       './data/generated/202608262200/metadata.json',
-      { onTiming }
+      { onTiming, retainAllSourceFrames: true }
     );
   } catch (error) {
     if (!(error instanceof RealWeatherSequenceAssetsUnavailableError)) throw error;
@@ -119,7 +119,7 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
 export function beginActiveWeatherLoad({ onTiming = null } = {}) {
   const sequenceLoad = beginRealWeatherSequenceLoad(
     './data/generated/202608262200/metadata.json',
-    { onTiming }
+    { onTiming, retainAllSourceFrames: true }
   );
   let fallbackPromise = null;
   const metadataReady = sequenceLoad.metadataReady.catch((error) => {
@@ -191,7 +191,12 @@ export function beginActiveWeatherLoad({ onTiming = null } = {}) {
       const field = await this.loadSequence(0);
       if (field.frameCount === undefined) return field;
       await sequenceLoad.requestSourceFrames(sourceFrameIndicesForInitialPlayback(field), { priority: 'high' });
-      void rebaseRollingPrefetch(field, 0);
+      // Keep the small rolling horizon first so the resident fill does not
+      // consume LOW work that is immediately useful to playback.
+      void rebaseRollingPrefetch(field, 0)
+        .catch((error) => console.error('Unable to prefetch the initial rolling playback weather buffer.', error))
+        .then(() => sequenceLoad.fillAllSourceFrames())
+        .catch((error) => console.error('Unable to fill the resident source-frame sequence.', error));
       return { field, frameIndices: sourceFrameIndicesForInitialPlayback(field) };
     },
     rebaseRollingPrefetch(normalizedTime) {
