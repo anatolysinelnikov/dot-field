@@ -60,6 +60,8 @@ function fixtureFetch(starts, { delayMs = 0 } = {}) {
 }
 
 const scrubSequence = wideScrubSequence();
+let baseReport = null;
+let residentReport = null;
 
 const baseStarts = [];
 await withFetch(fixtureFetch(baseStarts), async () => {
@@ -76,6 +78,7 @@ await withFetch(fixtureFetch(baseStarts), async () => {
   check(baseDiagnostics.validationScans === baseDiagnostics.sourceFetchesStarted, 'base validation scans must match source fetches');
   check(baseDiagnostics.logicalSourceBytesRequested > FRAME_COUNT * FRAME_BYTE_LENGTH, 'base wide scrub must transfer more than one sequence payload');
   check(sequence.sourceFrames.size === 6, 'base source residency must remain bounded at six frames');
+  baseReport = baseDiagnostics;
 });
 
 const residentStarts = [];
@@ -106,6 +109,7 @@ await withFetch(fixtureFetch(residentStarts), async () => {
   check(afterScrub.validationScans === beforeScrub.validationScans, 'wide scrub after residency must not validate');
   check(afterScrub.residentSourceFrameCount === FRAME_COUNT && afterScrub.lruEvictions === 0, 'wide scrub must preserve full resident source state');
   check(starts.length === FRAME_COUNT, 'resident sequence must fetch each source frame exactly once');
+  residentReport = { complete, beforeScrub, afterScrub };
 });
 
 const pausedStarts = [];
@@ -134,4 +138,5 @@ await withFetch(fixtureFetch(pausedStarts, { delayMs: 3 }), async () => {
   check(preempted.diagnostics().peakActiveFetches === 1, 'resident fill must retain global fetch concurrency one');
 });
 
-console.log('resident source-frame verification passed: incremental startup, bounded initial playback readiness, full LOW residency, exact resident bytes, no post-completion fetch/validation/eviction, HIGH preemption, and map-pause resume');
+console.log(`resident source-frame verification passed: incremental startup, bounded initial playback readiness, full LOW residency, exact resident bytes, no post-completion fetch/validation/eviction, HIGH preemption, and map-pause resume`);
+console.log(`A/B wide scrub: base fetches=${baseReport.sourceFetchesStarted}, misses=${baseReport.cacheMisses}, validation=${baseReport.validationScans}, evictions=${baseReport.lruEvictions}, logicalBytes=${baseReport.logicalSourceBytesRequested}; resident post-completion fetch delta=${residentReport.afterScrub.sourceFetchesStarted - residentReport.beforeScrub.sourceFetchesStarted}, validation delta=${residentReport.afterScrub.validationScans - residentReport.beforeScrub.validationScans}, evictions=${residentReport.afterScrub.lruEvictions}`);
