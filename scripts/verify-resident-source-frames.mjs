@@ -82,16 +82,20 @@ await withFetch(fixtureFetch(baseStarts), async () => {
 });
 
 const residentStarts = [];
+const residentChanges = [];
 await withFetch(fixtureFetch(residentStarts), async () => {
   const starts = residentStarts;
   const resident = beginRealWeatherSequenceLoad('metadata', {
     sourceFrameCacheLimit: 6,
-    retainAllSourceFrames: true
+    retainAllSourceFrames: true,
+    onResidencyChange: (indices) => residentChanges.push(indices)
   });
   const sequence = await resident.loadSequence(0);
   await resident.requestSourceFrames([1, 2], { priority: 'high' });
   const initial = resident.diagnostics();
   check(initial.residentSourceFrameCount === 3 && initial.residentSourceBytes === 3 * FRAME_BYTE_LENGTH, 'resident startup must retain only the initial three frames before background fill');
+  check(initial.residentSourceFrameIndices.join(',') === '0,1,2', 'resident diagnostics must expose the actual sorted startup frame indices');
+  check(residentChanges.at(-1)?.join(',') === '0,1,2' && Object.isFrozen(residentChanges.at(-1)), 'residency changes must publish an immutable actual startup index snapshot');
   check(!initial.fullSequenceResidencyCompleted, 'resident startup must not report full completion early');
 
   await resident.fillAllSourceFrames();
@@ -99,6 +103,8 @@ await withFetch(fixtureFetch(residentStarts), async () => {
   check(sequence.sourceFrames.size === FRAME_COUNT, 'resident fill must retain every source frame');
   check(complete.sourceFrameCount === FRAME_COUNT && complete.residentSourceFrameCount === FRAME_COUNT, 'resident diagnostics must expose the complete frame count');
   check(complete.residentSourceBytes === FRAME_COUNT * FRAME_BYTE_LENGTH, 'resident bytes must equal exact Float32 payload bytes');
+  check(complete.residentSourceFrameIndices.join(',') === Array.from({ length: FRAME_COUNT }, (_, index) => index).join(','), 'resident diagnostics must expose every actual resident frame index');
+  check(residentChanges.at(-1)?.join(',') === Array.from({ length: FRAME_COUNT }, (_, index) => index).join(','), 'residency changes must publish the actual complete index snapshot');
   check(complete.fullSequenceResidencyCompleted, 'resident fill must report full sequence completion');
   check(complete.retainAllSourceFrames && complete.lruEvictions === 0, 'resident policy must never evict source frames');
 

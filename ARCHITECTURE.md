@@ -296,6 +296,13 @@ as one mutually-exclusive Uint8 node enum per source frame: 0 none, 1–3 storm,
 4–6 hail, 7 reserved. The current rain-only sequence declares this channel
 unavailable and fabricates no phenomenon data.
 
+The timeline may visualize actual resident source-frame pairs as muted blue
+segments inside its existing track. Residency snapshots and change callbacks
+come from the loading/provider layer; the app converts adjacent resident
+indices to visual intervals without changing timeline semantics, playback
+scheduling, or source-loading policy. Non-sequence fallback sources leave the
+track neutral.
+
 ### Physical weather-summary profiles
 
 `geographic-weather-pyramid.js` retains the generic hazard-capable physical

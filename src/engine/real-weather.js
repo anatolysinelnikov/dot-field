@@ -440,6 +440,10 @@ export class RealWeatherSequence extends RealWeatherField {
     return this.sourceFrames.has(frameIndex);
   }
 
+  residentSourceFrameIndices() {
+    return Object.freeze([...this.sourceFrames.keys()].sort((left, right) => left - right));
+  }
+
   requiredSourceFrames(time) {
     const frame = this.prepareFrame(time);
     return frame.frame0 === frame.frame1 ? [frame.frame0] : [frame.frame0, frame.frame1];
@@ -980,7 +984,7 @@ async function loadSequenceMetadata(metadataUrl, timing) {
   return validated;
 }
 
-function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getSourceCacheEntryCount, fetchFrame, sourceFrameByteLength, retainAllSourceFrames }) {
+function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getSourceCacheEntryCount, getResidentSourceFrameIndices, fetchFrame, sourceFrameByteLength, retainAllSourceFrames, onResidencyChange }) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('Source-frame fetch concurrency must be a positive integer.');
   const requests = new Map();
   const replacementKeys = new Map();
@@ -1015,6 +1019,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getS
     sourceFrameCount: frameCount,
     residentSourceFrameCount: 0,
     residentSourceBytes: 0,
+    residentSourceFrameIndices: Object.freeze([]),
     fullSequenceResidencyCompleted: false,
     retainAllSourceFrames: Boolean(retainAllSourceFrames),
     logicalSourceBytesRequested: 0,
@@ -1070,12 +1075,14 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getS
 
   function updateSourceCacheDiagnostics() {
     const entries = getSourceCacheEntryCount();
+    const residentFrameIndices = getResidentSourceFrameIndices();
     diagnostics.sourceCacheEntries = entries;
     diagnostics.peakSourceCacheEntries = Math.max(diagnostics.peakSourceCacheEntries, entries);
     diagnostics.sourceCacheBytes = entries * sourceFrameByteLength;
     diagnostics.peakSourceCacheBytes = Math.max(diagnostics.peakSourceCacheBytes, diagnostics.sourceCacheBytes);
     diagnostics.residentSourceFrameCount = entries;
     diagnostics.residentSourceBytes = diagnostics.sourceCacheBytes;
+    diagnostics.residentSourceFrameIndices = residentFrameIndices;
     diagnostics.fullSequenceResidencyCompleted = entries === frameCount;
   }
 
@@ -1201,6 +1208,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getS
       if (event.type === 'insertion') diagnostics.sourceCacheInsertions++;
       else if (event.type === 'eviction') diagnostics.lruEvictions++;
       updateSourceCacheDiagnostics();
+      if (event.type === 'insertion' || event.type === 'eviction') onResidencyChange?.(diagnostics.residentSourceFrameIndices);
     },
     diagnostics() {
       updateQueueDiagnostics();
@@ -1210,7 +1218,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getS
   };
 }
 
-export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, sourceFrameFetchConcurrency = 1 } = {}) {
+export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onResidencyChange = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, sourceFrameFetchConcurrency = 1 } = {}) {
   const timing = typeof onTiming === 'function' ? onTiming : () => {};
   const metadataReady = loadSequenceMetadata(metadataUrl, timing);
   const supportReady = metadataReady.then(async (validated) => {
@@ -1241,8 +1249,10 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sou
       concurrency: sourceFrameFetchConcurrency,
       isAvailable: (frameIndex) => sequence.isSourceFrameAvailable(frameIndex),
       getSourceCacheEntryCount: () => sequence.sourceFrames.size,
+      getResidentSourceFrameIndices: () => sequence.residentSourceFrameIndices(),
       sourceFrameByteLength: validated.expectedFrameByteCount,
       retainAllSourceFrames: sequence.retainAllSourceFrames,
+      onResidencyChange,
       async fetchFrame(frameIndex) {
       timing(`weather-frame-${frameIndex}-fetch-start`);
       const response = await fetchSequenceAsset(resolveSequenceAssetUrl(metadataUrl, validated.rainFrameAssets[frameIndex]));

@@ -1,6 +1,7 @@
 import { LOD_MORPH_SECONDS, LOOP_SECONDS } from './engine/config.js';
 import { clamp, smoothstep } from './engine/math.js';
 import { beginActiveWeatherLoad, WEATHER_REGION } from './engine/geography.js';
+import { residentSourceFrameIntervals } from './timeline-residency.js';
 import {
   MAX_LOGICAL_SAMPLING_ZOOM,
   canonicalWindowFromMercatorBounds,
@@ -38,6 +39,7 @@ const COMPACT_MIN_ZOOM = 1.5;
 const LARGE_MIN_ZOOM = 3.0;
 const playPause = document.querySelector('#playPause');
 const timeSlider = document.querySelector('#timeSlider');
+const timelineResidency = document.querySelector('#timelineResidency');
 const resetView = document.querySelector('#resetView');
 const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
@@ -63,11 +65,26 @@ const initialMinZoom =
 if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
 
 markStartup('weather-load-start');
-const weatherLoad = beginActiveWeatherLoad({ onTiming: markStartup });
 let activeWeatherField = null;
 let rawWeatherField = null;
 let sourceFrameCount = 1;
 let sourceTimestamps = [];
+let timelineResidencyEnabled = false;
+
+function updateTimelineResidency(residentSourceFrameIndices = []) {
+  const intervals = timelineResidencyEnabled
+    ? residentSourceFrameIntervals(residentSourceFrameIndices, sourceFrameCount)
+    : [];
+  timelineResidency.replaceChildren(...intervals.map(({ start, end }) => {
+    const segment = document.createElement('span');
+    segment.className = 'timeline-residency-segment';
+    segment.style.left = `${start * 100}%`;
+    segment.style.width = `${(end - start) * 100}%`;
+    return segment;
+  }));
+}
+
+const weatherLoad = beginActiveWeatherLoad({ onTiming: markStartup, onResidencyChange: updateTimelineResidency });
 
 async function loadMapTilerKey() {
   try {
@@ -182,6 +199,8 @@ for (const control of [...renderModeButtons, hazards, timeSlider, playPause]) co
 function activateWeatherField(field) {
   activeWeatherField = field;
   sourceFrameCount = Number.isInteger(field.frameCount) ? field.frameCount : 1;
+  timelineResidencyEnabled = Number.isInteger(field.frameCount) && field.frameCount > 1;
+  updateTimelineResidency(weatherLoad.diagnostics()?.residentSourceFrameIndices || []);
   rawWeatherField = typeof field.exactSourceFrameAt === 'function'
     ? field.exactSourceFrameAt(0)
     : field.rawFrame;

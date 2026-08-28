@@ -116,10 +116,10 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
   return field;
 }
 
-export function beginActiveWeatherLoad({ onTiming = null } = {}) {
+export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = null } = {}) {
   const sequenceLoad = beginRealWeatherSequenceLoad(
     './data/generated/202608262200/metadata.json',
-    { onTiming, retainAllSourceFrames: true }
+    { onTiming, onResidencyChange, retainAllSourceFrames: true }
   );
   let fallbackPromise = null;
   const metadataReady = sequenceLoad.metadataReady.catch((error) => {
