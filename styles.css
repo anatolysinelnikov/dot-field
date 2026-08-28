@@ -240,10 +240,34 @@ button:active { transform: translateY(1px); }
 }
 
 .weather-timestamp-arrow {
-  color: #8794a9;
-  font-size: 10px;
-  line-height: 1;
+  position: relative;
+  flex: 0 0 8px;
+  width: 8px;
+  height: 5px;
   pointer-events: none;
+}
+
+.weather-timestamp-arrow::before,
+.weather-timestamp-arrow::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 5.5px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: #8794a9;
+}
+
+.weather-timestamp-arrow::before {
+  left: 0;
+  transform: rotate(35deg);
+  transform-origin: left center;
+}
+
+.weather-timestamp-arrow::after {
+  right: 0;
+  transform: rotate(-35deg);
+  transform-origin: right center;
 }
 
 .weather-timestamp-select {
