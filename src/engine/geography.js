@@ -1,8 +1,10 @@
 import {
   beginRealWeatherSequenceLoad,
+  INITIAL_PLAYBACK_SOURCE_FRAME_COUNT,
   loadRealWeatherSequence,
   loadRealWeatherSnapshot,
-  RealWeatherSequenceAssetsUnavailableError
+  RealWeatherSequenceAssetsUnavailableError,
+  rollingPlaybackSourceFrameIndices
 } from './real-weather.js';
 
 function mercatorXToLongitude(x) {
@@ -127,6 +129,23 @@ export function beginActiveWeatherLoad({ onTiming = null } = {}) {
     return null;
   });
   let fieldPromise = null;
+  let rollingHorizonKey = null;
+  let rollingHorizonPromise = null;
+
+  function sourceFrameIndicesForInitialPlayback(field) {
+    return Array.from({ length: Math.min(INITIAL_PLAYBACK_SOURCE_FRAME_COUNT, field.frameCount) }, (_, index) => index);
+  }
+
+  function rebaseRollingPrefetch(field, normalizedTime) {
+    const frameIndices = rollingPlaybackSourceFrameIndices(field.frameCount, normalizedTime);
+    const key = frameIndices.join(',');
+    if (key === rollingHorizonKey) return rollingHorizonPromise || Promise.resolve({ status: 'ready' });
+    rollingHorizonKey = key;
+    rollingHorizonPromise = sequenceLoad.requestSourceFrames(frameIndices, {
+      priority: 'low', replaceKey: 'rolling-playback-prefetch'
+    }).then(({ result }) => result);
+    return rollingHorizonPromise;
+  }
 
   return {
     metadataReady,
@@ -168,16 +187,18 @@ export function beginActiveWeatherLoad({ onTiming = null } = {}) {
     async requestTime(normalizedTime, options = {}) {
       return this.requestTimes([normalizedTime], options);
     },
-    async prefetchRemaining() {
+    async prepareInitialPlaybackBuffer() {
       const field = await this.loadSequence(0);
       if (field.frameCount === undefined) return field;
-      await sequenceLoad.prefetchFrames(Array.from({ length: field.frameCount - 1 }, (_, index) => index + 1));
-      // The bounded LRU intentionally cannot retain all 19 frames. Restore
-      // the opening adjacent pair after the forward pass so enabled playback
-      // can start at t=0 without an avoidable on-demand stall. This remains
-      // LOW work, so a new scrub or map interaction can still preempt it.
-      await sequenceLoad.requestSourceFrames([0, 1], { priority: 'low', replaceKey: 'background-prefetch-warmup' });
-      return field;
+      await sequenceLoad.requestSourceFrames(sourceFrameIndicesForInitialPlayback(field), { priority: 'high' });
+      void rebaseRollingPrefetch(field, 0);
+      return { field, frameIndices: sourceFrameIndicesForInitialPlayback(field) };
+    },
+    rebaseRollingPrefetch(normalizedTime) {
+      return this.loadSequence(0).then((field) => {
+        if (field.frameCount === undefined) return { status: 'ready' };
+        return rebaseRollingPrefetch(field, normalizedTime);
+      });
     },
     setBackgroundPrefetchPaused(paused) {
       sequenceLoad.setBackgroundPrefetchPaused(paused);

@@ -158,6 +158,9 @@ const state = {
   weatherReady: false,
   weatherQueued: false,
   playbackReady: false,
+  playbackStalled: false,
+  playbackPendingRequirementKey: null,
+  playbackHorizonKey: null,
   renderMode: 'raw',
   hazardsVisible: true,
   rawFrameIndex: 0,
@@ -193,13 +196,14 @@ function activateWeatherField(field) {
     markStartup('playback-ready');
     return;
   }
-  markStartup('background-prefetch-start');
-  void weatherLoad.prefetchRemaining().then(() => {
+  markStartup('initial-playback-buffer-start');
+  void weatherLoad.prepareInitialPlaybackBuffer().then(({ frameIndices } = {}) => {
     state.playbackReady = true;
-    markStartup('all-source-frames-prefetched');
+    markStartup('initial-playback-buffer-ready');
     markStartup('playback-ready');
+    window.__dotFieldStartup.initialPlaybackBufferFrames = frameIndices || [];
     if (state.renderMode !== 'raw') playPause.disabled = false;
-  }).catch((error) => console.error('Unable to prefetch weather source frames.', error));
+  }).catch((error) => console.error('Unable to prepare the initial playback weather buffer.', error));
 }
 
 function startWeatherSequence(trigger) {
@@ -646,30 +650,63 @@ function queueWeatherUpdate() {
     if (!state.mapReady || !activeWeatherField) return;
     const time = state.time / LOOP_SECONDS;
     if (state.renderMode === 'raw') return;
-    requestWeatherTime(time);
+    requestWeatherTime(time, { playback: state.playing });
   });
 }
 
-function requestWeatherTime(normalizedTime) {
+function rendererTemporalRequirements(normalizedTime) {
+  const rendererFrame = geographicTemporalFrameAt(normalizedTime);
+  const nextRendererTime = rendererFrame.nextIndex / TEMPORAL_FRAME_COUNT;
+  const times = [normalizedTime, nextRendererTime];
+  const sourceFrames = activeWeatherField?.frameCount === undefined
+    ? []
+    : [...new Set(times.flatMap((time) => activeWeatherField.requiredSourceFrames(time)))];
+  return { times, sourceFrames, key: sourceFrames.join(',') };
+}
+
+function rendererSourcesAreAvailable(requirements) {
+  return activeWeatherField?.frameCount === undefined
+    || requirements.sourceFrames.every((frameIndex) => activeWeatherField.isSourceFrameAvailable(frameIndex));
+}
+
+function renderCurrentWeather() {
+  if (!state.mapReady || state.renderMode === 'raw') return;
+  if (state.renderMode === 'dots') weatherLayer.updateWeather(state.time / LOOP_SECONDS);
+  else if (state.renderMode === 'squares') squaresLayer.updateWeather(state.time / LOOP_SECONDS);
+  map.triggerRepaint();
+}
+
+function rebasePlaybackHorizon(normalizedTime, requirements) {
+  if (!activeWeatherField || activeWeatherField.frameCount === undefined || requirements.key === state.playbackHorizonKey) return;
+  state.playbackHorizonKey = requirements.key;
+  void weatherLoad.rebaseRollingPrefetch(normalizedTime).catch((error) => {
+    console.error('Unable to prefetch the rolling playback weather buffer.', error);
+  });
+}
+
+function requestWeatherTime(normalizedTime, { playback = false } = {}) {
   if (!activeWeatherField) return;
+  const requirements = rendererTemporalRequirements(normalizedTime);
+  if (playback && rendererSourcesAreAvailable(requirements)) {
+    rebasePlaybackHorizon(normalizedTime, requirements);
+    renderCurrentWeather();
+    return;
+  }
   const requestGeneration = ++weatherRequestGeneration;
   // Dots/Squares retain two adjacent 100 ms renderer keyframes. Resolve both
   // provider times as one coalesced HIGH source requirement before asking
   // either layer to evaluate. A manual scrub replaces only its older target.
-  const rendererFrame = geographicTemporalFrameAt(normalizedTime);
-  const nextRendererTime = rendererFrame.nextIndex / TEMPORAL_FRAME_COUNT;
-  void weatherLoad.requestTimes([normalizedTime, nextRendererTime], {
+  void weatherLoad.requestTimes(requirements.times, {
     priority: 'high',
-    replaceKey: state.scrubbing ? 'manual-temporal-target' : null,
+    replaceKey: state.scrubbing ? 'manual-temporal-target' : playback ? 'playback-required' : null,
     latestTargetGeneration: requestGeneration
   }).then(({ result } = {}) => {
     if (result?.status === 'superseded') return;
     if (requestGeneration !== weatherRequestGeneration || !state.mapReady || state.renderMode === 'raw') return;
     // Temporal reconstruction remains synchronous once the adjacent source
     // frames are present. A stale load cannot overwrite a newer timeline target.
-    if (state.renderMode === 'dots') weatherLayer.updateWeather(state.time / LOOP_SECONDS);
-    else if (state.renderMode === 'squares') squaresLayer.updateWeather(state.time / LOOP_SECONDS);
-    map.triggerRepaint();
+    rebasePlaybackHorizon(state.time / LOOP_SECONDS, rendererTemporalRequirements(state.time / LOOP_SECONDS));
+    renderCurrentWeather();
   }).catch((error) => console.error('Unable to load requested weather time.', error));
 }
 
@@ -715,6 +752,9 @@ function setRawFrame(frameIndex, commitTime = false) {
       : rawWeatherField;
     rawLayer.setFrame(frame);
     refreshHighlightedRawCell();
+    void weatherLoad.rebaseRollingPrefetch(state.time / LOOP_SECONDS).catch((error) => {
+      console.error('Unable to prefetch the RAW scrub weather neighborhood.', error);
+    });
     map.triggerRepaint();
   }).catch((error) => console.error('Unable to load requested RAW weather frame.', error));
 }
@@ -823,11 +863,18 @@ function selectRawCell(event) {
 function setPlaying(playing) {
   const nextPlaying = Boolean(playing) && state.renderMode !== 'raw' && state.playbackReady;
   state.playing = nextPlaying;
+  state.playbackStalled = false;
+  state.playbackPendingRequirementKey = null;
   playPause.disabled = state.renderMode === 'raw' || !state.playbackReady;
   playPause.setAttribute('aria-disabled', String(state.renderMode === 'raw' || !state.playbackReady));
   playPause.dataset.state = nextPlaying ? 'playing' : 'paused';
   playPause.setAttribute('aria-label', nextPlaying ? 'Pause' : 'Play');
-  if (nextPlaying) wakeApplicationFrame();
+  if (nextPlaying) {
+    state.playbackHorizonKey = null;
+    const normalizedTime = state.time / LOOP_SECONDS;
+    rebasePlaybackHorizon(normalizedTime, rendererTemporalRequirements(normalizedTime));
+    wakeApplicationFrame();
+  }
 }
 
 function updateTimeFromTimelineValue(value) {
@@ -1033,19 +1080,54 @@ function wakeApplicationFrame() {
   requestAnimationFrame(frame);
 }
 
+function waitForPlaybackRequirements(normalizedTime) {
+  const requirements = rendererTemporalRequirements(normalizedTime);
+  if (state.playbackPendingRequirementKey === requirements.key) return;
+  state.playbackStalled = true;
+  state.playbackPendingRequirementKey = requirements.key;
+  const requestGeneration = ++weatherRequestGeneration;
+  void weatherLoad.requestTimes(requirements.times, {
+    priority: 'high',
+    replaceKey: 'playback-required',
+    latestTargetGeneration: requestGeneration
+  }).then(({ result } = {}) => {
+    if (result?.status === 'superseded') return;
+    if (requestGeneration !== weatherRequestGeneration || !state.playing || state.scrubbing) return;
+    state.playbackStalled = false;
+    state.playbackPendingRequirementKey = null;
+    rebasePlaybackHorizon(normalizedTime, requirements);
+    wakeApplicationFrame();
+  }).catch((error) => {
+    if (requestGeneration !== weatherRequestGeneration) return;
+    state.playbackStalled = false;
+    state.playbackPendingRequirementKey = null;
+    if (state.playing) setPlaying(false);
+    console.error('Unable to load required playback weather frames.', error);
+  });
+}
+
 function frame(now) {
   applicationFrameQueued = false;
   const delta = Math.min((now - state.lastFrame) / 1000, 0.1);
   state.lastFrame = now;
   let reachedEndpoint = false;
   if (state.playing && !state.scrubbing) {
-    state.time = Math.min(state.time + delta, LOOP_SECONDS);
-    reachedEndpoint = state.time === LOOP_SECONDS;
+    const nextTime = Math.min(state.time + delta, LOOP_SECONDS);
+    const requirements = rendererTemporalRequirements(nextTime / LOOP_SECONDS);
+    if (rendererSourcesAreAvailable(requirements)) {
+      state.playbackStalled = false;
+      state.playbackPendingRequirementKey = null;
+      state.time = nextTime;
+      rebasePlaybackHorizon(state.time / LOOP_SECONDS, requirements);
+      reachedEndpoint = state.time === LOOP_SECONDS;
+    } else {
+      waitForPlaybackRequirements(nextTime / LOOP_SECONDS);
+    }
   }
   // A paused static layer has no temporal uniform to advance. Leaving its
   // repaint scheduling to MapLibre prevents the application RAF from keeping
   // an otherwise idle map rendering continuously.
-  if (state.mapReady && (state.playing || reachedEndpoint) && !state.scrubbing) {
+  if (state.mapReady && (state.playing || reachedEndpoint) && !state.scrubbing && !state.playbackStalled) {
     const normalizedTime = state.time / LOOP_SECONDS;
     if (state.renderMode === 'raw') {
       updateRawTooltipPosition();
@@ -1060,7 +1142,7 @@ function frame(now) {
       : String(state.time / LOOP_SECONDS);
   }
   updateTimestamp();
-  if ((state.playing && !state.scrubbing) || state.lodTransition) wakeApplicationFrame();
+  if ((state.playing && !state.scrubbing && !state.playbackStalled) || state.lodTransition) wakeApplicationFrame();
 }
 
 wakeApplicationFrame();

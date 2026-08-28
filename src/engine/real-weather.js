@@ -9,6 +9,9 @@ const SEQUENCE_SCHEMA_VERSION = 'dot-field-weather-transport-v2';
 const SUPPORT_MASK_ENCODING = 'bitset-lsb0';
 const PHENOMENON_ENUM = Object.freeze({ none: 0, thunderstorm_1: 1, thunderstorm_2: 2, thunderstorm_3: 3, hail_1: 4, hail_2: 5, hail_3: 6, reserved: 7 });
 export const DEFAULT_SOURCE_FRAME_CACHE_LIMIT = 6;
+export const INITIAL_PLAYBACK_SOURCE_FRAME_COUNT = 3;
+export const ROLLING_PLAYBACK_BEHIND_FRAME_COUNT = 1;
+export const ROLLING_PLAYBACK_AHEAD_FRAME_COUNT = 3;
 const SPATIAL_RAIN_CACHE_LIMIT = 4;
 const COMPACT_RECTANGULAR_GEOMETRY = 'compact-rectangular';
 const DENSE_GENERIC_GEOMETRY = 'dense-generic';
@@ -61,6 +64,20 @@ function sortedIndexOf(values, target) {
     else high = middle - 1;
   }
   return -1;
+}
+
+export function rollingPlaybackSourceFrameIndices(frameCount, normalizedTime, {
+  behind = ROLLING_PLAYBACK_BEHIND_FRAME_COUNT,
+  ahead = ROLLING_PLAYBACK_AHEAD_FRAME_COUNT
+} = {}) {
+  if (!Number.isInteger(frameCount) || frameCount < 2) throw new Error('Rolling playback requires at least two source frames.');
+  if (!Number.isInteger(behind) || behind < 0 || !Number.isInteger(ahead) || ahead < 0) {
+    throw new Error('Rolling playback frame counts must be non-negative integers.');
+  }
+  const currentFrame = Math.min(frameCount - 1, Math.floor(clamp(Number(normalizedTime) || 0, 0, 1) * (frameCount - 1)));
+  const start = Math.max(0, currentFrame - behind);
+  const end = Math.min(frameCount - 1, currentFrame + 1 + ahead);
+  return Array.from({ length: end - start + 1 }, (_, index) => start + index);
 }
 
 export class RealWeatherField {
@@ -433,12 +450,12 @@ export class RealWeatherSequence extends RealWeatherField {
     this.sourceFrames.delete(frameIndex);
     this.sourceFrames.set(frameIndex, values);
     if (validated) this.validatedSourceFrames.add(frameIndex);
-    this.onSourceFrameCacheEvent?.({ type: 'insertion', frameIndex });
     while (this.sourceFrames.size > this.sourceFrameCacheLimit) {
       const evictedFrameIndex = this.sourceFrames.keys().next().value;
       this.sourceFrames.delete(evictedFrameIndex);
       this.onSourceFrameCacheEvent?.({ type: 'eviction', frameIndex: evictedFrameIndex });
     }
+    this.onSourceFrameCacheEvent?.({ type: 'insertion', frameIndex });
     if (frameIndex === 0 && !this.rawFrame) this.rawFrame = this.exactSourceFrameAt(0);
     return values;
   }
@@ -956,7 +973,7 @@ async function loadSequenceMetadata(metadataUrl, timing) {
   return validated;
 }
 
-function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, fetchFrame, sourceFrameByteLength }) {
+function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getSourceCacheEntryCount, fetchFrame, sourceFrameByteLength }) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('Source-frame fetch concurrency must be a positive integer.');
   const requests = new Map();
   const replacementKeys = new Map();
@@ -974,6 +991,8 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, fetc
     staleQueuedRequirementsDropped: 0,
     sourceFetchesStarted: 0,
     sourceFetchesCompleted: 0,
+    highRequirementSets: 0,
+    lowRequirementSets: 0,
     highPriorityFetchesStarted: 0,
     staleFetchesStarted: 0,
     staleFetchesCompleted: 0,
@@ -982,6 +1001,10 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, fetc
     validationScans: 0,
     sourceCacheInsertions: 0,
     lruEvictions: 0,
+    sourceCacheEntries: 0,
+    peakSourceCacheEntries: 0,
+    sourceCacheBytes: 0,
+    peakSourceCacheBytes: 0,
     logicalSourceBytesRequested: 0,
     logicalSourceBytesForStaleFetches: 0,
     latestTargetGeneration: 0,
@@ -1031,6 +1054,14 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, fetc
       else diagnostics.backgroundPrefetchResumeCount++;
     }
     return pending;
+  }
+
+  function updateSourceCacheDiagnostics() {
+    const entries = getSourceCacheEntryCount();
+    diagnostics.sourceCacheEntries = entries;
+    diagnostics.peakSourceCacheEntries = Math.max(diagnostics.peakSourceCacheEntries, entries);
+    diagnostics.sourceCacheBytes = entries * sourceFrameByteLength;
+    diagnostics.peakSourceCacheBytes = Math.max(diagnostics.peakSourceCacheBytes, diagnostics.sourceCacheBytes);
   }
 
   function settleAvailableRequests() {
@@ -1115,6 +1146,8 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, fetc
   function requestFrames(frameIndices, { priority = 'high', replaceKey = null, latestTargetGeneration = null } = {}) {
     if (priority !== 'high' && priority !== 'low') throw new Error('Source-frame priority must be high or low.');
     const unique = [...new Set(frameIndices)];
+    if (priority === 'high') diagnostics.highRequirementSets++;
+    else diagnostics.lowRequirementSets++;
     for (const frameIndex of unique) {
       if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= frameCount) throw new RangeError(`Source frame index must be an integer from 0 to ${frameCount - 1}.`);
     }
@@ -1152,9 +1185,11 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, fetc
     recordCacheEvent(event) {
       if (event.type === 'insertion') diagnostics.sourceCacheInsertions++;
       else if (event.type === 'eviction') diagnostics.lruEvictions++;
+      updateSourceCacheDiagnostics();
     },
     diagnostics() {
       updateQueueDiagnostics();
+      updateSourceCacheDiagnostics();
       return { ...diagnostics };
     }
   };
@@ -1190,6 +1225,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sou
       frameCount: validated.frameCount,
       concurrency: sourceFrameFetchConcurrency,
       isAvailable: (frameIndex) => sequence.isSourceFrameAvailable(frameIndex),
+      getSourceCacheEntryCount: () => sequence.sourceFrames.size,
       sourceFrameByteLength: validated.expectedFrameByteCount,
       async fetchFrame(frameIndex) {
       timing(`weather-frame-${frameIndex}-fetch-start`);
