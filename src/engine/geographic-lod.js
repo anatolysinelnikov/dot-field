@@ -1,4 +1,3 @@
-import { WEATHER_SUPPORT } from './geography.js';
 import { clamp } from './math.js';
 
 // MapLibre's world is 512 CSS pixels wide at zoom 0. A dyadic grid step of
@@ -63,24 +62,34 @@ export function rawZoomForLogicalSamplingZoom(logicalZoom, latitude, referenceLa
   return logicalZoom + logicalZoomLatitudeAdjustment(latitude, referenceLatitude);
 }
 
-function supportMercatorBounds() {
-  const [west] = lngLatToMercator(WEATHER_SUPPORT.west, WEATHER_SUPPORT.south);
-  const [east] = lngLatToMercator(WEATHER_SUPPORT.east, WEATHER_SUPPORT.north);
-  const [, north] = lngLatToMercator(WEATHER_SUPPORT.west, WEATHER_SUPPORT.north);
-  const [, south] = lngLatToMercator(WEATHER_SUPPORT.east, WEATHER_SUPPORT.south);
-  return { minX: Math.min(west, east), maxX: Math.max(west, east), minY: Math.min(north, south), maxY: Math.max(north, south) };
+let canonicalSupport = null;
+
+function activeCanonicalSupport() {
+  if (!canonicalSupport) throw new Error('Geographic weather support has not been configured from the active dataset.');
+  return canonicalSupport;
 }
 
-const supportBounds = supportMercatorBounds();
-// Express the conservative support envelope once at the canonical resolution.
-// Selecting every level from these coordinates keeps an active coarse point in
-// every finer selection, including the support-boundary overscan.
-const canonicalSupport = Object.freeze({
-  minX: Math.max(0, Math.floor(supportBounds.minX * MAX_GRID_SIZE) - 1),
-  maxX: Math.min(MAX_GRID_SIZE, Math.ceil(supportBounds.maxX * MAX_GRID_SIZE) + 1),
-  minY: Math.max(0, Math.floor(supportBounds.minY * MAX_GRID_SIZE) - 1),
-  maxY: Math.min(MAX_GRID_SIZE, Math.ceil(supportBounds.maxY * MAX_GRID_SIZE) + 1)
-});
+// Express the active dataset support envelope once at the canonical
+// resolution. Selecting every level from these coordinates keeps an active
+// coarse point in every finer selection, including the support-boundary
+// overscan. The browser receives these geographic bounds from sequence
+// metadata; it does not know the provider format.
+export function setGeographicWeatherSupport(bounds) {
+  const west = finiteCanonicalCoordinate(bounds?.west, 'weatherSupport.west');
+  const east = finiteCanonicalCoordinate(bounds?.east, 'weatherSupport.east');
+  const south = finiteCanonicalCoordinate(bounds?.south, 'weatherSupport.south');
+  const north = finiteCanonicalCoordinate(bounds?.north, 'weatherSupport.north');
+  if (!(west <= east) || !(south <= north)) throw new Error('weatherSupport bounds must be ordered.');
+  const [westX, southY] = lngLatToMercator(west, south);
+  const [eastX, northY] = lngLatToMercator(east, north);
+  canonicalSupport = Object.freeze({
+    minX: Math.max(0, Math.floor(Math.min(westX, eastX) * MAX_GRID_SIZE) - 1),
+    maxX: Math.min(MAX_GRID_SIZE, Math.ceil(Math.max(westX, eastX) * MAX_GRID_SIZE) + 1),
+    minY: Math.max(0, Math.floor(Math.min(northY, southY) * MAX_GRID_SIZE) - 1),
+    maxY: Math.min(MAX_GRID_SIZE, Math.ceil(Math.max(northY, southY) * MAX_GRID_SIZE) + 1)
+  });
+  return canonicalSupport;
+}
 
 function finiteCanonicalCoordinate(value, name) {
   const number = Number(value);
@@ -92,8 +101,10 @@ function finiteCanonicalCoordinate(value, name) {
 // coordinate system. The outward snap makes every active boundary compatible
 // with the coarsest L10 grid. A caller may pass an already snapped window or
 // raw canonical coordinates; both paths remain deterministic.
-export function normalizeCanonicalWindow(window = canonicalSupport) {
-  if (window === canonicalSupport) return canonicalSupport;
+export function normalizeCanonicalWindow(window = null) {
+  const support = activeCanonicalSupport();
+  if (window === null || window === undefined) return support;
+  if (window === support) return support;
   const minX = finiteCanonicalCoordinate(window.minX, 'canonicalWindow.minX');
   const maxX = finiteCanonicalCoordinate(window.maxX, 'canonicalWindow.maxX');
   const minY = finiteCanonicalCoordinate(window.minY, 'canonicalWindow.minY');
@@ -115,8 +126,8 @@ export function normalizeCanonicalWindow(window = canonicalSupport) {
     }
     throw new Error('canonicalWindow must have non-empty bounds.');
   };
-  const [snappedMinX, snappedMaxX] = snapAxis(minX, maxX, canonicalSupport.minX, canonicalSupport.maxX);
-  const [snappedMinY, snappedMaxY] = snapAxis(minY, maxY, canonicalSupport.minY, canonicalSupport.maxY);
+  const [snappedMinX, snappedMaxX] = snapAxis(minX, maxX, support.minX, support.maxX);
+  const [snappedMinY, snappedMaxY] = snapAxis(minY, maxY, support.minY, support.maxY);
   const snapped = { minX: snappedMinX, maxX: snappedMaxX, minY: snappedMinY, maxY: snappedMaxY };
   return Object.freeze(snapped);
 }
@@ -213,7 +224,7 @@ export function zoomToMercatorGridLevel(zoom) {
   return clamp(Math.round(desired), MIN_GRID_LEVEL, MAX_DISPLAY_GRID_LEVEL);
 }
 
-export function selectMercatorGridLevel(level, canonicalWindow = canonicalSupport) {
+export function selectMercatorGridLevel(level, canonicalWindow = null) {
   const boundedLevel = clamp(level, MIN_GRID_LEVEL, MAX_GRID_LEVEL);
   const window = normalizeCanonicalWindow(canonicalWindow);
   const gridSize = 2 ** boundedLevel;
@@ -389,7 +400,7 @@ export function forEachDirectTransitionPair(relation, visit) {
 // Canonical positions and one-parent ownership for visual LOD morphs. This is
 // deliberately independent from centered weather-summary contributions.
 export class GeographicLodTopology {
-  constructor(canonicalWindow = canonicalSupport, levelRange, reuseFrom = null) {
+  constructor(canonicalWindow = null, levelRange, reuseFrom = null) {
     const topologyStarted = now();
     this.canonicalWindow = normalizeCanonicalWindow(canonicalWindow);
     this.levelRange = normalizeLodRange(levelRange);

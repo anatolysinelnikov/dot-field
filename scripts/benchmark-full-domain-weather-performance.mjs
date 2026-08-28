@@ -20,10 +20,11 @@ import {
 import { mapDotsWeatherSummary, GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { mapSquaresWeatherSummary, GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
 
-const metadata = JSON.parse(fs.readFileSync(new URL('../data/generated/202608262200/metadata.json', import.meta.url), 'utf8'));
+const dataRoot = new URL('../data/generated/current/', import.meta.url);
+const metadata = JSON.parse(fs.readFileSync(new URL('metadata.json', dataRoot), 'utf8'));
 const grid = metadata.spatial_grid;
 const time = metadata.time;
-const binary = fs.readFileSync(new URL('../data/generated/202608262200/rain.f32', import.meta.url));
+const binary = Buffer.concat(metadata.rain.frame_assets.map((asset) => fs.readFileSync(new URL(asset, dataRoot))));
 const rainFramesMmh = new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / Float32Array.BYTES_PER_ELEMENT);
 const longitudes = Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing);
 const latitudes = Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing);
@@ -34,6 +35,7 @@ const weather = new RealWeatherSequence({
   frameCount: time.count,
   longitudeSpacing: grid.longitude_spacing,
   latitudeSpacing: grid.latitude_spacing,
+  weatherSupport: grid.weather_support,
   timestamps: time.timestamps
 });
 setActiveWeatherField(weather);
@@ -417,7 +419,7 @@ function buildSquaresInstances(pyramid, level, mapped) {
 }
 
 console.log('Full-domain weather performance benchmark');
-console.log(`fixture=202608262200 frames=${weather.frameCount} source=${grid.width}x${grid.height} sourceBytes=${mib(rainFramesMmh.byteLength)}`);
+console.log(`fixture=current frames=${weather.frameCount} source=${grid.width}x${grid.height} sourceBytes=${mib(rainFramesMmh.byteLength)}`);
 console.log(`warmup=${WARMUP} repeats=${REPEATS} statistic=median; Float32 production summaries`);
 
 const directProbeTopology = makeTopology(10);

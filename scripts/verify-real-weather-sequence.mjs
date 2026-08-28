@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { geographicTemporalFrameAt } from '../src/engine/geographic-layer-utils.js';
 import { decodePackedWeatherSupport, RealWeatherSequence } from '../src/engine/real-weather.js';
 
-const root = new URL('../data/generated/202608262200/', import.meta.url);
+const root = new URL('../data/generated/current/', import.meta.url);
 const metadata = JSON.parse(await readFile(new URL('metadata.json', root), 'utf8'));
 const grid = metadata.spatial_grid;
 const frameSize = grid.width * grid.height;
@@ -20,6 +20,7 @@ const latitudes = Float64Array.from({ length: grid.height }, (_, index) => grid.
 const sequence = new RealWeatherSequence({
   longitudes, latitudes, sourceFrames, frameCount: metadata.time.count,
   longitudeSpacing: grid.longitude_spacing, latitudeSpacing: grid.latitude_spacing,
+  weatherSupport: grid.weather_support,
   timestamps: metadata.time.timestamps, potentialWeatherMask,
   sourceFrameCacheLimit: metadata.time.count
 });

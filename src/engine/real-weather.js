@@ -363,7 +363,7 @@ export class RealWeatherSequenceFrame {
 }
 
 export class RealWeatherSequence extends RealWeatherField {
-  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, timestamps, potentialWeatherMask = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
+  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, weatherSupport = null, timestamps, potentialWeatherMask = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
     const frameSize = longitudes.length * latitudes.length;
     const emptyCodes = new Uint8Array(frameSize);
     const emptyChannel = new Float32Array(frameSize);
@@ -381,6 +381,7 @@ export class RealWeatherSequence extends RealWeatherField {
       longitudeSpacing,
       latitudeSpacing
     });
+    this.weatherSupport = Object.freeze({ ...(weatherSupport || this.bounds) });
     this.frameCount = frameCount;
     this.frameSize = frameSize;
     this.timestamps = Object.freeze([...timestamps]);
@@ -890,6 +891,22 @@ function validateSequenceMetadata(metadata) {
   if (!(longitudeSpacing > 0) || !(latitudeSpacing > 0)) failSequence('spatial grid spacing must be positive.');
   assertSequenceEqual(grid.longitude_order, 'west_to_east', 'spatial_grid.longitude_order');
   assertSequenceEqual(grid.latitude_order, 'south_to_north', 'spatial_grid.latitude_order');
+  const weatherSupport = objectAt(grid.weather_support, 'spatial_grid.weather_support');
+  const supportBounds = {
+    west: sequenceNumber(weatherSupport.west, 'spatial_grid.weather_support.west'),
+    east: sequenceNumber(weatherSupport.east, 'spatial_grid.weather_support.east'),
+    south: sequenceNumber(weatherSupport.south, 'spatial_grid.weather_support.south'),
+    north: sequenceNumber(weatherSupport.north, 'spatial_grid.weather_support.north')
+  };
+  if (!(supportBounds.west <= supportBounds.east) || !(supportBounds.south <= supportBounds.north)) {
+    failSequence('spatial_grid.weather_support bounds must be ordered.');
+  }
+  const gridEast = longitudeStart + (width - 1) * longitudeSpacing;
+  const gridNorth = latitudeStart + (height - 1) * latitudeSpacing;
+  if (supportBounds.west < longitudeStart || supportBounds.east > gridEast
+    || supportBounds.south < latitudeStart || supportBounds.north > gridNorth) {
+    failSequence('spatial_grid.weather_support must be contained by the source grid.');
+  }
   assertSequenceEqual(source.normalized_units, 'mm/h', 'source.normalized_units');
   const phenomena = root.phenomena === undefined ? null : objectAt(root.phenomena, 'phenomena');
   if (phenomena) {
@@ -909,7 +926,8 @@ function validateSequenceMetadata(metadata) {
 
   return {
     width, height, frameCount, frameNodeCount, expectedFrameByteCount, expectedSupportByteCount,
-    longitudeStart, latitudeStart, longitudeSpacing, latitudeSpacing, timestamps: time.timestamps,
+    longitudeStart, latitudeStart, longitudeSpacing, latitudeSpacing,
+    weatherSupport: Object.freeze(supportBounds), timestamps: time.timestamps,
     rainFrameAssets: Object.freeze([...rain.frame_assets]), supportMaskAsset: supportMask.asset,
     phenomenaAvailable: Boolean(phenomena?.available)
   };
@@ -1237,6 +1255,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
     const sequence = new RealWeatherSequence({
       longitudes, latitudes, frameCount: validated.frameCount,
       longitudeSpacing: validated.longitudeSpacing, latitudeSpacing: validated.latitudeSpacing,
+      weatherSupport: validated.weatherSupport,
       timestamps: validated.timestamps, potentialWeatherMask, sourceFrameCacheLimit, retainAllSourceFrames,
       onSourceFrameCacheEvent: (event) => scheduler?.recordCacheEvent(event)
     });

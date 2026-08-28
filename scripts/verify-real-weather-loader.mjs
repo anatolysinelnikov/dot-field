@@ -9,7 +9,8 @@ const metadata = {
   spatial_grid: {
     width: 2, height: 2, longitude_start: 10, latitude_start: 20,
     longitude_spacing: 1, latitude_spacing: 1,
-    longitude_order: 'west_to_east', latitude_order: 'south_to_north'
+    longitude_order: 'west_to_east', latitude_order: 'south_to_north',
+    weather_support: { west: 10, east: 11, south: 20, north: 21 }
   },
   time: { count: 3, timestamps: ['2026-08-26T22:00:00', '2026-08-26T22:10:00', '2026-08-26T22:20:00'] },
   source: { normalized_units: 'mm/h' },

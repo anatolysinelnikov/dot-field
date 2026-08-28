@@ -2,7 +2,7 @@ import { request } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { createLocalServer } from './serve-local.mjs';
 
-const framePath = 'data/generated/202608262200/rain/frame-000.f32';
+const framePath = 'data/generated/current/rain/frame-000.f32';
 
 function check(condition, message) {
   if (!condition) throw new Error(message);

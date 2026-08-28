@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import {
   canonicalCoordinatesForIndex,
   GeographicLodTopology,
@@ -9,13 +10,16 @@ import {
   normalizeCanonicalWindow,
   mercatorXForIndex,
   mercatorYForIndex,
-  forEachDirectTransitionPair
+  forEachDirectTransitionPair,
+  setGeographicWeatherSupport
 } from '../src/engine/geographic-lod.js';
 import { buildCenteredContributionRelation, forEachCenteredContributionRelationEntry } from '../src/engine/geographic-weather-pyramid.js';
 
 const LEVELS = [10, 11, 12, 13, 14, 15];
 const FULL_RANGE = { minLevel: MIN_GRID_LEVEL, maxLevel: MAX_GRID_LEVEL };
 const L10_STEP = 2 ** (MAX_GRID_LEVEL - MIN_GRID_LEVEL);
+const activeMetadata = JSON.parse(fs.readFileSync(new URL('../data/generated/current/metadata.json', import.meta.url), 'utf8'));
+setGeographicWeatherSupport(activeMetadata.spatial_grid.weather_support);
 let failures = 0;
 
 function check(condition, message) {

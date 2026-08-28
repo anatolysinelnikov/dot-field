@@ -7,9 +7,10 @@ import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geogra
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
 const now = () => performance.now();
-const metadata = JSON.parse(fs.readFileSync(new URL('../data/generated/202608262200/metadata.json', import.meta.url), 'utf8'));
-const grid = metadata.spatial_grid; const binary = fs.readFileSync(new URL('../data/generated/202608262200/rain.f32', import.meta.url));
-const weather = new RealWeatherSequence({ longitudes: Float64Array.from({ length: grid.width }, (_, i) => grid.longitude_start + i * grid.longitude_spacing), latitudes: Float64Array.from({ length: grid.height }, (_, i) => grid.latitude_start + i * grid.latitude_spacing), rainFramesMmh: new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / 4), frameCount: metadata.time.count, longitudeSpacing: grid.longitude_spacing, latitudeSpacing: grid.latitude_spacing, timestamps: metadata.time.timestamps });
+const metadata = JSON.parse(fs.readFileSync(new URL('../data/generated/current/metadata.json', import.meta.url), 'utf8'));
+const grid = metadata.spatial_grid;
+const binary = Buffer.concat(metadata.rain.frame_assets.map((asset) => fs.readFileSync(new URL(`../data/generated/current/${asset}`, import.meta.url))));
+const weather = new RealWeatherSequence({ longitudes: Float64Array.from({ length: grid.width }, (_, i) => grid.longitude_start + i * grid.longitude_spacing), latitudes: Float64Array.from({ length: grid.height }, (_, i) => grid.latitude_start + i * grid.latitude_spacing), rainFramesMmh: new Float32Array(binary.buffer, binary.byteOffset, binary.byteLength / 4), frameCount: metadata.time.count, longitudeSpacing: grid.longitude_spacing, latitudeSpacing: grid.latitude_spacing, weatherSupport: grid.weather_support, timestamps: metadata.time.timestamps });
 setActiveWeatherField(weather);
 const [x, y] = lngLatToMercator(...WEATHER_REGION.center);
 const window = canonicalWindowFromMercatorBounds({ minX: x - .004, maxX: x + .004, minY: y - .004, maxY: y + .004 });

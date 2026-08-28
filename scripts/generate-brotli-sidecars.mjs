@@ -4,14 +4,14 @@ import { brotliCompress, constants } from 'node:zlib';
 import { promisify } from 'node:util';
 
 const compress = promisify(brotliCompress);
-const DEFAULT_DIRECTORY = 'data/generated/202608262200';
+const DEFAULT_DIRECTORY = 'data/generated/current';
 
 function parseArguments(argv) {
   let directory = DEFAULT_DIRECTORY;
   for (let index = 0; index < argv.length; index++) {
     if (argv[index] === '--dir') directory = argv[++index];
     else if (argv[index] === '--help') {
-      console.log('Usage: node scripts/generate-brotli-sidecars.mjs [--dir data/generated/202608262200]');
+      console.log('Usage: node scripts/generate-brotli-sidecars.mjs [--dir data/generated/current]');
       process.exit(0);
     } else throw new Error(`Unknown argument: ${argv[index]}`);
   }

@@ -6,6 +6,7 @@ import {
   RealWeatherSequenceAssetsUnavailableError,
   rollingPlaybackSourceFrameIndices
 } from './real-weather.js';
+import { setGeographicWeatherSupport } from './geographic-lod.js';
 
 function mercatorXToLongitude(x) {
   return x * 360 - 180;
@@ -20,17 +21,8 @@ export const WEATHER_REGION = Object.freeze({
   initialZoom: 5.8
 });
 
-// The full positive-rain union across all 19 source frames plus one full
-// source-grid cell on every side. The binary sequence adds one further
-// source-grid cell as its bilinear interpolation halo.
-export const WEATHER_SUPPORT = Object.freeze({
-  west: 29.719999313354492,
-  east: 71.63999938964844,
-  south: 41.79999923706055,
-  north: 70.44000244140625
-});
-
 let activeWeatherField = null;
+const ACTIVE_REAL_WEATHER_METADATA_URL = './data/generated/current/metadata.json';
 
 export function geographicToSynthetic(longitude, latitude) {
   // Preserve the shared renderer-facing function name; real-data frames use
@@ -98,13 +90,14 @@ export function geographicPreparedIntensityAtXY(frame, longitude, latitude, outp
 
 export function setActiveWeatherField(field) {
   activeWeatherField = field;
+  setGeographicWeatherSupport(field.weatherSupport || field.bounds);
 }
 
 export async function loadActiveWeatherField({ onTiming = null } = {}) {
   let field;
   try {
     field = await loadRealWeatherSequence(
-      './data/generated/202608262200/metadata.json',
+      ACTIVE_REAL_WEATHER_METADATA_URL,
       { onTiming, retainAllSourceFrames: true }
     );
   } catch (error) {
@@ -118,7 +111,7 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
 
 export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = null } = {}) {
   const sequenceLoad = beginRealWeatherSequenceLoad(
-    './data/generated/202608262200/metadata.json',
+    ACTIVE_REAL_WEATHER_METADATA_URL,
     { onTiming, onResidencyChange, retainAllSourceFrames: true }
   );
   let fallbackPromise = null;

@@ -3,7 +3,7 @@
 ## Document status
 
 - Repository: `anatolysinelnikov/dot-field`
-- Architecture: `real-data-2026-08-26-2200` geographic weather sequence playback
+- Architecture: reusable local real-data geographic weather sequence playback
 - This document is maintained context, not implementation authority. The current code wins when they differ.
 
 ## Project model
@@ -59,8 +59,8 @@ Dots / Squares
 The viewport selects globally anchored canonical identities; it does not define
 or reseat them. Panning therefore cannot change a sample's canonical ID,
 canonical coordinates, Mercator position, geographic position, or weather value
-at a given time. The current `WEATHER_SUPPORT` is the full positive-rain extent
-of the local sequence, not a final global-provider contract.
+at a given time. The active sequence's support is read from generated metadata;
+it is not a historical JavaScript constant or a final global-provider contract.
 
 The intended provider boundary remains:
 
@@ -240,26 +240,38 @@ application RAF so its progress still completes while paused.
 
 ## Real-data geographic adapter — `src/engine/real-weather.js`, `src/engine/geography.js`
 
-The active provider is the ignored local full-precipitation sequence at
-`data/generated/202608262200/metadata.json`, `support.mask`, and 19 logical
-`rain/frame-###.f32` assets. The v2 manifest owns those addresses and declares
-little-endian physical Float32 `mm/h` rain frames of `1051 × 719` nodes; it is
-independent of HTTP content coding. Servers may return those logical resources
-identity, gzip, or Brotli encoded and normal browser `fetch()` exposes the
-same decompressed bytes. Its support is derived from the exact
-positive union across every source node and all 19 frames, without connected
-component selection: 28,018 union wet nodes in 61 diagnostic 8-connected
-components span source indices `x=744..1790`, `y=296..1010`. One source-grid
-cell on every side gives `WEATHER_SUPPORT` indices `x=743..1791`,
-`y=295..1011`; the binary crop adds one further interpolation halo cell on
-every side, giving inclusive indices `x=742..1792`, `y=294..1012`.
-The source-grid geographic union bounds are 29.7600002289..71.5999984741°E
-and 41.8400001526..70.4000015259°N; support bounds are
-29.7199993134..71.6399993896°E and 41.7999992371..70.4400024414°N; crop
-bounds are 29.6800003052..71.6800003052°E and 41.7599983215..70.4800033569°N.
-Metadata and the packed LSB-first support bitset begin immediately. The loader
+The reusable local workflow is:
+
+```text
+manual NC download
+→ data/nc/
+→ python3 tools/prepare-latest-real-weather.py
+→ data/generated/current/
+→ metadata/frame loading
+→ temporal/spatial interpolation and sampling
+→ RAW / Dots / Squares
+```
+
+NetCDF parsing is offline/local preprocessing. The preparation command selects
+the newest `YYYYMMDDHHMM.nc` by the timestamp in its filename, invokes the
+existing converter in strict `--sequence` mode, and atomically publishes a
+complete generated directory. The browser consumes the normalized v2 binary
+transport (`metadata.json`, `support.mask`, and Float32 frame assets), never
+the `.nc` file. Automatic downloading is a future provider-ingestion step and
+does not belong in the browser runtime. Raw NetCDF files and generated assets
+remain outside Git.
+
+The current local NC omits precipitation units, so its preparation invocation
+must explicitly add `--assume-units mm/h` after the source semantics have been
+verified. The converter continues to reject missing or ambiguous units without
+that explicit assumption.
+
+The v2 manifest declares little-endian physical Float32 `mm/h` rain frames;
+dimensions, timestamps, crop, union support, and frame addresses are all
+dataset metadata. Its support is derived from the exact positive union across
+every source node and frame, without connected-component selection. The loader
 validates the mask node/byte count and its zero trailing unused bits before
-canonical topology initialization; it never rebuilds the support by downloading
+canonical topology initialization; it never rebuilds support by downloading
 all frames. Each requested source frame is independently validated for exact
 byte count, Float32 alignment, finite non-negative values, and metadata
 compatibility. A 404/410 metadata/support/frame failure preserves the existing
@@ -360,11 +372,12 @@ longitude/latitude and falls back to the checked-in
 are unavailable (such as HTTP 404), with one concise warning; malformed
 metadata, inconsistent values/geometry, incorrect support, or an incorrect
 source-frame length fail
-visibly instead. `WEATHER_SUPPORT` is the stable grid-aligned support rectangle
-described above. The availability GeoJSON is diagnostic observation coverage
-only, not a forecast-rain mask; later forecast frames may legitimately leave
-its footprint. The deterministic globally anchored Mercator topology still
-derives all L10–L15 identities from this support. Dots and Squares materialize
+visibly instead. The active sequence's `spatial_grid.weather_support` is the
+stable grid-aligned support rectangle used for canonical topology creation.
+The availability GeoJSON is optional diagnostic observation coverage only, not
+a forecast-rain mask; later forecast frames may legitimately leave its
+footprint. The deterministic globally anchored Mercator topology derives all
+L10–L15 identities from the active metadata support. Dots and Squares materialize
 only the current snapped viewport topology window plus its coarse safety margin
 and the LOD dependency range required by the active display level. The runtime
 never intentionally materializes the complete provider-support topology.

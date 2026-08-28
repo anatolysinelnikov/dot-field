@@ -382,7 +382,7 @@ def source_grid_crop(
     y0 = support_y0 - SEQUENCE_HALO_CELLS
     y1 = support_y1 + SEQUENCE_HALO_CELLS
     if min(x0, y0) < 0 or x1 >= longitudes.size or y1 >= latitudes.size:
-        raise ValueError("derived WEATHER_SUPPORT plus halo lies outside the source grid")
+        raise ValueError("derived weather support plus halo lies outside the source grid")
     width = x1 - x0 + 1
     height = y1 - y0 + 1
     return {
@@ -417,7 +417,7 @@ def read_validated_source_frame(precipitation: Any, time_index: int) -> np.ndarr
     if stats["missing_cells"]:
         raise SystemExit(
             f"timestep {time_index} contains {stats['missing_cells']} missing cells; "
-            "rain.f32 cannot preserve missing cells as a separate state"
+            "rain frame cannot preserve missing cells as a separate state"
         )
     if stats["negative_cells"]:
         raise SystemExit(f"timestep {time_index} contains negative precipitation cells")
@@ -444,6 +444,8 @@ def load_observation_polygons(path: Path) -> tuple[list[list[list[float]]], dict
     points = [point for polygon in polygons for point in polygon]
     properties = document.get("properties") or {}
     return polygons, {
+        "available": True,
+        "status": "available",
         "source_filename": path.name,
         "root_type": document.get("type"),
         "geometry_type": geometry.get("type"),
@@ -460,6 +462,16 @@ def load_observation_polygons(path: Path) -> tuple[list[list[list[float]]], dict
             key in properties for key in ("run_id", "run_identifier", "run")
         ),
         "temporal_compatibility": "unverified; source artifact has no timestamp or run metadata",
+        "applied_as_rain_mask": False,
+    }
+
+
+def unavailable_observation_diagnostic(path: Path) -> dict[str, Any]:
+    return {
+        "available": False,
+        "status": "unavailable",
+        "source_filename": path.name,
+        "reason": "observation-coverage diagnostic file is absent; sequence generation does not require it",
         "applied_as_rain_mask": False,
     }
 
@@ -540,11 +552,11 @@ def sequence_metadata(
     unit_basis: str,
     conversion: str,
     observation: dict[str, Any],
-    support_available_nodes: int,
-    support_node_count: int,
-    crop_available_nodes: int,
-    first_frame_coverage: dict[str, Any],
-    per_frame_coverage: list[dict[str, Any]],
+    support_available_nodes: int | None,
+    support_node_count: int | None,
+    crop_available_nodes: int | None,
+    first_frame_coverage: dict[str, Any] | None,
+    per_frame_coverage: list[dict[str, Any] | None],
 ) -> dict[str, Any]:
     union_y, union_x = np.nonzero(union_nonzero)
     frame_node_count = crop["node_count"]
@@ -669,7 +681,11 @@ def sequence_metadata(
             **observation,
             "current_support_node_count": support_node_count,
             "current_support_available_nodes": support_available_nodes,
-            "current_support_available_percent": 100 * support_available_nodes / support_node_count,
+            "current_support_available_percent": (
+                100 * support_available_nodes / support_node_count
+                if support_available_nodes is not None and support_node_count
+                else None
+            ),
             "crop_available_nodes": crop_available_nodes,
             "first_frame_nonzero": first_frame_coverage,
             "per_frame_nonzero_coverage": per_frame_coverage,
@@ -683,10 +699,11 @@ def convert_sequence(args: argparse.Namespace) -> int:
     availability_path = args.availability.resolve()
     if not source.is_file():
         raise SystemExit(f"source file does not exist: {source}")
-    if not availability_path.is_file():
-        raise SystemExit(f"availability file does not exist: {availability_path}")
-
-    polygons, observation = load_observation_polygons(availability_path)
+    if availability_path.is_file():
+        polygons, observation = load_observation_polygons(availability_path)
+    else:
+        polygons = None
+        observation = unavailable_observation_diagnostic(availability_path)
     with Dataset(source, "r") as dataset:
         dataset.set_auto_mask(True)
         time_variable, longitude_variable, latitude_variable, precipitation = validate_source_contract(dataset)
@@ -714,10 +731,16 @@ def convert_sequence(args: argparse.Namespace) -> int:
         crop["latitude_spacing"] = latitude_spacing
         crop_longitudes = longitudes[crop["x_start"]:crop["x_end"] + 1]
         crop_latitudes = latitudes[crop["y_start"]:crop["y_end"] + 1]
-        crop_availability = points_in_polygon_union(crop_longitudes, crop_latitudes, polygons)
+        crop_availability = (
+            points_in_polygon_union(crop_longitudes, crop_latitudes, polygons)
+            if polygons is not None else None
+        )
         support_longitudes = longitudes[crop["support_x_start"]:crop["support_x_end"] + 1]
         support_latitudes = latitudes[crop["support_y_start"]:crop["support_y_end"] + 1]
-        support_availability = points_in_polygon_union(support_longitudes, support_latitudes, polygons)
+        support_availability = (
+            points_in_polygon_union(support_longitudes, support_latitudes, polygons)
+            if polygons is not None else None
+        )
         per_frame_coverage = []
         output_dir = args.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -740,12 +763,12 @@ def convert_sequence(args: argparse.Namespace) -> int:
                     temporary_frame_path.unlink(missing_ok=True)
                 nonzero = crop_values > 0
                 nonzero_y, nonzero_x = np.nonzero(nonzero)
-                inside = crop_availability[nonzero_y, nonzero_x]
+                inside = crop_availability[nonzero_y, nonzero_x] if crop_availability is not None else None
                 per_frame_coverage.append({
                     "timestamp": timestamp,
                     "non_zero_nodes": int(nonzero.sum()),
-                    "inside_observation": int(inside.sum()),
-                    "outside_observation": int((~inside).sum()),
+                    "inside_observation": int(inside.sum()) if inside is not None else None,
+                    "outside_observation": int((~inside).sum()) if inside is not None else None,
                 })
 
             packed_support = np.packbits(
@@ -775,9 +798,9 @@ def convert_sequence(args: argparse.Namespace) -> int:
                 unit_basis,
                 conversion,
                 observation,
-                int(support_availability.sum()),
-                int(support_availability.size),
-                int(crop_availability.sum()),
+                int(support_availability.sum()) if support_availability is not None else None,
+                int(support_availability.size) if support_availability is not None else None,
+                int(crop_availability.sum()) if crop_availability is not None else None,
                 per_frame_coverage[0],
                 per_frame_coverage,
             )
@@ -797,13 +820,16 @@ def convert_sequence(args: argparse.Namespace) -> int:
         f"crop={crop['width']}x{crop['height']} "
         f"union_nonzero_nodes={metadata['rain']['union_distinct_nonzero_nodes']}"
     )
-    print(
-        "observation diagnostic: "
-        f"support_available={metadata['observation_coverage_diagnostic']['current_support_available_percent']:.6f}% "
-        f"first_frame_outside={per_frame_coverage[0]['outside_observation']} "
-        f"last_frame_outside={per_frame_coverage[-1]['outside_observation']} "
-        "(not used as a rain mask)"
-    )
+    if observation["available"]:
+        print(
+            "observation diagnostic: "
+            f"support_available={metadata['observation_coverage_diagnostic']['current_support_available_percent']:.6f}% "
+            f"first_frame_outside={per_frame_coverage[0]['outside_observation']} "
+            f"last_frame_outside={per_frame_coverage[-1]['outside_observation']} "
+            "(not used as a rain mask)"
+        )
+    else:
+        print("observation diagnostic: unavailable (not required and not used as a rain mask)")
     return 0
 
 

@@ -20,9 +20,9 @@ const levels = [10, 11, 12, 13, 14];
 const pairCases = levels.slice(0, -1).flatMap((level) => [[level, level + 1], [level + 1, level]]);
 
 function loadSequence() {
-  const dataRoot = new URL('../data/generated/202608262200/', import.meta.url);
+  const dataRoot = new URL('../data/generated/current/', import.meta.url);
   const metadata = JSON.parse(fs.readFileSync(new URL('metadata.json', dataRoot), 'utf8'));
-  const binary = fs.readFileSync(new URL('rain.f32', dataRoot));
+  const binary = Buffer.concat(metadata.rain.frame_assets.map((asset) => fs.readFileSync(new URL(asset, dataRoot))));
   const grid = metadata.spatial_grid;
   const longitudes = Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing);
   const latitudes = Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing);
@@ -32,7 +32,7 @@ function loadSequence() {
     frameCount: metadata.time.count,
     longitudeSpacing: grid.longitude_spacing,
     latitudeSpacing: grid.latitude_spacing,
-    timestamps: metadata.time.timestamps
+    timestamps: metadata.time.timestamps, weatherSupport: metadata.spatial_grid.weather_support
   });
 }
 

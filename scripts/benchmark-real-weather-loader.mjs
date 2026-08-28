@@ -1,8 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 
-const metadata = JSON.parse(await readFile(new URL('../data/generated/202608262200/metadata.json', import.meta.url)));
-const buffer = await readFile(new URL('../data/generated/202608262200/rain.f32', import.meta.url));
+const root = new URL('../data/generated/current/', import.meta.url);
+const metadata = JSON.parse(await readFile(new URL('metadata.json', root)));
+const buffer = Buffer.concat(await Promise.all(metadata.rain.frame_assets.map((asset) => readFile(new URL(asset, root)))));
 const values = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / Float32Array.BYTES_PER_ELEMENT);
 const frameSize = metadata.spatial_grid.width * metadata.spatial_grid.height;
 

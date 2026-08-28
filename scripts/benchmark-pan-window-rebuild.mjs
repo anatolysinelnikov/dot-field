@@ -29,8 +29,9 @@ const REPEATS = Number(process.env.PAN_BENCHMARK_REPEATS || 3);
 const L10_STEP = 2 ** (MAX_GRID_LEVEL - MIN_GRID_LEVEL);
 const now = () => performance.now();
 
-const metadata = JSON.parse(fs.readFileSync(new URL('../data/generated/202608262200/metadata.json', import.meta.url), 'utf8'));
-const binary = fs.readFileSync(new URL('../data/generated/202608262200/rain.f32', import.meta.url));
+const dataRoot = new URL('../data/generated/current/', import.meta.url);
+const metadata = JSON.parse(fs.readFileSync(new URL('metadata.json', dataRoot), 'utf8'));
+const binary = Buffer.concat(metadata.rain.frame_assets.map((asset) => fs.readFileSync(new URL(asset, dataRoot))));
 const { width, height, longitude_start: longitudeStart, latitude_start: latitudeStart, longitude_spacing: longitudeSpacing, latitude_spacing: latitudeSpacing } = metadata.spatial_grid;
 const { count: frameCount, timestamps } = metadata.time;
 const weather = new RealWeatherSequence({
@@ -40,7 +41,8 @@ const weather = new RealWeatherSequence({
   frameCount,
   longitudeSpacing,
   latitudeSpacing,
-  timestamps
+  timestamps,
+  weatherSupport: metadata.spatial_grid.weather_support
 });
 setActiveWeatherField(weather);
 
@@ -322,7 +324,7 @@ for (const stableLevel of STABLE_LEVELS) {
 }
 
 console.log(JSON.stringify({
-  metadata: { node: process.version, repeats: REPEATS, baseWindow, l10Step: L10_STEP, fixture: '202608262200' },
+  metadata: { node: process.version, repeats: REPEATS, baseWindow, l10Step: L10_STEP, fixture: 'current' },
   rebuildFrequency: Object.fromEntries(['horizontal', 'vertical', 'diagonal'].map((direction) => [direction, rebuildFrequency(direction)])),
   results
 }, null, 2));
