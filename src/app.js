@@ -119,7 +119,6 @@ const INITIAL_RAW_MAX_ZOOM = rawZoomForLogicalSamplingZoom(
   REFERENCE_LATITUDE,
   REFERENCE_LATITUDE
 );
-const BACKGROUND_FRAME_PREFETCH_CONCURRENCY = 1;
 
 markStartup('maplibre-constructor');
 const map = new window.maplibregl.Map({
@@ -195,7 +194,7 @@ function activateWeatherField(field) {
     return;
   }
   markStartup('background-prefetch-start');
-  void weatherLoad.prefetchRemaining({ concurrency: BACKGROUND_FRAME_PREFETCH_CONCURRENCY }).then(() => {
+  void weatherLoad.prefetchRemaining().then(() => {
     state.playbackReady = true;
     markStartup('all-source-frames-prefetched');
     markStartup('playback-ready');
@@ -655,10 +654,16 @@ function requestWeatherTime(normalizedTime) {
   if (!activeWeatherField) return;
   const requestGeneration = ++weatherRequestGeneration;
   // Dots/Squares retain two adjacent 100 ms renderer keyframes. Resolve both
-  // provider times above the hot path before asking either layer to evaluate.
+  // provider times as one coalesced HIGH source requirement before asking
+  // either layer to evaluate. A manual scrub replaces only its older target.
   const rendererFrame = geographicTemporalFrameAt(normalizedTime);
   const nextRendererTime = rendererFrame.nextIndex / TEMPORAL_FRAME_COUNT;
-  void Promise.all([weatherLoad.requestTime(normalizedTime), weatherLoad.requestTime(nextRendererTime)]).then(() => {
+  void weatherLoad.requestTimes([normalizedTime, nextRendererTime], {
+    priority: 'high',
+    replaceKey: state.scrubbing ? 'manual-temporal-target' : null,
+    latestTargetGeneration: requestGeneration
+  }).then(({ result } = {}) => {
+    if (result?.status === 'superseded') return;
     if (requestGeneration !== weatherRequestGeneration || !state.mapReady || state.renderMode === 'raw') return;
     // Temporal reconstruction remains synchronous once the adjacent source
     // frames are present. A stale load cannot overwrite a newer timeline target.
@@ -698,7 +703,12 @@ function setRawFrame(frameIndex, commitTime = false) {
   }
   updateTimestamp();
   const requestGeneration = ++weatherRequestGeneration;
-  void weatherLoad.requestSourceFrame(nextFrameIndex).then(() => {
+  void weatherLoad.requestSourceFrame(nextFrameIndex, {
+    priority: 'high',
+    replaceKey: state.scrubbing ? 'manual-raw-target' : null,
+    latestTargetGeneration: requestGeneration
+  }).then(({ result } = {}) => {
+    if (result?.status === 'superseded') return;
     if (requestGeneration !== weatherRequestGeneration || state.renderMode !== 'raw') return;
     const frame = typeof activeWeatherField.exactSourceFrameAt === 'function'
       ? activeWeatherField.exactSourceFrameAt(nextFrameIndex)
@@ -974,7 +984,9 @@ map.on('move', updateRawTooltipPosition);
 map.on('move', updateResetViewControl);
 map.on('rotate', updateResetViewControl);
 map.on('pitch', updateResetViewControl);
+map.on('movestart', () => weatherLoad.setBackgroundPrefetchPaused(true));
 map.on('moveend', () => {
+  weatherLoad.setBackgroundPrefetchPaused(false);
   if (!state.resettingView) return;
   state.resettingView = false;
   state.logicalSamplingZoom = WEATHER_REGION.initialZoom;
@@ -1009,6 +1021,10 @@ map.on('error', (event) => {
 });
 
 let applicationFrameQueued = false;
+
+// Deliberately diagnostic-only: this keeps scheduler counters available to
+// focused benchmarks without adding a visible per-pointer UI update path.
+window.__dotFieldWeatherDiagnostics = () => weatherLoad.diagnostics();
 
 function wakeApplicationFrame() {
   if (applicationFrameQueued) return;

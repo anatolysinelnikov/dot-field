@@ -346,7 +346,7 @@ export class RealWeatherSequenceFrame {
 }
 
 export class RealWeatherSequence extends RealWeatherField {
-  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, timestamps, potentialWeatherMask = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT }) {
+  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, timestamps, potentialWeatherMask = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, onSourceFrameCacheEvent = null }) {
     const frameSize = longitudes.length * latitudes.length;
     const emptyCodes = new Uint8Array(frameSize);
     const emptyChannel = new Float32Array(frameSize);
@@ -368,6 +368,7 @@ export class RealWeatherSequence extends RealWeatherField {
     this.frameSize = frameSize;
     this.timestamps = Object.freeze([...timestamps]);
     this.sourceFrameCacheLimit = sourceFrameCacheLimit;
+    this.onSourceFrameCacheEvent = typeof onSourceFrameCacheEvent === 'function' ? onSourceFrameCacheEvent : null;
     if (!Number.isInteger(sourceFrameCacheLimit) || sourceFrameCacheLimit < 2) {
       throw new Error('Real weather sequence source-frame cache limit must be an integer of at least 2.');
     }
@@ -432,7 +433,12 @@ export class RealWeatherSequence extends RealWeatherField {
     this.sourceFrames.delete(frameIndex);
     this.sourceFrames.set(frameIndex, values);
     if (validated) this.validatedSourceFrames.add(frameIndex);
-    while (this.sourceFrames.size > this.sourceFrameCacheLimit) this.sourceFrames.delete(this.sourceFrames.keys().next().value);
+    this.onSourceFrameCacheEvent?.({ type: 'insertion', frameIndex });
+    while (this.sourceFrames.size > this.sourceFrameCacheLimit) {
+      const evictedFrameIndex = this.sourceFrames.keys().next().value;
+      this.sourceFrames.delete(evictedFrameIndex);
+      this.onSourceFrameCacheEvent?.({ type: 'eviction', frameIndex: evictedFrameIndex });
+    }
     if (frameIndex === 0 && !this.rawFrame) this.rawFrame = this.exactSourceFrameAt(0);
     return values;
   }
@@ -950,7 +956,211 @@ async function loadSequenceMetadata(metadataUrl, timing) {
   return validated;
 }
 
-export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT } = {}) {
+function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, fetchFrame, sourceFrameByteLength }) {
+  if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('Source-frame fetch concurrency must be a positive integer.');
+  const requests = new Map();
+  const replacementKeys = new Map();
+  const active = new Map();
+  let nextRequestId = 1;
+  let backgroundPausedByMap = false;
+  const diagnostics = {
+    configuredConcurrency: concurrency,
+    activeFetches: 0,
+    peakActiveFetches: 0,
+    highQueueSize: 0,
+    lowQueueSize: 0,
+    peakHighQueueSize: 0,
+    peakLowQueueSize: 0,
+    staleQueuedRequirementsDropped: 0,
+    sourceFetchesStarted: 0,
+    sourceFetchesCompleted: 0,
+    highPriorityFetchesStarted: 0,
+    staleFetchesStarted: 0,
+    staleFetchesCompleted: 0,
+    cacheHits: 0,
+    cacheMisses: 0,
+    validationScans: 0,
+    sourceCacheInsertions: 0,
+    lruEvictions: 0,
+    logicalSourceBytesRequested: 0,
+    logicalSourceBytesForStaleFetches: 0,
+    latestTargetGeneration: 0,
+    backgroundPrefetchPaused: false,
+    backgroundPrefetchPauseCount: 0,
+    backgroundPrefetchResumeCount: 0
+  };
+
+  function requiredFrames() {
+    const pending = new Map();
+    for (const request of requests.values()) {
+      for (const frameIndex of request.pending) {
+        if (active.has(frameIndex)) continue;
+        const existing = pending.get(frameIndex);
+        if (!existing || (request.priority === 'high' && existing.priority === 'low')) {
+          pending.set(frameIndex, { priority: request.priority, order: request.order });
+        } else if (request.priority === existing.priority) {
+          existing.order = Math.min(existing.order, request.order);
+        }
+      }
+    }
+    return pending;
+  }
+
+  function hasHighWork() {
+    for (const request of requests.values()) if (request.priority === 'high' && request.pending.size) return true;
+    for (const request of active.values()) if (request.priority === 'high') return true;
+    return false;
+  }
+
+  function updateQueueDiagnostics() {
+    const pending = requiredFrames();
+    let high = 0;
+    let low = 0;
+    for (const entry of pending.values()) {
+      if (entry.priority === 'high') high++;
+      else low++;
+    }
+    diagnostics.highQueueSize = high;
+    diagnostics.lowQueueSize = low;
+    diagnostics.peakHighQueueSize = Math.max(diagnostics.peakHighQueueSize, high);
+    diagnostics.peakLowQueueSize = Math.max(diagnostics.peakLowQueueSize, low);
+    const paused = backgroundPausedByMap || hasHighWork();
+    if (paused !== diagnostics.backgroundPrefetchPaused) {
+      diagnostics.backgroundPrefetchPaused = paused;
+      if (paused) diagnostics.backgroundPrefetchPauseCount++;
+      else diagnostics.backgroundPrefetchResumeCount++;
+    }
+    return pending;
+  }
+
+  function settleAvailableRequests() {
+    for (const [id, request] of requests) {
+      for (const frameIndex of request.pending) if (isAvailable(frameIndex)) request.pending.delete(frameIndex);
+      if (request.pending.size) continue;
+      requests.delete(id);
+      if (request.replaceKey && replacementKeys.get(request.replaceKey) === id) replacementKeys.delete(request.replaceKey);
+      request.resolve({ status: 'ready' });
+    }
+  }
+
+  function cancelRequest(id, retainedFrameIndices = null) {
+    const request = requests.get(id);
+    if (!request) return;
+    requests.delete(id);
+    if (request.replaceKey && replacementKeys.get(request.replaceKey) === id) replacementKeys.delete(request.replaceKey);
+    for (const frameIndex of request.pending) {
+      if (!active.has(frameIndex) && !retainedFrameIndices?.has(frameIndex)) diagnostics.staleQueuedRequirementsDropped++;
+    }
+    request.resolve({ status: 'superseded' });
+  }
+
+  function rejectRequestsForFrame(frameIndex, error) {
+    for (const [id, request] of requests) {
+      if (!request.pending.has(frameIndex)) continue;
+      requests.delete(id);
+      if (request.replaceKey && replacementKeys.get(request.replaceKey) === id) replacementKeys.delete(request.replaceKey);
+      request.reject(error);
+    }
+  }
+
+  function highStillNeeds(frameIndex) {
+    for (const request of requests.values()) if (request.priority === 'high' && request.pending.has(frameIndex)) return true;
+    return false;
+  }
+
+  function startFrame(frameIndex, priority) {
+    active.set(frameIndex, { priority });
+    diagnostics.activeFetches = active.size;
+    diagnostics.peakActiveFetches = Math.max(diagnostics.peakActiveFetches, active.size);
+    diagnostics.sourceFetchesStarted++;
+    diagnostics.logicalSourceBytesRequested += sourceFrameByteLength;
+    if (priority === 'high') diagnostics.highPriorityFetchesStarted++;
+    Promise.resolve(fetchFrame(frameIndex)).then(() => {
+      active.delete(frameIndex);
+      diagnostics.activeFetches = active.size;
+      diagnostics.sourceFetchesCompleted++;
+      if (priority === 'high') {
+        if (!highStillNeeds(frameIndex)) {
+          diagnostics.staleFetchesStarted++;
+          diagnostics.staleFetchesCompleted++;
+          diagnostics.logicalSourceBytesForStaleFetches += sourceFrameByteLength;
+        }
+      }
+      settleAvailableRequests();
+      pump();
+    }, (error) => {
+      active.delete(frameIndex);
+      diagnostics.activeFetches = active.size;
+      rejectRequestsForFrame(frameIndex, error);
+      pump();
+    });
+  }
+
+  function pump() {
+    settleAvailableRequests();
+    let pending = updateQueueDiagnostics();
+    while (active.size < concurrency) {
+      const hasHigh = [...pending.values()].some((entry) => entry.priority === 'high');
+      const candidates = [...pending.entries()]
+        .filter(([, entry]) => entry.priority === (hasHigh ? 'high' : 'low'))
+        .filter(([, entry]) => !backgroundPausedByMap || entry.priority === 'high')
+        .sort(([leftIndex, left], [rightIndex, right]) => left.order - right.order || leftIndex - rightIndex);
+      if (!candidates.length) break;
+      const [frameIndex, entry] = candidates[0];
+      startFrame(frameIndex, entry.priority);
+      pending = updateQueueDiagnostics();
+    }
+  }
+
+  function requestFrames(frameIndices, { priority = 'high', replaceKey = null, latestTargetGeneration = null } = {}) {
+    if (priority !== 'high' && priority !== 'low') throw new Error('Source-frame priority must be high or low.');
+    const unique = [...new Set(frameIndices)];
+    for (const frameIndex of unique) {
+      if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= frameCount) throw new RangeError(`Source frame index must be an integer from 0 to ${frameCount - 1}.`);
+    }
+    if (replaceKey && replacementKeys.has(replaceKey)) cancelRequest(replacementKeys.get(replaceKey), new Set(unique));
+    const pending = new Set();
+    for (const frameIndex of unique) {
+      if (isAvailable(frameIndex)) diagnostics.cacheHits++;
+      else {
+        diagnostics.cacheMisses++;
+        pending.add(frameIndex);
+      }
+    }
+    if (latestTargetGeneration !== null) diagnostics.latestTargetGeneration = latestTargetGeneration;
+    if (!pending.size) return Promise.resolve({ status: 'ready' });
+    let resolve;
+    let reject;
+    const promise = new Promise((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const id = nextRequestId++;
+    requests.set(id, { pending, priority, replaceKey, order: id, resolve, reject });
+    if (replaceKey) replacementKeys.set(replaceKey, id);
+    pump();
+    return promise;
+  }
+
+  return {
+    requestFrames,
+    setBackgroundPrefetchPaused(paused) {
+      backgroundPausedByMap = Boolean(paused);
+      pump();
+    },
+    recordValidationScan() { diagnostics.validationScans++; },
+    recordCacheEvent(event) {
+      if (event.type === 'insertion') diagnostics.sourceCacheInsertions++;
+      else if (event.type === 'eviction') diagnostics.lruEvictions++;
+    },
+    diagnostics() {
+      updateQueueDiagnostics();
+      return { ...diagnostics };
+    }
+  };
+}
+
+export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, sourceFrameFetchConcurrency = 1 } = {}) {
   const timing = typeof onTiming === 'function' ? onTiming : () => {};
   const metadataReady = loadSequenceMetadata(metadataUrl, timing);
   const supportReady = metadataReady.then(async (validated) => {
@@ -963,25 +1173,25 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sou
     timing('weather-support-validation-complete');
     return potentialWeatherMask;
   });
+  let scheduler = null;
   const sequenceReady = Promise.all([metadataReady, supportReady]).then(([validated, potentialWeatherMask]) => {
     const { longitudes, latitudes } = axesFromSequenceMetadata(validated);
     const sequence = new RealWeatherSequence({
       longitudes, latitudes, frameCount: validated.frameCount,
       longitudeSpacing: validated.longitudeSpacing, latitudeSpacing: validated.latitudeSpacing,
-      timestamps: validated.timestamps, potentialWeatherMask, sourceFrameCacheLimit
+      timestamps: validated.timestamps, potentialWeatherMask, sourceFrameCacheLimit,
+      onSourceFrameCacheEvent: (event) => scheduler?.recordCacheEvent(event)
     });
     timing('weather-sequence-construction-complete');
     return sequence;
   });
-  const framePromises = new Map();
-
-  async function requestSourceFrame(frameIndex) {
-    const [validated, sequence] = await Promise.all([metadataReady, sequenceReady]);
-    if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= validated.frameCount) throw new RangeError(`Source frame index must be an integer from 0 to ${validated.frameCount - 1}.`);
-    if (sequence.isSourceFrameAvailable(frameIndex)) return sequence.sourceFrameAt(frameIndex);
-    const existing = framePromises.get(frameIndex);
-    if (existing) return existing;
-    const request = (async () => {
+  const schedulerReady = Promise.all([metadataReady, sequenceReady]).then(([validated, sequence]) => {
+    scheduler = createSourceFrameScheduler({
+      frameCount: validated.frameCount,
+      concurrency: sourceFrameFetchConcurrency,
+      isAvailable: (frameIndex) => sequence.isSourceFrameAvailable(frameIndex),
+      sourceFrameByteLength: validated.expectedFrameByteCount,
+      async fetchFrame(frameIndex) {
       timing(`weather-frame-${frameIndex}-fetch-start`);
       const response = await fetchSequenceAsset(resolveSequenceAssetUrl(metadataUrl, validated.rainFrameAssets[frameIndex]));
       timing(`weather-frame-${frameIndex}-fetch-headers`);
@@ -990,17 +1200,27 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sou
       if (buffer.byteLength !== validated.expectedFrameByteCount) failSequence(`rain frame ${frameIndex} byte length is ${buffer.byteLength}, expected ${validated.expectedFrameByteCount}.`);
       const values = new Float32Array(buffer);
       if (values.length !== validated.frameNodeCount) failSequence(`rain frame ${frameIndex} element count does not match metadata.`);
-      if (!sequence.validatedSourceFrames.has(frameIndex)) validateRainSourceFrame(values, frameIndex);
+      // A re-downloaded logical frame is new transport input. Validate every
+      // payload rather than trusting that an earlier cache entry shared its bytes.
+      scheduler.recordValidationScan();
+      validateRainSourceFrame(values, frameIndex);
       sequence.addSourceFrame(frameIndex, values, { validated: true });
       timing(`weather-frame-${frameIndex}-validation-complete`);
       return values;
-    })();
-    framePromises.set(frameIndex, request);
-    try {
-      return await request;
-    } finally {
-      framePromises.delete(frameIndex);
-    }
+      }
+    });
+    return scheduler;
+  });
+
+  async function requestSourceFrames(frameIndices, options = {}) {
+    const [sequence, frameScheduler] = await Promise.all([sequenceReady, schedulerReady]);
+    const result = await frameScheduler.requestFrames(frameIndices, options);
+    return { sequence, result };
+  }
+
+  async function requestSourceFrame(frameIndex, options = {}) {
+    const { sequence, result } = await requestSourceFrames([frameIndex], options);
+    return result.status === 'ready' ? sequence.sourceFrameAt(frameIndex) : null;
   }
 
   return {
@@ -1008,22 +1228,20 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, sou
     supportReady,
     sequenceReady,
     requestSourceFrame,
+    requestSourceFrames,
     async loadSequence(initialFrameIndex = 0) {
-      await requestSourceFrame(initialFrameIndex);
+      await requestSourceFrame(initialFrameIndex, { priority: 'high' });
       return sequenceReady;
     },
-    async prefetchFrames(frameIndices, { concurrency = 1 } = {}) {
-      if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('Frame prefetch concurrency must be a positive integer.');
-      const unique = [...new Set(frameIndices)].filter((index) => Number.isInteger(index));
-      let cursor = 0;
-      const worker = async () => {
-        while (cursor < unique.length) {
-          const frameIndex = unique[cursor++];
-          await requestSourceFrame(frameIndex);
-        }
-      };
-      await Promise.all(Array.from({ length: Math.min(concurrency, unique.length) }, worker));
+    async prefetchFrames(frameIndices) {
+      await requestSourceFrames(frameIndices, { priority: 'low', replaceKey: 'background-prefetch' });
       return sequenceReady;
+    },
+    setBackgroundPrefetchPaused(paused) {
+      void schedulerReady.then((frameScheduler) => frameScheduler.setBackgroundPrefetchPaused(paused));
+    },
+    diagnostics() {
+      return scheduler?.diagnostics() || null;
     }
   };
 }

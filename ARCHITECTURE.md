@@ -106,11 +106,21 @@ available. Metadata and the small immutable support sidecar may load while the
 basemap starts. After MapLibre renders the initial tiles, the application asks
 only for source frame 0; weather custom layers are created as soon as that
 frame is validated. The remaining frames prefetch sequentially in the
-background; the opening adjacent pair is then warmed again in the bounded LRU
-before playback enables. Timeline jumps
-request their required source frames without blanking the last valid weather.
-The request generation guard prevents late frame loads from committing an older
-timeline target. This is a startup/network priority policy, not a renderer
+background through the same bounded source-frame scheduler used by first load,
+RAW, Dots/Squares temporal requirements, and playback. The scheduler has one
+global fetch slot, not separate interactive and background pools. Current-time
+and adjacent temporal requirements are HIGH; remaining-sequence prefetch is
+LOW. HIGH work is selected before queued LOW work, while a running fetch is
+allowed to finish. Manual scrub submits the latest desired source-frame set
+under a replacement key, so queued requirements unique to older finger
+positions are discarded before fetch; Dots/Squares submit the requested and
+next renderer temporal times as one deduplicated HIGH set. Map movement pauses
+the start of new LOW work but never blocks required current weather. The opening
+adjacent pair is warmed again as LOW work before playback enables. Timeline
+jumps request their required source frames without blanking the last valid
+weather. The request generation guard remains the final barrier preventing late
+availability from committing an older timeline target. This is a
+startup/network priority policy, not a renderer
 dependency: weather initialization always reads the current camera viewport at
 the time it runs. Startup diagnostics exposed at `window.__dotFieldStartup`
 record metadata, support, first-source-frame, first-weather, background,
@@ -234,8 +244,13 @@ These arrays are computation caches rather than a new weather representation;
 the single-point sampler remains the semantic reference path. The provider-grid
 source-frame cache is a separate six-entry deterministic LRU of Float32 arrays
 (roughly 17.3 MiB at this fixture), rather than the old fixed 54.77 MiB
-monolithic sequence. A source frame is never asynchronously evicted during a
-synchronous evaluation. Optional future phenomena are represented in metadata
+monolithic sequence. Frame availability is asynchronous only at the provider
+loading boundary: once the latest required frames are available, provider
+temporal reconstruction, pyramid evaluation, and renderer updates remain
+synchronous. Each downloaded payload is byte/value validated before entering
+the LRU, including a re-download after eviction. A source frame is never
+asynchronously evicted during a synchronous evaluation. Optional future
+phenomena are represented in metadata
 as one mutually-exclusive Uint8 node enum per source frame: 0 none, 1–3 storm,
 4–6 hail, 7 reserved. The current rain-only sequence declares this channel
 unavailable and fabricates no phenomenon data.

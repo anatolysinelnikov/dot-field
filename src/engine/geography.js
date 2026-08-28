@@ -152,28 +152,38 @@ export function beginActiveWeatherLoad({ onTiming = null } = {}) {
       })();
       return fieldPromise;
     },
-    async requestSourceFrame(frameIndex) {
+    async requestSourceFrame(frameIndex, options = {}) {
       const field = await this.loadSequence(0);
       if (field.frameCount === undefined) return field;
-      await sequenceLoad.requestSourceFrame(frameIndex);
-      return field;
+      const { result } = await sequenceLoad.requestSourceFrames([frameIndex], options);
+      return { field, result };
     },
-    async requestTime(normalizedTime) {
+    async requestTimes(normalizedTimes, options = {}) {
       const field = await this.loadSequence(0);
       if (field.frameCount === undefined) return field;
-      await Promise.all(field.requiredSourceFrames(normalizedTime).map((frameIndex) => sequenceLoad.requestSourceFrame(frameIndex)));
-      return field;
+      const frameIndices = [...new Set(normalizedTimes.flatMap((time) => field.requiredSourceFrames(time)))];
+      const { result } = await sequenceLoad.requestSourceFrames(frameIndices, options);
+      return { field, result };
     },
-    async prefetchRemaining({ concurrency = 1 } = {}) {
+    async requestTime(normalizedTime, options = {}) {
+      return this.requestTimes([normalizedTime], options);
+    },
+    async prefetchRemaining() {
       const field = await this.loadSequence(0);
       if (field.frameCount === undefined) return field;
-      await sequenceLoad.prefetchFrames(Array.from({ length: field.frameCount - 1 }, (_, index) => index + 1), { concurrency });
+      await sequenceLoad.prefetchFrames(Array.from({ length: field.frameCount - 1 }, (_, index) => index + 1));
       // The bounded LRU intentionally cannot retain all 19 frames. Restore
       // the opening adjacent pair after the forward pass so enabled playback
-      // can start at t=0 without an avoidable on-demand stall.
-      await sequenceLoad.requestSourceFrame(0);
-      await sequenceLoad.requestSourceFrame(1);
+      // can start at t=0 without an avoidable on-demand stall. This remains
+      // LOW work, so a new scrub or map interaction can still preempt it.
+      await sequenceLoad.requestSourceFrames([0, 1], { priority: 'low', replaceKey: 'background-prefetch-warmup' });
       return field;
+    },
+    setBackgroundPrefetchPaused(paused) {
+      sequenceLoad.setBackgroundPrefetchPaused(paused);
+    },
+    diagnostics() {
+      return sequenceLoad.diagnostics();
     }
   };
 }
