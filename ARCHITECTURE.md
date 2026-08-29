@@ -238,6 +238,37 @@ transition is active. Paused map navigation and static updates use MapLibre's
 own repaint scheduling; beginning or reversing an LOD transition wakes the
 application RAF so its progress still completes while paused.
 
+### Runtime performance diagnostics — `src/runtime-diagnostics.js`
+
+The optional runtime diagnostics system is activated only by `?diagnostics=1`.
+It owns the lightweight top-left HUD, session lifecycle, bounded rolling frame
+timestamps, event collection, Resource Timing observation, IndexedDB
+persistence, recovered-session lookup, and JSON export. It samples at 1 Hz and
+flushes small batches to IndexedDB at approximately 2-second intervals; idle
+maps do not receive a diagnostics-only RAF loop. The persisted session is
+created uncleanly, and a prior session left unclean is exposed as `unclean` /
+`abrupt` after a later diagnostics-enabled load. Retention is bounded to the
+current session plus one previous session, with approximately 15 minutes of
+samples and bounded events/resources.
+
+The coordinator consumes the existing weather-loader scheduler snapshot,
+application canonical-window timings, `GeographicWeatherPyramid` counters and
+known typed-array sizes, and `diagnostics()` snapshots from RAW, Dots, and
+Squares. RAW reports exact retained precipitation/hazard geometry bytes and
+its existing geometry-build timings. Dots and Squares report active instance
+sizes, capacities, lifecycle counters, and estimated Dot Field GPU buffer
+bytes. Weather Resource Timing records retain sanitized same-origin relative
+paths and expose transfer, encoded, and decoded sizes for Brotli comparison.
+
+Export uses schema version 1 with session metadata, environment, limitations,
+summary, samples, events, and weather resources. MapTiler keys,
+`config.local.json`, MinIO credentials, and resource query strings/fragments
+are not exported. Explicit tracked CPU metrics cover only known Dot Field
+buffers/arrays; GPU values are estimates of Dot Field-owned WebGL buffers;
+total Safari/WebContent memory and CPU/GPU utilization remain unavailable from
+page JavaScript. Optional `performance.memory` values retain their browser-
+specific origin.
+
 ## Real-data geographic adapter — `src/engine/real-weather.js`, `src/engine/geography.js`
 
 The reusable local workflow is:

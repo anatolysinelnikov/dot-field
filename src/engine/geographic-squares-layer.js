@@ -9,6 +9,58 @@ const RAIN_ONLY_INSTANCE_STRIDE = 6;
 const CELL_VERTICES = new Float32Array([-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5]);
 
 const now = () => globalThis.performance?.now?.() ?? Date.now();
+const sumNumbers = (values) => values.reduce((total, value) => total + (Number.isFinite(value) ? value : 0), 0);
+
+function knownArrayBytes(value, seen = null) {
+  if (!ArrayBuffer.isView(value)) return 0;
+  if (seen?.has(value.buffer)) return 0;
+  seen?.add(value.buffer);
+  return value.buffer.byteLength;
+}
+
+function summaryBytes(summary, seen) {
+  if (!summary) return 0;
+  return [
+    summary.totalWeight,
+    summary.potentialActiveIndices,
+    summary.rainWeightedSumMmh,
+    summary.rainMaxMmh,
+    ...(summary.rainCoverageWeight || []),
+    summary.stormCoverageWeight,
+    summary.stormWeightedSeverity,
+    summary.stormMaxSeverity,
+    summary.hailCoverageWeight,
+    summary.hailWeightedSeverity,
+    summary.hailMaxSeverity
+  ].reduce((total, value) => total + knownArrayBytes(value, seen), 0);
+}
+
+function mappedStateBytes(mapped, seen) {
+  if (!mapped) return 0;
+  return [
+    mapped.rainWetMeanMmh,
+    mapped.rainCoverage,
+    mapped.stormCoverage,
+    mapped.stormMeanSeverity,
+    mapped.stormMaxSeverity,
+    mapped.hailCoverage,
+    mapped.hailMeanSeverity,
+    mapped.hailMaxSeverity
+  ].reduce((total, value) => total + knownArrayBytes(value, seen), 0);
+}
+
+function temporalStateBytes(temporal) {
+  if (!temporal) return 0;
+  const seen = new Set();
+  let bytes = 0;
+  for (const [level, levelState] of temporal.levels) {
+    for (const frameState of [levelState.frames0, levelState.frames1]) {
+      bytes += summaryBytes(frameState?.summaries?.[level], seen);
+      bytes += mappedStateBytes(frameState?.mapped?.[level], seen);
+    }
+  }
+  return bytes;
+}
 
 function retainedLevelData(previousTopology, nextTopology, levelData) {
   return Boolean(previousTopology && levelData
@@ -518,6 +570,32 @@ export class GeographicSquaresLayer {
       if (byteLength) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData[index].subarray(0, this.instanceCounts[index] * instanceStrideForLayout(this.instanceLayouts[index])));
       this.instanceDirty[index] = false;
     }
+  }
+
+  diagnostics() {
+    const activeInstanceByteLengths = this.instanceData.map((data, index) => {
+      const layout = this.instanceLayouts[index];
+      return layout ? this.instanceCounts[index] * instanceStrideForLayout(layout) * Float32Array.BYTES_PER_ELEMENT : 0;
+    });
+    const allocatedInstanceBytes = this.instanceData.map((data) => data.byteLength);
+    return {
+      active: this.active,
+      stableLevel: this.transition ? null : this.levelData?.level ?? null,
+      activeLevels: this.activeLevels(),
+      transition: this.transition ? {
+        fromLevel: this.transition.fromLevelData.level,
+        toLevel: this.transition.toLevelData.level,
+        progress: this.transitionProgress
+      } : null,
+      instanceCounts: [...this.instanceCounts],
+      instanceLayouts: [...this.instanceLayouts],
+      activeInstanceByteLengths,
+      allocatedInstanceBytes,
+      bufferCapacity: [...this.instanceBufferCapacity],
+      cpuBytes: sumNumbers(allocatedInstanceBytes) + temporalStateBytes(this.temporal),
+      estimatedGpuBufferBytes: sumNumbers(this.instanceBufferCapacity) + CELL_VERTICES.byteLength,
+      lifecycle: { ...this.lifecycleDiagnostics }
+    };
   }
 
   render(gl, args) {

@@ -886,4 +886,56 @@ export class GeographicWeatherPyramid {
     }
     return summaries;
   }
+
+  snapshot() {
+    const seenBuffers = new Set();
+    const bytes = (value) => {
+      if (!ArrayBuffer.isView(value) || seenBuffers.has(value.buffer)) return 0;
+      seenBuffers.add(value.buffer);
+      return value.buffer.byteLength;
+    };
+    let samplingGeometryBytes = 0;
+    for (const geometry of this.samplingGeometries.values()) {
+      samplingGeometryBytes += [
+        geometry.baseIndex,
+        geometry.longitudeFraction,
+        geometry.latitudeFraction,
+        geometry.sourceColumn,
+        geometry.sourceRowBase,
+        geometry.potentialActiveIndices,
+        geometry.temporalRainMmh
+      ].reduce((total, value) => total + bytes(value), 0);
+      if (geometry.spatialRainCache) {
+        for (const values of geometry.spatialRainCache.values()) samplingGeometryBytes += bytes(values);
+      }
+    }
+    let relationBytes = 0;
+    for (const relation of this.centeredRelations.values()) {
+      relationBytes += [
+        relation.x?.candidateCounts,
+        relation.x?.rawCandidateCounts,
+        relation.x?.candidateIndices,
+        relation.y?.candidateCounts,
+        relation.y?.rawCandidateCounts,
+        relation.y?.candidateIndices
+      ].reduce((total, value) => total + bytes(value), 0);
+    }
+    for (const relation of this.topology?.transitionParents?.values?.() || []) {
+      relationBytes += [relation.childOffsets, relation.childIndices, relation.parentIndexByChild]
+        .reduce((total, value) => total + bytes(value), 0);
+    }
+    for (const relation of this.topology?.directTransitionRelations?.values?.() || []) {
+      relationBytes += [relation.lowerToHigherColumns, relation.lowerToHigherRows]
+        .reduce((total, value) => total + bytes(value), 0);
+    }
+    return {
+      counters: { ...this.diagnostics },
+      samplingGeometryCount: this.samplingGeometries.size,
+      samplingGeometryBytes,
+      knownRelationBytes: relationBytes,
+      knownTypedArrayBytes: samplingGeometryBytes + relationBytes,
+      topologySetupTimings: this.topologySetupTimings ? { ...this.topologySetupTimings } : null,
+      materializedLevels: [...this.levels.keys()]
+    };
+  }
 }

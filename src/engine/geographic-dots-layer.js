@@ -21,6 +21,7 @@ const RADIUS_KEYS = { rain: 'rainRadius', strong: 'strongRadius', storm: 'stormR
 const EMPTY_INSTANCES = new Float32Array();
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
 const now = () => globalThis.performance?.now?.() ?? Date.now();
+const sumNumbers = (values) => values.reduce((total, value) => total + (Number.isFinite(value) ? value : 0), 0);
 
 function retainedLevelData(previousTopology, nextTopology, levelData) {
   return Boolean(previousTopology && levelData
@@ -236,6 +237,53 @@ class InstanceWriter {
 
 function hasTemporalRadius(radius0, radius1, radius2 = 0, radius3 = 0) {
   return radius0 > 0 || radius1 > 0 || radius2 > 0 || radius3 > 0;
+}
+
+function knownArrayBytes(value, seen = null) {
+  if (!ArrayBuffer.isView(value)) return 0;
+  if (seen?.has(value.buffer)) return 0;
+  seen?.add(value.buffer);
+  return value.buffer.byteLength;
+}
+
+function summaryBytes(summary, seen) {
+  if (!summary) return 0;
+  return [
+    summary.totalWeight,
+    summary.potentialActiveIndices,
+    summary.rainWeightedSumMmh,
+    summary.rainMaxMmh,
+    ...(summary.rainCoverageWeight || []),
+    summary.stormCoverageWeight,
+    summary.stormWeightedSeverity,
+    summary.stormMaxSeverity,
+    summary.hailCoverageWeight,
+    summary.hailWeightedSeverity,
+    summary.hailMaxSeverity
+  ].reduce((total, value) => total + knownArrayBytes(value, seen), 0);
+}
+
+function mappedStateBytes(mapped, seen) {
+  if (!mapped) return 0;
+  return [
+    mapped.rainRadius,
+    mapped.strongRadius,
+    mapped.stormRadius,
+    mapped.hailRadius
+  ].reduce((total, value) => total + knownArrayBytes(value, seen), 0);
+}
+
+function temporalStateBytes(temporal) {
+  if (!temporal) return 0;
+  const seen = new Set();
+  let bytes = 0;
+  for (const [level, levelState] of temporal.levels) {
+    for (const frameState of [levelState.frames0, levelState.frames1]) {
+      bytes += summaryBytes(frameState?.summaries?.[level], seen);
+      bytes += mappedStateBytes(frameState?.mapped?.[level], seen);
+    }
+  }
+  return bytes;
 }
 
 function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, coarseLevelData, fineLevelData, transitionParents, radiusKey, refining, writer) {
@@ -770,6 +818,33 @@ export class GeographicDotsLayer {
       if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instances[type]);
     }
     this.buffersDirty = false;
+  }
+
+  diagnostics() {
+    const instanceByteLengths = Object.fromEntries(WEATHER_TYPES.map((type) => [type, this.instances[type].byteLength]));
+    const allocatedInstanceBytes = Object.fromEntries(WEATHER_TYPES.map((type) => [type, this.instanceWriters[type].values.byteLength]));
+    const gpuInstanceBytes = sumNumbers(Object.values(this.bufferCapacity));
+    const staticGpuBytes = QUAD.byteLength * 2 + STORM.byteLength + HAIL.byteLength;
+    const temporalBytes = temporalStateBytes(this.temporal);
+    const cpuInstanceBytes = sumNumbers(Object.values(allocatedInstanceBytes));
+    return {
+      active: this.active,
+      stableLevel: this.transition ? null : this.levelData?.level ?? null,
+      activeLevels: this.activeLevels(),
+      transition: this.transition ? {
+        fromLevel: this.transition.fromLevelData.level,
+        toLevel: this.transition.toLevelData.level,
+        progress: this.transitionProgress
+      } : null,
+      instanceCounts: { ...this.counts },
+      instanceByteLengths,
+      allocatedInstanceBytes,
+      bufferCapacity: { ...this.bufferCapacity },
+      currentInstanceBytes: sumNumbers(Object.values(instanceByteLengths)),
+      cpuBytes: cpuInstanceBytes + temporalBytes,
+      estimatedGpuBufferBytes: gpuInstanceBytes + staticGpuBytes,
+      lifecycle: { ...this.lifecycleDiagnostics }
+    };
   }
 
   programsFor(gl, shaderData) {

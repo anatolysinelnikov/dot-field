@@ -19,6 +19,7 @@ import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
+import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
 
 const applicationStartupAt = performance.now();
 const startupTimings = Object.create(null);
@@ -194,6 +195,120 @@ let lastMapErrorSignature = '';
 let weatherSequencePromise = null;
 let basemapFallbackTimer = null;
 let weatherRequestGeneration = 0;
+
+const diagnosticsEnabled = new URLSearchParams(window.location.search).get('diagnostics') === '1';
+
+function numericSummary(values) {
+  if (!values.length) return { count: 0, lastMs: 0, meanMs: 0, p95Ms: 0, maxMs: 0 };
+  const sorted = [...values].sort((left, right) => left - right);
+  return {
+    count: values.length,
+    lastMs: values[values.length - 1],
+    meanMs: values.reduce((total, value) => total + value, 0) / values.length,
+    p95Ms: sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)],
+    maxMs: Math.max(...values)
+  };
+}
+
+function diagnosticsEnvironment() {
+  const canvas = map.getCanvas?.() || null;
+  const gl = map.painter?.context?.gl || canvas?.getContext?.('webgl2') || canvas?.getContext?.('webgl') || null;
+  const canvasRect = canvas?.getBoundingClientRect?.();
+  const contextAttributes = gl?.getContextAttributes?.() || null;
+  return {
+    canvasElement: canvas,
+    viewportCss: { width: window.innerWidth, height: window.innerHeight },
+    devicePixelRatio: window.devicePixelRatio,
+    mapCanvasCss: {
+      width: canvasRect?.width || mapContainer.clientWidth,
+      height: canvasRect?.height || mapContainer.clientHeight
+    },
+    mapCanvasBacking: { width: canvas?.width || null, height: canvas?.height || null },
+    webglDrawingBuffer: { width: gl?.drawingBufferWidth || null, height: gl?.drawingBufferHeight || null },
+    webglContextAttributes: contextAttributes ? {
+      alpha: contextAttributes.alpha,
+      antialias: contextAttributes.antialias,
+      depth: contextAttributes.depth,
+      failIfMajorPerformanceCaveat: contextAttributes.failIfMajorPerformanceCaveat,
+      premultipliedAlpha: contextAttributes.premultipliedAlpha,
+      preserveDrawingBuffer: contextAttributes.preserveDrawingBuffer,
+      stencil: contextAttributes.stencil
+    } : null,
+    maxTextureSize: gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : null,
+    maxRenderbufferSize: gl ? gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) : null
+  };
+}
+
+function diagnosticsSnapshot() {
+  const source = weatherLoad.diagnostics();
+  const raw = rawLayer?.diagnostics() || null;
+  const dots = weatherLayer?.diagnostics() || null;
+  const squares = squaresLayer?.diagnostics() || null;
+  const pyramid = geographicWeatherPyramid?.snapshot() || null;
+  const sourceResidentBytes = source?.residentSourceBytes || 0;
+  const trackedCpuBytes = (raw?.totalCpuGeometryBytes || 0)
+    + (dots?.cpuBytes || 0)
+    + (squares?.cpuBytes || 0)
+    + (pyramid?.knownTypedArrayBytes || 0);
+  const estimatedGpuBufferBytes = (raw?.estimatedGpuBufferBytes || 0)
+    + (dots?.estimatedGpuBufferBytes || 0)
+    + (squares?.estimatedGpuBufferBytes || 0);
+  let center = null;
+  try {
+    const point = map.getCenter();
+    center = { longitude: point.lng, latitude: point.lat };
+  } catch {
+    // The initial map can briefly exist before its camera is ready.
+  }
+  return {
+    state: {
+      activeRenderMode: state.renderMode,
+      playing: state.playing,
+      scrubbing: state.scrubbing,
+      normalizedAnimationTime: state.time / LOOP_SECONDS,
+      rawFrameIndex: state.rawFrameIndex,
+      playbackStalled: state.playbackStalled
+    },
+    camera: {
+      center,
+      rawZoom: map.getZoom?.() ?? null,
+      logicalWeatherZoom: state.logicalSamplingZoom,
+      pitch: map.getPitch?.() ?? null,
+      bearing: map.getBearing?.() ?? null
+    },
+    lod: {
+      stableLevel: state.lod.level,
+      transition: state.lodTransition ? {
+        fromLevel: state.lodTransition.fromLevel,
+        toLevel: state.lodTransition.toLevel,
+        progress: state.lodTransition.rawProgress
+      } : null,
+      leafCount: state.levelData?.count || 0
+    },
+    canonicalWindow: {
+      rebuilds: state.canonicalWindowRebuilds,
+      lastMs: state.canonicalWindowRebuildLastMs,
+      timings: numericSummary(state.canonicalWindowRebuildSamples)
+    },
+    source,
+    renderers: { raw, dots, squares },
+    pyramid,
+    memory: {
+      sourceResidentBytes,
+      rawCpuGeometryBytes: raw?.totalCpuGeometryBytes || 0,
+      trackedCpuBytes,
+      estimatedGpuBufferBytes
+    }
+  };
+}
+
+const runtimeDiagnostics = createRuntimeDiagnostics({
+  enabled: diagnosticsEnabled,
+  getSnapshot: diagnosticsSnapshot,
+  getEnvironment: diagnosticsEnvironment
+});
+const diagnosticsHud = runtimeDiagnostics?.attachHud(lodDiagnostics) || null;
+if (runtimeDiagnostics) window.__dotFieldDiagnostics = runtimeDiagnostics;
 
 for (const control of [...renderModeButtons, hazards, timeSlider, playPause]) control.disabled = true;
 
@@ -406,6 +521,10 @@ function applyCanonicalWindow(canonicalWindow) {
   state.canonicalWindowRebuildLastMs = performance.now() - started;
   state.canonicalWindowRebuildSamples.push(state.canonicalWindowRebuildLastMs);
   if (state.canonicalWindowRebuildSamples.length > 120) state.canonicalWindowRebuildSamples.shift();
+  runtimeDiagnostics?.recordEvent('canonical-window-replacement', {
+    rebuildCount: state.canonicalWindowRebuilds,
+    durationMs: state.canonicalWindowRebuildLastMs
+  });
   updateLodDiagnostics();
   return true;
 }
@@ -441,7 +560,9 @@ function updateLodDiagnostics() {
   const level = transition
     ? `${transition.fromLevel} → ${transition.toLevel}`
     : state.lod.level === null ? '—' : state.lod.level;
-  lodDiagnostics.textContent = `Zoom ${zoom} · LOD ${level}`;
+  const value = `Zoom ${zoom} · LOD ${level}`;
+  if (diagnosticsHud) diagnosticsHud.setBaseText(value);
+  else lodDiagnostics.textContent = value;
   lodDiagnostics.dataset.windowRebuilds = String(state.canonicalWindowRebuilds);
 }
 
@@ -622,6 +743,7 @@ function startAdjacentTransition(level, now) {
     start: now,
     rawProgress: 0
   };
+  runtimeDiagnostics?.recordEvent('lod-transition-start', { fromLevel: state.lod.level, toLevel });
   weatherLayer.setTransition(state.levelData, toLevelData, state.time / LOOP_SECONDS, 0);
   squaresLayer.setTransition(state.levelData, toLevelData, state.time / LOOP_SECONDS, 0);
   updateLodDiagnostics();
@@ -669,6 +791,7 @@ function updateLODTransition(now) {
   updateLodDiagnostics();
   if (rawProgress < 1) return;
   state.lodTransition = null;
+  runtimeDiagnostics?.recordEvent('lod-transition-end', { level: transition.toLevel });
   commitLevelData(transition.toLevel, transition.toLevelData);
   if (state.pendingCanonicalWindow) {
     const pendingWindow = state.pendingCanonicalWindow;
@@ -788,6 +911,7 @@ function setRawFrame(frameIndex, commitTime = false) {
       ? activeWeatherField.exactSourceFrameAt(nextFrameIndex)
       : rawWeatherField;
     rawLayer.setFrame(frame);
+    runtimeDiagnostics?.recordEvent('raw-source-frame-change', { frameIndex: nextFrameIndex });
     refreshHighlightedRawCell();
     void weatherLoad.rebaseRollingPrefetch(state.time / LOOP_SECONDS).catch((error) => {
       console.error('Unable to prefetch the RAW scrub weather neighborhood.', error);
@@ -807,6 +931,7 @@ function setRenderMode(mode) {
     setRawFrame(sourceFrameIndexForNormalizedTime(state.time / LOOP_SECONDS));
   }
   state.renderMode = mode;
+  runtimeDiagnostics?.recordEvent('render-mode-change', { mode });
   renderModeSelector.dataset.mode = mode;
   if (leavingRaw) timeSlider.value = String(clamp(state.time / LOOP_SECONDS, 0, 1));
   if (leavingRaw) dismissRawTooltip();
@@ -900,6 +1025,7 @@ function selectRawCell(event) {
 function setPlaying(playing) {
   const nextPlaying = Boolean(playing) && state.renderMode !== 'raw' && state.playbackReady;
   state.playing = nextPlaying;
+  runtimeDiagnostics?.recordEvent(nextPlaying ? 'play' : 'pause');
   state.playbackStalled = false;
   state.playbackPendingRequirementKey = null;
   playPause.disabled = state.renderMode === 'raw' || !state.playbackReady;
@@ -977,6 +1103,7 @@ function finishTimelineScrub(pointerId) {
   const activePointerId = scrubbingPointerId;
   scrubbingPointerId = null;
   state.scrubbing = false;
+  runtimeDiagnostics?.recordEvent('scrub-end');
   if (timeSlider.hasPointerCapture(activePointerId)) timeSlider.releasePointerCapture(activePointerId);
 }
 timeSlider.addEventListener('pointerdown', (event) => {
@@ -984,6 +1111,7 @@ timeSlider.addEventListener('pointerdown', (event) => {
   timeSlider.focus({ preventScroll: true });
   if (state.playing) setPlaying(false);
   state.scrubbing = true;
+  runtimeDiagnostics?.recordEvent('scrub-start');
   scrubbingPointerId = event.pointerId;
   timeSlider.setPointerCapture(event.pointerId);
   updateTimelineFromPointer(event.clientX);
@@ -1037,6 +1165,7 @@ map.on('style.load', () => {
   }, 5000);
 });
 map.on('render', () => {
+  runtimeDiagnostics?.recordRender();
   if (state.styleReady) markStartup('first-map-render-after-style');
   observeInitialBasemapReadiness();
   if (state.mapReady) markStartup('first-weather-layer-render');
@@ -1049,10 +1178,12 @@ map.on('sourcedata', (event) => {
 map.on('mousemove', updateRawHover);
 map.on('click', selectRawCell);
 map.on('dragstart', () => {
+  runtimeDiagnostics?.recordEvent('drag-start');
   rawMapDragging = true;
   dismissRawTooltip();
 });
 map.on('dragend', () => {
+  runtimeDiagnostics?.recordEvent('drag-end');
   rawMapDragging = false;
 });
 map.on('mouseout', () => {
@@ -1074,8 +1205,12 @@ map.on('move', updateRawTooltipPosition);
 map.on('move', updateResetViewControl);
 map.on('rotate', updateResetViewControl);
 map.on('pitch', updateResetViewControl);
-map.on('movestart', () => weatherLoad.setBackgroundPrefetchPaused(true));
+map.on('movestart', () => {
+  runtimeDiagnostics?.recordEvent('map-movestart');
+  weatherLoad.setBackgroundPrefetchPaused(true);
+});
 map.on('moveend', () => {
+  runtimeDiagnostics?.recordEvent('map-moveend');
   weatherLoad.setBackgroundPrefetchPaused(false);
   if (!state.resettingView) return;
   state.resettingView = false;
@@ -1085,6 +1220,8 @@ map.on('moveend', () => {
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
   updateResetViewControl();
 });
+map.on('zoomstart', () => runtimeDiagnostics?.recordEvent('map-zoomstart'));
+map.on('zoomend', () => runtimeDiagnostics?.recordEvent('map-zoomend'));
 map.on('load', () => {
   markStartup('maplibre-load');
   markInitialBasemapVisible('map-load');

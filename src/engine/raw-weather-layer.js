@@ -82,6 +82,7 @@ const HAIL_COLORS = Object.freeze({
   17: [240 / 255, 192 / 255, 0, 1],
   18: [1, 212 / 255, 0, 1]
 });
+const now = () => globalThis.performance?.now?.() ?? Date.now();
 
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -165,6 +166,7 @@ function buildGeometry(field) {
   const precipitationColors = [];
   const thunderstorm = Object.fromEntries(Object.keys(THUNDERSTORM_COLORS).map((code) => [code, []]));
   const hail = Object.fromEntries(Object.keys(HAIL_COLORS).map((code) => [code, []]));
+  let wetPrecipitationCellCount = 0;
   const width = field.longitudes.length;
   for (let latitudeIndex = 0; latitudeIndex < field.latitudes.length; latitudeIndex++) {
     const south = field.latitudeCellBounds[latitudeIndex];
@@ -177,6 +179,7 @@ function buildGeometry(field) {
       const hasHail = field.hailCode[index] !== 0;
       const mmh = field.mmh[index];
       if (mmh > 0) {
+        wetPrecipitationCellCount++;
         addCell(precipitationVertices, west, east, south, north);
         addCellColor(precipitationColors, precipitationColor(mmh));
       }
@@ -190,13 +193,23 @@ function buildGeometry(field) {
       }
     }
   }
-  return {
+  const geometry = {
     precipitation: {
       vertices: Float32Array.from(precipitationVertices),
       colors: Float32Array.from(precipitationColors)
     },
     thunderstorm: Object.fromEntries(Object.entries(thunderstorm).map(([code, vertices]) => [code, Float32Array.from(vertices)])),
     hail: Object.fromEntries(Object.entries(hail).map(([code, vertices]) => [code, Float32Array.from(vertices)]))
+  };
+  return {
+    geometry,
+    stats: {
+      wetPrecipitationCellCount,
+      precipitationVertexCount: geometry.precipitation.vertices.length / 2,
+      precipitationCpuBytes: geometry.precipitation.vertices.byteLength + geometry.precipitation.colors.byteLength,
+      hazardCpuBytes: [...Object.values(geometry.thunderstorm), ...Object.values(geometry.hail)]
+        .reduce((total, vertices) => total + vertices.byteLength, 0)
+    }
   };
 }
 
@@ -206,11 +219,29 @@ export class RawWeatherLayer {
     this.type = 'custom';
     this.renderingMode = '3d';
     this.field = field;
-    this.geometry = buildGeometry(field);
+    this.geometryBuildCount = 0;
+    this.lastGeometryBuildMs = 0;
+    this.cumulativeGeometryBuildMs = 0;
+    this.maxGeometryBuildMs = 0;
+    this.highlightByteLength = 0;
+    this.rebuildGeometry(field);
     this.active = false;
     this.hazardsVisible = true;
     this.highlightedCell = null;
     this.programs = new Map();
+  }
+
+  rebuildGeometry(field) {
+    const started = now();
+    const result = buildGeometry(field);
+    const duration = now() - started;
+    this.geometry = result.geometry;
+    this.geometryStats = result.stats;
+    this.field = field;
+    this.geometryBuildCount++;
+    this.lastGeometryBuildMs = duration;
+    this.cumulativeGeometryBuildMs += duration;
+    this.maxGeometryBuildMs = Math.max(this.maxGeometryBuildMs, duration);
   }
 
   onAdd(map, gl) {
@@ -246,8 +277,7 @@ export class RawWeatherLayer {
 
   setFrame(field) {
     if (field === this.field) return;
-    this.field = field;
-    this.geometry = buildGeometry(field);
+    this.rebuildGeometry(field);
     if (this.gl) {
       this.replaceBufferData(this.gl, this.buffers.precipitation.position, this.geometry.precipitation.vertices);
       this.replaceBufferData(this.gl, this.buffers.precipitation.color, this.geometry.precipitation.colors);
@@ -278,10 +308,30 @@ export class RawWeatherLayer {
     this.highlightedCell = cell;
     if (this.gl && this.highlightBuffer) {
       const vertices = cell ? cellOutline(this.field, cell) : new Float32Array();
+      this.highlightByteLength = vertices.byteLength;
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.highlightBuffer);
       this.gl.bufferData(this.gl.ARRAY_BUFFER, vertices, this.gl.DYNAMIC_DRAW);
     }
     this.map?.triggerRepaint();
+  }
+
+  diagnostics() {
+    const precipitationCpuBytes = this.geometryStats?.precipitationCpuBytes || 0;
+    const hazardCpuBytes = this.geometryStats?.hazardCpuBytes || 0;
+    return {
+      active: this.active,
+      sourceFrameIndex: Number.isInteger(this.field?.frameIndex) ? this.field.frameIndex : null,
+      wetPrecipitationCellCount: this.geometryStats?.wetPrecipitationCellCount || 0,
+      precipitationVertexCount: this.geometryStats?.precipitationVertexCount || 0,
+      precipitationCpuBytes,
+      hazardCpuBytes,
+      totalCpuGeometryBytes: precipitationCpuBytes + hazardCpuBytes,
+      estimatedGpuBufferBytes: precipitationCpuBytes + hazardCpuBytes + this.highlightByteLength,
+      geometryBuildCount: this.geometryBuildCount,
+      lastGeometryBuildMs: this.lastGeometryBuildMs,
+      cumulativeGeometryBuildMs: this.cumulativeGeometryBuildMs,
+      maxGeometryBuildMs: this.maxGeometryBuildMs
+    };
   }
 
   programFor(gl, shaderData) {

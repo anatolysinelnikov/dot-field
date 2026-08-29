@@ -79,6 +79,14 @@ html, body { overflow: hidden; background: #080b12; }
   text-shadow: 0 1px 3px #000;
 }
 
+.lod-diagnostics-base { display: block; }
+.diagnostics-panel { margin-top: 4px; max-width: min(92vw, 520px); font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; letter-spacing: 0; text-shadow: none; }
+.diagnostics-summary { color: #d7e2f2; white-space: normal; }
+.diagnostics-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 4px; }
+.diagnostics-actions button { height: 24px; padding: 0 7px; border-radius: 4px; font-size: 10px; }
+.diagnostics-status { color: #9fb4d1; }
+.diagnostics-details { max-height: 45vh; margin: 4px 0 0; overflow: auto; padding: 6px; border: 1px solid rgba(176, 193, 220, .18); border-radius: 4px; background: rgba(14, 19, 30, .9); color: #d7e2f2; font: 9px/1.3 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; pointer-events: auto; }
+
 .raw-tooltip {
   position: absolute;
   z-index: 4;
