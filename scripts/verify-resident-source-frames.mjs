@@ -67,7 +67,7 @@ let residentReport = null;
 const baseStarts = [];
 await withFetch(fixtureFetch(baseStarts), async () => {
   const starts = baseStarts;
-  const base = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 6 });
+  const base = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 6, retainAllSourceFrames: false });
   const sequence = await base.loadSequence(0);
   await base.requestSourceFrames([1, 2], { priority: 'high' });
   const initial = base.diagnostics();
@@ -75,7 +75,7 @@ await withFetch(fixtureFetch(baseStarts), async () => {
   check(initial.residentSourceFrameCount === 3 && !initial.fullSequenceResidencyCompleted, 'Play readiness must not wait for full source residency');
   for (const frameIndex of scrubSequence) await base.requestSourceFrame(frameIndex, { priority: 'high' });
   const baseDiagnostics = base.diagnostics();
-  check(baseDiagnostics.lruEvictions > 0, 'the base six-frame LRU must evict during a wide scrub');
+  check(baseDiagnostics.lruEvictions > 0, 'the opt-in bounded source cache must evict during a wide scrub');
   check(baseDiagnostics.validationScans === baseDiagnostics.sourceFetchesStarted, 'base validation scans must match source fetches');
   check(baseDiagnostics.logicalSourceBytesRequested > FRAME_COUNT * FRAME_BYTE_LENGTH, 'base wide scrub must transfer more than one sequence payload');
   check(sequence.sourceFrames.size === 6, 'base source residency must remain bounded at six frames');
@@ -107,10 +107,19 @@ await withFetch(fixtureFetch(residentStarts), async () => {
   check(complete.residentSourceFrameIndices.join(',') === Array.from({ length: FRAME_COUNT }, (_, index) => index).join(','), 'resident diagnostics must expose every actual resident frame index');
   check(residentChanges.at(-1)?.join(',') === Array.from({ length: FRAME_COUNT }, (_, index) => index).join(','), 'residency changes must publish the actual complete index snapshot');
   check(complete.fullSequenceResidencyCompleted, 'resident fill must report full sequence completion');
-  check(complete.retainAllSourceFrames && complete.lruEvictions === 0, 'resident policy must never evict source frames');
+  check(complete.retainAllSourceFrames && complete.lruEvictions === 0, 'full source residency must never evict source frames');
+  check(complete.sourceFetchConcurrency === 1 && complete.configuredConcurrency === 1, 'full source residency must retain one global fetch slot');
+  check(Number.isFinite(complete.fullSequenceLoadDurationMs) && complete.fullSequenceLoadDurationMs >= 0, 'full source residency must report its load duration');
+
+  const rawFrame = sequence.exactSourceFrameAt(FRAME_COUNT - 2);
+  check(rawFrame.mmh === sequence.sourceFrames.get(FRAME_COUNT - 2), 'RAW exact frame must reference the resident source Float32Array');
+  check(!complete.rawExactFrameDuplicatePayload, 'RAW exact frame must not duplicate its resident source payload');
 
   const beforeScrub = resident.diagnostics();
   for (const frameIndex of scrubSequence) await resident.requestSourceFrame(frameIndex, { priority: 'high' });
+  for (let frameIndex = FRAME_COUNT - 1; frameIndex >= 0; frameIndex--) {
+    await resident.requestSourceFrames(sequence.requiredSourceFrames(frameIndex / (FRAME_COUNT - 1)), { priority: 'high' });
+  }
   const afterScrub = resident.diagnostics();
   check(afterScrub.sourceFetchesStarted === beforeScrub.sourceFetchesStarted, 'wide scrub after residency must not fetch');
   check(afterScrub.validationScans === beforeScrub.validationScans, 'wide scrub after residency must not validate');

@@ -56,7 +56,7 @@ await withFetch(async () => { throw new Error('fetch is configured below'); }, a
     active--;
     return frameResponse(index);
   };
-  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 2 });
+  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 2, retainAllSourceFrames: false });
   await staged.loadSequence(0);
   const targetA = staged.requestSourceFrames([1, 2], { priority: 'high', replaceKey: 'manual', latestTargetGeneration: 1 });
   const targetB = staged.requestSourceFrames([17, 18], { priority: 'high', replaceKey: 'manual', latestTargetGeneration: 2 });
@@ -87,7 +87,7 @@ await withFetch(async (url) => {
     await new Promise((resolve) => setTimeout(resolve, 2));
     return frameResponse(index);
   };
-  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 2 });
+  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 2, retainAllSourceFrames: false });
   await staged.loadSequence(0);
   const background = staged.prefetchFrames(Array.from({ length: 18 }, (_, index) => index + 1));
   await new Promise((resolve) => setTimeout(resolve, 1));
@@ -110,7 +110,7 @@ await withFetch(async (url) => {
   return frameResponse(index);
 }, async () => {
   globalThis.__dotFieldSharedFrameStarts = [];
-  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 2 });
+  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 2, retainAllSourceFrames: false });
   await staged.loadSequence(0);
   const targetA = staged.requestSourceFrames([1, 2], { priority: 'high', replaceKey: 'manual' });
   const targetB = staged.requestSourceFrames([2, 17], { priority: 'high', replaceKey: 'manual' });
@@ -132,7 +132,7 @@ await withFetch(async (url) => {
   }
   return frameResponse(index);
 }, async () => {
-  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 2 });
+  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 2, retainAllSourceFrames: false });
   await staged.loadSequence(0);
   await staged.requestSourceFrame(5).then(() => {
     throw new Error('the first failed HIGH request must reject');
@@ -143,4 +143,4 @@ await withFetch(async (url) => {
 });
 delete globalThis.__dotFieldFailedSchedulerFrame;
 
-console.log('source-frame scheduler verification passed: global concurrency, latest-target coalescing, HIGH-over-LOW preemption, LRU behavior, and failed-request recovery');
+console.log('source-frame scheduler verification passed: global concurrency, latest-target coalescing, HIGH-over-LOW preemption, explicit bounded-LRU behavior, and failed-request recovery');

@@ -255,13 +255,17 @@ function diagnosticsSnapshot() {
     + (squares?.estimatedGpuBufferBytes || 0);
   if (source && raw) {
     const rawFrameIndex = raw.sourceFrameIndex;
+    const sourceFrame = Number.isInteger(rawFrameIndex) ? activeWeatherField?.sourceFrames?.get?.(rawFrameIndex) : null;
+    const rawFramePayload = raw?.sourceFramePayloadBytes || 0;
     source = {
       ...source,
       rawLayerExactFrameIndex: rawFrameIndex,
-      rawLayerExactFrameBytes: raw.sourceFramePayloadBytes || 0,
+      rawLayerExactFrameBytes: rawFramePayload,
       rawLayerExactFrameOutsideCache: Number.isInteger(rawFrameIndex)
         && activeWeatherField?.isSourceFrameAvailable
-        && !activeWeatherField.isSourceFrameAvailable(rawFrameIndex)
+        && !activeWeatherField.isSourceFrameAvailable(rawFrameIndex),
+      rawExactFrameSharedSourcePayload: Boolean(sourceFrame && rawLayer?.field?.mmh === sourceFrame),
+      rawExactFrameDuplicatePayload: Boolean(sourceFrame && rawLayer?.field?.mmh !== sourceFrame)
     };
   }
   let center = null;

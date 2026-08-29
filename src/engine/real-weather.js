@@ -15,6 +15,7 @@ export const ROLLING_PLAYBACK_AHEAD_FRAME_COUNT = 3;
 const SPATIAL_RAIN_CACHE_LIMIT = 4;
 const COMPACT_RECTANGULAR_GEOMETRY = 'compact-rectangular';
 const DENSE_GENERIC_GEOMETRY = 'dense-generic';
+const monotonicNow = () => globalThis.performance?.now?.() ?? Date.now();
 
 function fail(message) {
   throw new Error(`Real weather CSV validation failed: ${message}`);
@@ -1013,6 +1014,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, generationId, sou
   let backgroundPausedByMap = false;
   const diagnostics = {
     configuredConcurrency: concurrency,
+    sourceFetchConcurrency: concurrency,
     activeFetches: 0,
     peakActiveFetches: 0,
     highQueueSize: 0,
@@ -1039,10 +1041,14 @@ function createSourceFrameScheduler({ frameCount, concurrency, generationId, sou
     sourceFrameCount: frameCount,
     generationId,
     sourceFrameCacheLimit,
+    effectiveSourceFrameCacheLimit: retainAllSourceFrames ? frameCount : sourceFrameCacheLimit,
+    sourceResidencyPolicy: retainAllSourceFrames ? 'full-sequence' : 'bounded-lru',
     residentSourceFrameCount: 0,
     residentSourceBytes: 0,
     residentSourceFrameIndices: Object.freeze([]),
     fullSequenceResidencyCompleted: false,
+    fullSequenceLoadDurationMs: null,
+    firstSourceFrameFetchStartedAt: null,
     retainAllSourceFrames: Boolean(retainAllSourceFrames),
     logicalSourceBytesRequested: 0,
     logicalSourceBytesForStaleFetches: 0,
@@ -1105,7 +1111,12 @@ function createSourceFrameScheduler({ frameCount, concurrency, generationId, sou
     diagnostics.residentSourceFrameCount = entries;
     diagnostics.residentSourceBytes = diagnostics.sourceCacheBytes;
     diagnostics.residentSourceFrameIndices = residentFrameIndices;
-    diagnostics.fullSequenceResidencyCompleted = entries === frameCount;
+    if (entries === frameCount && !diagnostics.fullSequenceResidencyCompleted) {
+      diagnostics.fullSequenceResidencyCompleted = true;
+      diagnostics.fullSequenceLoadDurationMs = diagnostics.firstSourceFrameFetchStartedAt === null
+        ? 0
+        : Math.max(0, monotonicNow() - diagnostics.firstSourceFrameFetchStartedAt);
+    }
   }
 
   function settleAvailableRequests() {
@@ -1144,6 +1155,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, generationId, sou
   }
 
   function startFrame(frameIndex, priority) {
+    if (diagnostics.firstSourceFrameFetchStartedAt === null) diagnostics.firstSourceFrameFetchStartedAt = monotonicNow();
     active.set(frameIndex, { priority });
     diagnostics.activeFetches = active.size;
     diagnostics.peakActiveFetches = Math.max(diagnostics.peakActiveFetches, active.size);
@@ -1349,6 +1361,9 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
         ...snapshot,
         rawExactFrameIndex: rawFrameIndex,
         rawExactFrameBytes: rawFrameBytes,
+        rawExactFrameSharedSourcePayload: rawFrameIndex !== null
+          && sequenceForDiagnostics.sourceFrames.get(rawFrameIndex) === rawFrame?.mmh,
+        rawExactFrameDuplicatePayload: false,
         rawExactFrameOutsideCache: rawFrameIndex !== null
           && !sequenceForDiagnostics.sourceFrames.has(rawFrameIndex)
       };

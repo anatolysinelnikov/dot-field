@@ -51,7 +51,7 @@ try {
     check(rollingPlaybackSourceFrameIndices(FRAME_COUNT, frame / 18).length <= 6, 'rolling horizon must fit the six-frame source cache');
   }
 
-  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 6 });
+  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 6, retainAllSourceFrames: false });
   const sequence = await staged.loadSequence(0);
   await staged.requestSourceFrames([0, 1, 2], { priority: 'high' });
   equal(starts, [0, 1, 2], 'initial playback readiness must not request the full sequence');
@@ -61,7 +61,7 @@ try {
   equal(starts, [0, 1, 2, 3, 4], 'initial rolling horizon must request only its forward neighborhood');
   await staged.requestSourceFrames(rollingPlaybackSourceFrameIndices(FRAME_COUNT, 2 / 18), { priority: 'low', replaceKey: 'rolling-playback-prefetch' });
   equal(starts, [0, 1, 2, 3, 4, 5, 6], 'horizon advancement must request only newly relevant frames');
-  check(sequence.sourceFrames.size === 6 && !sequence.isSourceFrameAvailable(0), 'the source LRU must remain bounded as rolling playback advances');
+  check(sequence.sourceFrames.size === 6 && !sequence.isSourceFrameAvailable(0), 'the opt-in bounded source LRU must remain bounded as rolling playback advances');
 
   staged.setBackgroundPrefetchPaused(true);
   const pausedPrefetch = staged.prefetchFrames([14]);
@@ -78,7 +78,7 @@ try {
   check(diagnostics.peakActiveFetches === 1, 'rolling playback must retain global source-fetch concurrency one');
 
   starts.length = 0;
-  const uninterrupted = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 6 });
+  const uninterrupted = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 6, retainAllSourceFrames: false });
   await uninterrupted.loadSequence(0);
   await uninterrupted.requestSourceFrames([0, 1, 2], { priority: 'high' });
   for (let frame = 0; frame < FRAME_COUNT; frame++) {
@@ -91,8 +91,8 @@ try {
     check(starts.filter((index) => index === frame).length === 1, `uninterrupted forward playback must not re-download frame ${frame}`);
   }
   const uninterruptedDiagnostics = uninterrupted.diagnostics();
-  check(uninterruptedDiagnostics.peakSourceCacheEntries === 6, `uninterrupted rolling playback must retain the six-frame source-cache bound (observed ${uninterruptedDiagnostics.peakSourceCacheEntries})`);
-  console.log(`rolling playback verification passed: initial=${INITIAL_PLAYBACK_SOURCE_FRAME_COUNT}; horizon=previous/current-pair/+3; fetches=${starts.length}; evictions=${diagnostics.lruEvictions}`);
+  check(uninterruptedDiagnostics.peakSourceCacheEntries === 6, `opt-in bounded rolling playback must retain the six-frame source-cache bound (observed ${uninterruptedDiagnostics.peakSourceCacheEntries})`);
+  console.log(`rolling playback algorithm verification passed: initial=${INITIAL_PLAYBACK_SOURCE_FRAME_COUNT}; horizon=previous/current-pair/+3; bounded-cache fetches=${starts.length}; evictions=${diagnostics.lruEvictions}`);
 } finally {
   globalThis.fetch = originalFetch;
 }

@@ -108,14 +108,13 @@ available. Metadata and the small immutable support sidecar may load while the
 basemap starts. After MapLibre renders the initial tiles, the application asks
 only for source frame 0; weather custom layers are created as soon as that
 frame is validated.
-The active finite sequence keeps its rolling source horizon through the same
-scheduler and uses the existing six-entry source-frame LRU. Playback becomes
-available after the initial three-frame source buffer (0, 1, 2), after which
-the rolling horizon near the current time provides the only proactive source
-prefetch. The active path does not automatically fill the complete finite
-sequence. The scheduler has one global fetch slot, not separate interactive
-and background pools. Current-time and adjacent temporal requirements are
-HIGH; rolling-forward work is LOW.
+The active finite sequence uses the same scheduler with full source-frame
+residency enabled. Playback becomes available after the initial three-frame
+source buffer (0, 1, 2); the remaining frames then fill the same immutable
+generation in the background. Initial rendering does not wait for all source
+frames. The scheduler has one global fetch slot, not separate interactive and
+background pools. Current-time and adjacent temporal requirements are HIGH;
+full-sequence fill is LOW.
 HIGH work is selected before queued LOW work, while a running fetch is allowed
 to finish. If playback reaches an unavailable required pair, application time
 holds at the last valid weather state until that pair is available, then
@@ -126,9 +125,10 @@ Dots/Squares submit the requested and next renderer temporal times as one
 deduplicated HIGH set. Map movement pauses new LOW work but never blocks
 required current weather. After a manual or RAW scrub, the small rolling
 playback horizon rebases to the selected time. Independent cooperative
-rolling-horizon work continues requesting nearby missing frames one at a time
-as LOW work; HIGH interactive requirements always outrank it, map movement may
-pause new LOW work, and there is no automatic full-sequence resident fill.
+rolling-horizon work may continue requesting nearby missing frames one at a time
+as LOW work while full residency is incomplete; HIGH interactive requirements
+always outrank it, map movement may pause new LOW work, and the automatic
+full-sequence fill eventually makes all timeline requirements local hits.
 Timeline jumps request their required source frames without blanking the last
 valid weather. The request generation guard remains the final barrier preventing
 late availability from committing an older timeline target. This is a
@@ -264,6 +264,14 @@ transition parents, and direct-transition relations. Weather Resource Timing
 records retain sanitized same-origin relative paths and expose transfer,
 encoded, and decoded sizes for Brotli comparison.
 
+The weather-loader diagnostics also expose generation identity, source frame
+count and sorted resident indices, exact resident source bytes, the active
+full-sequence versus bounded-LRU policy, fetch concurrency, HIGH/LOW queue and
+cache counters, validation scans, eviction count, and
+`fullSequenceLoadDurationMs`. RAW exact-frame diagnostics identify the selected
+frame and confirm whether its `Float32Array` is the resident source payload;
+RAW does not own a duplicate source frame.
+
 Export uses schema version 1 with session metadata, environment, limitations,
 summary, samples, events, and weather resources. MapTiler keys,
 `config.local.json`, MinIO credentials, and resource query strings/fragments
@@ -367,17 +375,19 @@ API, retain the dense generic fallback.
 These arrays are computation caches rather than a new weather representation;
 the single-point sampler remains the semantic reference path. The provider-grid
 source-frame cache is a deterministic Float32 residency store. The active
-source policy is a six-entry LRU, so its resident payload is bounded by six
-exact frames (49,105,056 bytes for the current 8,184,176-byte frame payload).
-Browser HTTP cache can improve transport latency but is never a required second
-frame store. Frame availability is asynchronous only at the provider loading
-boundary: once the latest required frames are available, provider temporal
-reconstruction, pyramid evaluation, and renderer updates remain synchronous.
+source policy retains every validated frame in the finite generation after the
+initial buffer; its resident payload is therefore derived from metadata as
+`frameCount × frameByteLength`. The bounded LRU remains available only as an
+explicit lower-level compatibility/test configuration. Browser HTTP cache can
+improve transport latency but is never a required second frame store. Frame
+availability is asynchronous only at the provider loading boundary: once the
+latest required frames are available, provider temporal reconstruction,
+pyramid evaluation, and renderer updates remain synchronous.
 Each downloaded payload is byte/value validated before entering the residency
-store, and a resident frame is never re-downloaded or revalidated until LRU
-eviction requires it again. A source frame is never asynchronously evicted
-during a synchronous evaluation. The prepared spatial rain cache remains a
-separate bounded four-entry cache and is unchanged by source-frame residency.
+store. Full-residency frames are never re-downloaded, revalidated, or evicted
+by timeline interaction. A source frame is never asynchronously evicted during
+a synchronous evaluation. The prepared spatial rain cache remains a separate
+bounded four-entry cache and is unchanged by source-frame residency.
 Optional future
 phenomena are represented in metadata
 as one mutually-exclusive Uint8 node enum per source frame: 0 none, 1–3 storm,
@@ -602,8 +612,10 @@ Aggregation therefore skips guaranteed-dry child statistics but preserves every
 dry child in the cached denominators and retains the same summary API and
 representation-independent physical semantics.
 
-The sequence geometry owns the bounded four-entry spatial source-frame LRU, but
-it does not retain a normal-runtime temporal rain array. A provider frame
+The sequence geometry owns a bounded four-entry prepared spatial source cache,
+but the active loader retains every validated source `Float32Array` in the
+single `sourceFrames` map for the life of the immutable generation. It does not
+retain a normal-runtime temporal rain array. A provider frame
 exposes a prepared temporal sampling capability through `geography.js`; the
 current sequence implementation captures its two prepared Float64 spatial
 source arrays and performs the existing linear interpolation when a summary
@@ -636,13 +648,19 @@ remain dense, so an L13→L14 transition intentionally supports mixed
 dense-reference and packed-direct temporal state while using the existing
 canonical direct-transition relation. Consequently high-LOD temporal CPU
 memory scales with potentially-active samples and the two adjacent keyframes
-rather than the full L14 rectangle. The source sequence independently uses a
-six-frame LRU: the initial three-frame buffer is followed by a rolling forward
-horizon, with HIGH interactive source requirements ahead of LOW prefetch.
-There is no automatic full-sequence resident fill; wide scrubs and backward
-replay may re-request evicted frames. Source residency is bounded independently
-from renderer and pyramid memory. This source-policy change does not alter the
-packed L14 representation, L14 ceiling, or visual semantics.
+rather than the full L14 rectangle. The active source sequence retains all
+validated source frames after the initial three-frame buffer, filling the
+remaining finite sequence in LOW-priority background work. HIGH interactive
+requirements remain ahead of that fill until completion; after completion,
+arbitrary scrub and backward replay require no source fetch. The full source
+payload set is a separate memory domain from bounded derived renderer/LOD
+state: it does not multiply summaries, temporal keyframes, packed instances,
+or renderer-specific copies by frame count. The current LOD materialization
+ranges remain `L10..L13` for stable L10/L11, `L11..L13` for stable L12,
+`L12..L14` for stable L13, and `L13..L14` for stable L14; the packed L14
+representation, L14 ceiling, and visual semantics are unchanged.
+Immutable-generation cleanup/GC remains unrelated to this browser
+source-residency policy.
 
 ```text
 provider source grid

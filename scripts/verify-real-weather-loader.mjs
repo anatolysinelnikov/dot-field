@@ -61,7 +61,10 @@ await withFetch(async (url) => {
     if (url === 'frame-2') return response([0, 0, 0, 3]);
     throw new Error(`unexpected URL ${url}`);
   };
-  const staged = beginRealWeatherSequenceLoad('metadata', { sourceFrameCacheLimit: 2 });
+  const staged = beginRealWeatherSequenceLoad('metadata', {
+    sourceFrameCacheLimit: 2,
+    retainAllSourceFrames: false
+  });
   await staged.supportReady;
   check(requests.join(',') === 'metadata,support', 'metadata and support must not begin a rain-frame request');
   const sequence = await staged.loadSequence(0);
@@ -71,7 +74,7 @@ await withFetch(async (url) => {
   check(!sequence.hasRequiredSourceFrames(0.25), 'interpolated time must require the adjacent unloaded source frame');
   await staged.requestSourceFrame(1);
   await staged.requestSourceFrame(2);
-  check(sequence.sourceFrames.size === 2 && !sequence.isSourceFrameAvailable(0), 'source-frame cache must evict least-recently-used frames at its configured bound');
+  check(sequence.sourceFrames.size === 2 && !sequence.isSourceFrameAvailable(0), 'opt-in bounded source-frame cache must evict least-recently-used frames at its configured bound');
   await staged.requestSourceFrame(0);
   check(sequence.exactSourceFrameAt(0).rainMmh[1] === 1, 'evicted frame reload must retain exact Float32 values');
   globalThis.fetch = original;
@@ -93,4 +96,4 @@ try {
   check(String(error.message).includes('trailing unused bits'), 'support trailing-bit validation must remain explicit');
 }
 
-console.log('real weather loader verification passed: v2 manifest, packed support, initial-frame readiness, bounded LRU reload, and malformed/missing asset handling');
+console.log('real weather loader verification passed: v2 manifest, packed support, initial-frame readiness, opt-in bounded LRU reload, and malformed/missing asset handling');
