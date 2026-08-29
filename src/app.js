@@ -374,11 +374,10 @@ function startWeatherSequence(trigger) {
   return weatherSequencePromise;
 }
 
-// A sequence-asset 404/410 has no heavy binary to defer, so preserve the
-// existing CSV fallback behavior instead of waiting for MapLibre readiness.
-void weatherLoad.metadataReady.then((metadata) => {
-  if (metadata === null) startWeatherSequence('metadata-fallback');
-}).catch((error) => {
+// Metadata may load ahead of the basemap. Generated real-weather assets are
+// required; surface discovery failures immediately while keeping the first
+// source-frame request gated by basemap readiness.
+void weatherLoad.metadataReady.catch((error) => {
   console.error('Unable to load weather metadata.', error);
 });
 

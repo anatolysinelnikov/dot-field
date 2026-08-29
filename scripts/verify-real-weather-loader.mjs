@@ -85,7 +85,7 @@ await withFetch(async (url) => url === 'metadata'
   : new Response('', { status: 404 }), async () => {
   await beginRealWeatherSequenceLoad('metadata').loadSequence()
     .then(() => { throw new Error('missing frame must reject'); })
-    .catch((error) => check(error instanceof RealWeatherSequenceAssetsUnavailableError, 'missing source frame must retain the asset fallback signal'));
+    .catch((error) => check(error instanceof RealWeatherSequenceAssetsUnavailableError, 'missing source frame must retain the explicit asset-unavailable error type'));
 });
 
 check(decodePackedWeatherSupport(Uint8Array.of(0b00011111).buffer, 5).join(',') === '1,1,1,1,1', 'support decoder must accept zero trailing unused bits');
