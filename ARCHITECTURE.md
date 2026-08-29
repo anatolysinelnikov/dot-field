@@ -74,11 +74,11 @@ provider format -> validation -> temporal/spatial interpolation
 storage, and representation-independent geographic reconstruction. The active
 sequence samples physical `rainMmh` bilinearly from four geographic source nodes
 and linearly between its adjacent source frames; storm and hail are independent
-channels, but the current rain-only sequence explicitly declares both unavailable. Rain remains physical `mm/h`
-through interpolation, sampling, LOD reduction, and scalar-lattice
-reconstruction; renderer presentation mappings may use the named 50 mm/h visual
-anchor but do not clamp the data field. The RAW midpoint-cell diagnostic does
-not constrain this reconstruction. The legacy synthetic
+channels, but the current rain-only sequence explicitly declares both unavailable.
+Rain remains physical `mm/h` through interpolation, sampling, LOD reduction, and
+scalar-lattice reconstruction; renderer presentation mappings may use the named
+50 mm/h visual anchor but do not clamp the data field. The RAW midpoint-cell
+diagnostic does not constrain this reconstruction. The legacy synthetic
 `field.js` remains independent of MapLibre, WebGL, and UI but is not on the
 active data path.
 
@@ -399,9 +399,9 @@ The timeline may visualize actual resident source-frame pairs as muted blue
 segments inside its existing track. Residency snapshots and change callbacks
 come from the loading/provider layer; the app converts adjacent resident
 indices to visual intervals without changing timeline semantics, playback
-scheduling, or source-loading policy. Non-sequence compatibility/test fields leave the
-track neutral. RAW continues to hold its currently selected exact frame for
-behavior-preserving geometry updates; source diagnostics expose that payload
+scheduling, or source-loading policy. Non-sequence compatibility/test fields
+leave the track neutral. RAW continues to hold its currently selected exact frame
+for behavior-preserving geometry updates; source diagnostics expose that payload
 separately, including whether it is outside the sequence LRU after eviction.
 
 ### Physical weather-summary profiles
@@ -837,6 +837,7 @@ textures sized exactly to the inactive support-derived lattice; the fragment
 shader performs explicit four-texel bilinear sampling from those textures. The indexed mesh is
 surface/projection tessellation only. The scalar mesh is a surface-attached
 MapLibre custom 3D layer.
+
 Dots, Squares, and Scalar share the same 100 ms temporal-frame boundary helper
 and MapLibre/WebGL projection-uniform helper. Squares retain CPU and GPU
 instance capacity across updates, and Scalar retains its two fixed-size CPU/GPU
