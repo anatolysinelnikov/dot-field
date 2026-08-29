@@ -241,8 +241,8 @@ button:active { transform: translateY(1px); }
 
 .weather-timestamp-arrow {
   position: relative;
-  flex: 0 0 8px;
-  width: 8px;
+  flex: 0 0 7px;
+  width: 7px;
   height: 5px;
   pointer-events: none;
 }
@@ -252,21 +252,21 @@ button:active { transform: translateY(1px); }
   content: '';
   position: absolute;
   top: 0;
-  width: 5.5px;
-  height: 1.5px;
-  border-radius: 999px;
+  width: 4.25px;
+  height: 1px;
+  border-radius: 1px;
   background: #8794a9;
 }
 
 .weather-timestamp-arrow::before {
-  left: 0;
-  transform: rotate(35deg);
+  left: .5px;
+  transform: rotate(45deg);
   transform-origin: left center;
 }
 
 .weather-timestamp-arrow::after {
-  right: 0;
-  transform: rotate(-35deg);
+  right: .5px;
+  transform: rotate(-45deg);
   transform-origin: right center;
 }
 
