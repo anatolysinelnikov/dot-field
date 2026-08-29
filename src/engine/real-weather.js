@@ -363,7 +363,7 @@ export class RealWeatherSequenceFrame {
 }
 
 export class RealWeatherSequence extends RealWeatherField {
-  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, weatherSupport = null, timestamps, potentialWeatherMask = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
+  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, weatherSupport = null, timestamps, potentialWeatherMask = null, generationId = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
     const frameSize = longitudes.length * latitudes.length;
     const emptyCodes = new Uint8Array(frameSize);
     const emptyChannel = new Float32Array(frameSize);
@@ -385,6 +385,7 @@ export class RealWeatherSequence extends RealWeatherField {
     this.frameCount = frameCount;
     this.frameSize = frameSize;
     this.timestamps = Object.freeze([...timestamps]);
+    this.generationId = generationId;
     this.sourceFrameCacheLimit = sourceFrameCacheLimit;
     this.retainAllSourceFrames = Boolean(retainAllSourceFrames);
     this.onSourceFrameCacheEvent = typeof onSourceFrameCacheEvent === 'function' ? onSourceFrameCacheEvent : null;
@@ -852,6 +853,7 @@ function validateSequenceMetadata(metadata) {
   const rain = objectAt(root.rain, 'rain');
   const supportMask = objectAt(root.support_mask, 'support_mask');
   const source = objectAt(root.source, 'source');
+  const generationId = root.generation_id === undefined ? null : sequenceString(root.generation_id, 'generation_id');
 
   const width = sequenceInteger(grid.width, 'spatial_grid.width');
   const height = sequenceInteger(grid.height, 'spatial_grid.height');
@@ -929,7 +931,7 @@ function validateSequenceMetadata(metadata) {
     longitudeStart, latitudeStart, longitudeSpacing, latitudeSpacing,
     weatherSupport: Object.freeze(supportBounds), timestamps: time.timestamps,
     rainFrameAssets: Object.freeze([...rain.frame_assets]), supportMaskAsset: supportMask.asset,
-    phenomenaAvailable: Boolean(phenomena?.available)
+    phenomenaAvailable: Boolean(phenomena?.available), generationId
   };
 }
 
@@ -1002,7 +1004,7 @@ async function loadSequenceMetadata(metadataUrl, timing) {
   return validated;
 }
 
-function createSourceFrameScheduler({ frameCount, concurrency, sourceFrameCacheLimit, isAvailable, getSourceCacheEntryCount, getResidentSourceFrameIndices, fetchFrame, sourceFrameByteLength, retainAllSourceFrames, onResidencyChange }) {
+function createSourceFrameScheduler({ frameCount, concurrency, generationId, sourceFrameCacheLimit, isAvailable, getSourceCacheEntryCount, getResidentSourceFrameIndices, fetchFrame, sourceFrameByteLength, retainAllSourceFrames, onResidencyChange }) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('Source-frame fetch concurrency must be a positive integer.');
   const requests = new Map();
   const replacementKeys = new Map();
@@ -1035,6 +1037,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, sourceFrameCacheL
     sourceCacheBytes: 0,
     peakSourceCacheBytes: 0,
     sourceFrameCount: frameCount,
+    generationId,
     sourceFrameCacheLimit,
     residentSourceFrameCount: 0,
     residentSourceBytes: 0,
@@ -1258,7 +1261,8 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
       longitudes, latitudes, frameCount: validated.frameCount,
       longitudeSpacing: validated.longitudeSpacing, latitudeSpacing: validated.latitudeSpacing,
       weatherSupport: validated.weatherSupport,
-      timestamps: validated.timestamps, potentialWeatherMask, sourceFrameCacheLimit, retainAllSourceFrames,
+      timestamps: validated.timestamps, potentialWeatherMask, generationId: validated.generationId,
+      sourceFrameCacheLimit, retainAllSourceFrames,
       onSourceFrameCacheEvent: (event) => scheduler?.recordCacheEvent(event)
     });
     sequenceForDiagnostics = sequence;
@@ -1269,6 +1273,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
     scheduler = createSourceFrameScheduler({
       frameCount: validated.frameCount,
       concurrency: sourceFrameFetchConcurrency,
+      generationId: sequence.generationId,
       sourceFrameCacheLimit: sequence.sourceFrameCacheLimit,
       isAvailable: (frameIndex) => sequence.isSourceFrameAvailable(frameIndex),
       getSourceCacheEntryCount: () => sequence.sourceFrames.size,

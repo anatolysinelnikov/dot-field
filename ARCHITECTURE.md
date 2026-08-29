@@ -38,8 +38,9 @@ real geographic weather sequence
 The scalar branch remains implemented for later reintroduction but is not part
 of the current active application/runtime path.
 
-The current data/runtime sequence is: (1) an immutable full-sequence support
-sidecar plus independently delivered exact source frames, (2) viewport- and
+The current data/runtime sequence is: (1) mutable discovery metadata pointing
+to an immutable generation containing the full support sidecar and independently
+delivered exact source frames, (2) viewport- and
 LOD-bounded Dots/Squares topology, and (3) reintroduction of Blur/Areas after
 viewport-windowed scalar reconstruction.
 
@@ -164,10 +165,12 @@ artifact only, without adding it to the repository.
 
 `scripts/generate-brotli-sidecars.mjs` and `scripts/serve-local.mjs` are
 development-only test tooling, not production hosting. The preparation tool
-invokes the generator against its staging directory before atomically publishing
-`data/generated/current`; the generator writes ignored Brotli-9 `.br` sidecars
-alongside the logical source frames and support mask. The manifest and
-application continue to request the original `.f32` and `support.mask` URLs. To test
+invokes the generator against its unpublished staging directory before
+publishing an immutable generation; the generator refuses `current`, published
+generation directories, and manifests that already carry a `generation_id`.
+It writes ignored Brotli-9 `.br` sidecars alongside the logical source frames
+and support mask. The manifest and application request generation-relative
+`.f32` and `support.mask` URLs after metadata discovery. To test
 from a phone/tablet on the same LAN, run either mode from the repository root:
 
 ```text
@@ -279,7 +282,7 @@ MinIO/S3 provider
 → local authenticated downloader
 → data/nc/
 → strict offline NetCDF normalization
-→ data/generated/current/
+→ data/generated/<generation-id>/ plus data/generated/current/metadata.json
 → browser loading/interpolation/sampling
 → renderers
 ```
@@ -298,21 +301,34 @@ MinIO/S3 provider
 → local authenticated downloader
 → ignored data/nc/
 → strict offline NetCDF normalization
-→ ignored data/generated/current/
+→ ignored data/generated/<generation-id>/ plus metadata-only current/
 → browser loading/interpolation/sampling
 → RAW / Dots / Squares
 ```
 
 NetCDF parsing remains offline/local preprocessing. The preparation command
 selects the newest local `YYYYMMDDHHMM.nc` by filename timestamp, invokes the
-existing converter in strict `--sequence` mode, and atomically publishes a
-complete generated directory. The browser consumes the normalized v2 binary
-transport (`metadata.json`, `support.mask`, and Float32 frame assets), never the
-`.nc` file. Raw NetCDF files and generated assets remain outside Git. The
-one-click updater is idempotent: when the newest remote NC is already local and
-`metadata.json` records the same `source.filename`, it skips reconversion. Any
-future automatic periodic scheduling should remain a thin layer around this
-same updater. No renderer or weather-field semantics change in this flow.
+existing converter in strict `--sequence` mode, and generates Brotli sidecars
+in an unpublished staging directory. It validates that complete staging
+output, derives a content-based generation ID, rewrites manifest asset paths to
+`../<generation-id>/...`, publishes that directory atomically, and only then
+atomically replaces the metadata-only `data/generated/current/metadata.json`
+discovery pointer. The browser consumes the normalized v2 binary transport
+(`metadata.json`, `support.mask`, and Float32 frame assets), never the `.nc`
+file. Raw NetCDF files and generated assets remain outside Git. If the
+deterministic generation already exists, preparation verifies its metadata,
+logical assets, and Brotli sidecars before reusing it; it never overwrites a
+published directory. Any future automatic periodic scheduling should remain a
+thin layer around this same updater. No renderer or weather-field semantics
+change in this flow.
+
+`data/generated/current/metadata.json` is mutable discovery only. A loaded
+manifest's `generation_id` and relative asset paths pin a browser session to
+one immutable generation, so later publication cannot change the source bytes
+used by an open page or cause an evicted frame to be loaded from another
+dataset. Published generation directories are intentionally retained; cleanup
+or garbage collection is out of scope because old pages may still request
+their generation's frames.
 
 The current local NC omits precipitation units, so its preparation invocation
 must explicitly add `--assume-units mm/h` after the source semantics have been
@@ -321,7 +337,10 @@ that explicit assumption.
 
 The v2 manifest declares little-endian physical Float32 `mm/h` rain frames;
 dimensions, timestamps, crop, union support, and frame addresses are all
-dataset metadata. Its support is derived from the exact positive union across
+dataset metadata. Generated manifests may additionally expose a
+provider-layer `generation_id`; the loader preserves it in source diagnostics
+without using it as renderer state. Its support is derived from the exact
+positive union across
 every source node and frame, without connected-component selection. The loader
 validates the mask node/byte count and its zero trailing unused bits before
 canonical topology initialization; it never rebuilds support by downloading

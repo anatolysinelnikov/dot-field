@@ -2,7 +2,11 @@ import { request } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { createLocalServer } from './serve-local.mjs';
 
-const framePath = 'data/generated/current/rain/frame-000.f32';
+const currentRoot = new URL('../data/generated/current/', import.meta.url);
+const currentMetadata = JSON.parse(await readFile(new URL('metadata.json', currentRoot), 'utf8'));
+const frameUrl = new URL(currentMetadata.rain.frame_assets[0], new URL('http://local.invalid/data/generated/current/'));
+const framePath = frameUrl.pathname.slice(1);
+const frameFile = new URL(currentMetadata.rain.frame_assets[0], currentRoot);
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
@@ -26,8 +30,8 @@ const address = server.address();
 if (!address || typeof address === 'string') throw new Error('Local Brotli verifier did not receive a TCP port.');
 
 try {
-  const original = await readFile(framePath);
-  const sidecar = await readFile(`${framePath}.br`);
+  const original = await readFile(frameFile);
+  const sidecar = await readFile(`${frameFile.pathname}.br`);
   const compressed = await rawRequest(address.port, { 'Accept-Encoding': 'br' });
   check(compressed.statusCode === 200, 'Brotli source frame request must succeed');
   check(compressed.headers['content-encoding'] === 'br', 'Brotli source frame must emit Content-Encoding: br');
