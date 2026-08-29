@@ -2,7 +2,7 @@
 """Prepare the newest locally downloaded NetCDF sequence for the browser runtime.
 
 NetCDF parsing and validation remain in convert-netcdf-weather.py. This tool
-selects a source file by its filename timestamp, converts it, generates Brotli
+selects a source file by its filename timestamp, converts it, generates gzip
 transport sidecars, validates an unpublished staging directory, and publishes
 an immutable generation before atomically replacing current/metadata.json.
 """
@@ -206,9 +206,9 @@ def validate_generated_directory(directory: Path, expected_generation_id: str | 
     for asset, path in zip(references, resolved_assets):
         if not path.is_file():
             raise SystemExit(f"generated manifest asset is missing: {asset}")
-        sidecar = Path(f"{path}.br")
+        sidecar = Path(f"{path}.gz")
         if not sidecar.is_file():
-            raise SystemExit(f"generated Brotli sidecar is missing: {sidecar}")
+            raise SystemExit(f"generated gzip sidecar is missing: {sidecar}")
 
     grid = metadata.get("spatial_grid") or {}
     frame_node_count = grid.get("width", 0) * grid.get("height", 0)
@@ -266,9 +266,13 @@ def canonical_metadata(metadata: dict, generation_id: str | None = None) -> byte
 
 
 def logical_files(directory: Path) -> list[Path]:
+    # Exclude both the new gzip sidecars and legacy Brotli sidecars from the
+    # logical weather digest during the transport migration.
     return sorted(
         path for path in directory.rglob("*")
-        if path.is_file() and path.name != "metadata.json" and not path.name.endswith(".br")
+        if path.is_file()
+        and path.name != "metadata.json"
+        and not path.name.endswith((".gz", ".br"))
     )
 
 
@@ -283,7 +287,7 @@ def update_digest(digest, path: Path, relative_path: str) -> None:
 
 def generation_digest(directory: Path, metadata: dict) -> str:
     digest = hashlib.sha256()
-    digest.update(b"dot-field-generated-weather-v1\0")
+    digest.update(b"dot-field-generated-weather-v2\0")
     metadata_bytes = canonical_metadata(metadata)
     digest.update(b"metadata.json\0")
     digest.update(metadata_bytes)
@@ -339,10 +343,10 @@ def verify_existing_generation(
         existing_path = (generation_dir / existing_asset).resolve()
         if file_digest(staged_path) != file_digest(existing_path):
             raise SystemExit(f"existing generation asset differs: {existing_asset}")
-        staged_sidecar = Path(f"{staged_path}.br")
-        existing_sidecar = Path(f"{existing_path}.br")
+        staged_sidecar = Path(f"{staged_path}.gz")
+        existing_sidecar = Path(f"{existing_path}.gz")
         if file_digest(staged_sidecar) != file_digest(existing_sidecar):
-            raise SystemExit(f"existing generation Brotli sidecar differs: {existing_asset}.br")
+            raise SystemExit(f"existing generation gzip sidecar differs: {existing_asset}.gz")
     return existing_metadata
 
 
@@ -356,7 +360,7 @@ def main() -> int:
     staging_dir: Path | None = Path(tempfile.mkdtemp(prefix=".generation-staging-", dir=generated_root))
     current_staging_dir: Path | None = None
     converter = repository_root / "tools" / "convert-netcdf-weather.py"
-    brotli_generator = repository_root / "scripts" / "generate-brotli-sidecars.mjs"
+    gzip_generator = repository_root / "scripts" / "generate-gzip-sidecars.mjs"
     command = [
         sys.executable,
         str(converter),
@@ -382,14 +386,14 @@ def main() -> int:
 
     try:
         subprocess.run(
-            ["node", str(brotli_generator), "--dir", str(staging_dir)],
+            ["node", str(gzip_generator), "--dir", str(staging_dir)],
             cwd=repository_root,
             check=True,
         )
     except subprocess.CalledProcessError as error:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise SystemExit(
-            f"weather preparation failed during Brotli sidecar generation (exit {error.returncode})"
+            f"weather preparation failed during gzip sidecar generation (exit {error.returncode})"
         ) from error
     except Exception:
         shutil.rmtree(staging_dir, ignore_errors=True)

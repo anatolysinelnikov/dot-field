@@ -163,29 +163,36 @@ artifact only, without adding it to the repository.
 
 ### Local LAN compression verification
 
-`scripts/generate-brotli-sidecars.mjs` and `scripts/serve-local.mjs` are
+`scripts/generate-gzip-sidecars.mjs` and `scripts/serve-local.mjs` are
 development-only test tooling, not production hosting. The preparation tool
 invokes the generator against its unpublished staging directory before
 publishing an immutable generation; the generator refuses `current`, published
 generation directories, and manifests that already carry a `generation_id`.
-It writes ignored Brotli-9 `.br` sidecars alongside the logical source frames
+It writes ignored gzip-level-9 `.gz` sidecars alongside the logical source frames
 and support mask. The manifest and application request generation-relative
 `.f32` and `support.mask` URLs after metadata discovery. To test
 from a phone/tablet on the same LAN, run either mode from the repository root:
 
 ```text
 node scripts/serve-local.mjs --host 0.0.0.0 --port 8000 --compression identity
-node scripts/serve-local.mjs --host 0.0.0.0 --port 8000 --compression br
+node scripts/serve-local.mjs --host 0.0.0.0 --port 8000 --compression gzip
 ```
 
 Open `http://<computer-LAN-IP>:8000/` on the device. The server prints a
 detected Network URL when possible; it is intentionally an HTTP development
-server and must not be exposed to the Internet. In `br` mode, a request for a
-logical source URL such as `rain/frame-000.f32` receives its `.br` sidecar only
-when the client advertises `Accept-Encoding: br`, with `Content-Encoding: br`,
+server and must not be exposed to the Internet. In `gzip` mode, a request for a
+logical source URL such as `rain/frame-000.f32` receives its `.gz` sidecar only
+when the client advertises `Accept-Encoding: gzip`, with `Content-Encoding: gzip`,
 `Vary: Accept-Encoding`, and the encoded `Content-Length`. Browser fetch
 transparently returns the original exact Float32 bytes; HTTP content coding is
 transport behavior, not a provider-format change.
+
+The preparation digest uses the `dot-field-generated-weather-v2` namespace for
+the gzip-era artifact contract. Logical metadata and weather files determine
+the digest; `.gz` transport bytes are excluded. This namespace bump means an
+identical logical dataset prepared under the new contract receives a new
+immutable generation ID, so already-published Brotli-era directories are never
+mutated and old sessions remain able to resolve their original assets.
 
 The finite source forecast traverses from 22:00 to 01:00 in the existing
 18-second UI duration: normalized time 0 samples frame 0 and normalized time 1
@@ -262,7 +269,7 @@ the packed active count for each direct level, and whether each active level is
 array floor split between sampling geometry, centered contribution relations,
 transition parents, and direct-transition relations. Weather Resource Timing
 records retain sanitized same-origin relative paths and expose transfer,
-encoded, and decoded sizes for Brotli comparison.
+encoded, and decoded sizes for gzip comparison.
 
 The weather-loader diagnostics also expose generation identity, source frame
 count and sorted resident indices, exact resident source bytes, the active
@@ -316,7 +323,7 @@ MinIO/S3 provider
 
 NetCDF parsing remains offline/local preprocessing. The preparation command
 selects the newest local `YYYYMMDDHHMM.nc` by filename timestamp, invokes the
-existing converter in strict `--sequence` mode, and generates Brotli sidecars
+existing converter in strict `--sequence` mode, and generates gzip sidecars
 in an unpublished staging directory. It validates that complete staging
 output, derives a content-based generation ID, rewrites manifest asset paths to
 `../<generation-id>/...`, publishes that directory atomically, and only then
@@ -325,7 +332,7 @@ discovery pointer. The browser consumes the normalized v2 binary transport
 (`metadata.json`, `support.mask`, and Float32 frame assets), never the `.nc`
 file. Raw NetCDF files and generated assets remain outside Git. If the
 deterministic generation already exists, preparation verifies its metadata,
-logical assets, and Brotli sidecars before reusing it; it never overwrites a
+logical assets, and gzip sidecars before reusing it; it never overwrites a
 published directory. Any future automatic periodic scheduling should remain a
 thin layer around this same updater. No renderer or weather-field semantics
 change in this flow.

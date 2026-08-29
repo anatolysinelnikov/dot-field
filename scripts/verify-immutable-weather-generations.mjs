@@ -2,13 +2,13 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { brotliCompress, constants } from 'node:zlib';
+import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { createLocalServer } from './serve-local.mjs';
 import { beginRealWeatherSequenceLoad } from '../src/engine/real-weather.js';
 
-const compress = promisify(brotliCompress);
-const compressOptions = { params: { [constants.BROTLI_PARAM_QUALITY]: 9 } };
+const compress = promisify(gzip);
+const compressOptions = { level: 9 };
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
@@ -73,12 +73,12 @@ async function publishGeneration(root, generationId, width, height, value) {
   const support = Buffer.alloc(Math.ceil(width * height / 8));
   support[0] = (1 << (width * height)) - 1;
   await writeFile(join(directory, 'support.mask'), support);
-  await writeFile(`${join(directory, 'support.mask')}.br`, await compress(support, compressOptions));
+  await writeFile(`${join(directory, 'support.mask')}.gz`, await compress(support, compressOptions));
   for (let index = 0; index < 3; index++) {
     const frame = Buffer.from(new Float32Array(width * height).fill(value + index).buffer);
     const path = join(directory, 'rain', `frame-${index}.f32`);
     await writeFile(path, frame);
-    await writeFile(`${path}.br`, await compress(frame, compressOptions));
+    await writeFile(`${path}.gz`, await compress(frame, compressOptions));
   }
   return metadata;
 }
@@ -90,7 +90,7 @@ globalThis.fetch = async (url, options) => {
   requestedUrls.push(String(url));
   return originalFetch(url, options);
 };
-const server = createLocalServer({ root, compression: 'br' });
+const server = createLocalServer({ root, compression: 'gzip' });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const address = server.address();
 const baseUrl = `http://127.0.0.1:${address.port}`;
@@ -103,10 +103,10 @@ try {
   await mkdir(join(root, 'current'), { recursive: true });
   await writeFile(join(root, 'current', 'metadata.json'), `${JSON.stringify(metadataA)}\n`);
 
-  const compressed = await rawRequest(address.port, `/${generationA}/rain/frame-0.f32`, { 'Accept-Encoding': 'br' });
-  const sidecar = await readFile(join(root, generationA, 'rain', 'frame-0.f32.br'));
-  check(compressed.headers['content-encoding'] === 'br', 'immutable generation frame must serve Brotli');
-  check(compressed.body.equals(sidecar), 'immutable generation Brotli response must equal its sidecar');
+  const compressed = await rawRequest(address.port, `/${generationA}/rain/frame-0.f32`, { 'Accept-Encoding': 'gzip' });
+  const sidecar = await readFile(join(root, generationA, 'rain', 'frame-0.f32.gz'));
+  check(compressed.headers['content-encoding'] === 'gzip', 'immutable generation frame must serve gzip');
+  check(compressed.body.equals(sidecar), 'immutable generation gzip response must equal its sidecar');
 
   const oldSession = beginRealWeatherSequenceLoad(currentMetadataUrl, { sourceFrameCacheLimit: 2 });
   const oldSequence = await oldSession.loadSequence(0);
