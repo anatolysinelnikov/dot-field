@@ -2,8 +2,8 @@
 """Prepare the newest locally downloaded NetCDF sequence for the browser runtime.
 
 NetCDF parsing and validation remain in convert-netcdf-weather.py. This tool
-only selects a source file by its filename timestamp and publishes a complete
-converted sequence to data/generated/current/.
+selects a source file by its filename timestamp, converts it, generates Brotli
+transport sidecars, and publishes a complete sequence to data/generated/current/.
 """
 
 from __future__ import annotations
@@ -123,6 +123,7 @@ def main() -> int:
     generated_root.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=".current-staging-", dir=generated_root))
     converter = repository_root / "tools" / "convert-netcdf-weather.py"
+    brotli_generator = repository_root / "scripts" / "generate-brotli-sidecars.mjs"
     command = [
         sys.executable,
         str(converter),
@@ -139,10 +140,30 @@ def main() -> int:
     print(f"selected source: {source.name}")
     try:
         subprocess.run(command, cwd=repository_root, check=True)
-        replace_active_output(staging_dir, output_dir)
     except subprocess.CalledProcessError as error:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise SystemExit(f"weather preparation failed during conversion (exit {error.returncode})") from error
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    try:
+        subprocess.run(
+            ["node", str(brotli_generator), "--dir", str(staging_dir)],
+            cwd=repository_root,
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise SystemExit(
+            f"weather preparation failed during Brotli sidecar generation (exit {error.returncode})"
+        ) from error
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    try:
+        replace_active_output(staging_dir, output_dir)
     except Exception:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise

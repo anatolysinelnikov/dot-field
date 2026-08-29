@@ -168,14 +168,14 @@ artifact only, without adding it to the repository.
 ### Local LAN compression verification
 
 `scripts/generate-brotli-sidecars.mjs` and `scripts/serve-local.mjs` are
-development-only test tooling, not production hosting. The generator writes
-ignored Brotli-9 `.br` sidecars alongside the logical source frames and support
-mask; the manifest and application continue to request the original `.f32` and
-`.mask` URLs. To test from a phone/tablet on the same LAN, first generate the
-sidecars, then run either mode from the repository root:
+development-only test tooling, not production hosting. The preparation tool
+invokes the generator against its staging directory before atomically publishing
+`data/generated/current`; the generator writes ignored Brotli-9 `.br` sidecars
+alongside the logical source frames and support mask. The manifest and
+application continue to request the original `.f32` and `support.mask` URLs. To test
+from a phone/tablet on the same LAN, run either mode from the repository root:
 
 ```text
-node scripts/generate-brotli-sidecars.mjs
 node scripts/serve-local.mjs --host 0.0.0.0 --port 8000 --compression identity
 node scripts/serve-local.mjs --host 0.0.0.0 --port 8000 --compression br
 ```
