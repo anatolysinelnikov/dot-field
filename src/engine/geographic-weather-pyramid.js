@@ -37,6 +37,7 @@ export const RAIN_COVERAGE_THRESHOLDS_MMH = Object.freeze([
 ]);
 export const WEATHER_SUMMARY_PROFILE_GENERIC = 'generic';
 export const WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY = 'rain-only-display';
+export const WEATHER_DIRECT_STATE_PACKED = 'packed-direct';
 const COMPACT_RAIN_COVERAGE_THRESHOLDS_MMH = Object.freeze([0.05, 2.5]);
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 const AGGREGATION_RELATION_CACHE_LIMIT = 12;
@@ -117,6 +118,7 @@ export function createWeatherSummary(levelData, reusable = null, ArrayType = Flo
 
   const length = levelData.count;
   const summary = {
+    representation: 'dense-summary',
     profile,
     level: levelData.level,
     levelData,
@@ -137,6 +139,36 @@ export function createWeatherSummary(levelData, reusable = null, ArrayType = Flo
   summary.hailWeightedSeverity = new ArrayType(length);
   summary.hailMaxSeverity = new ArrayType(length);
   return summary;
+}
+
+function packedDirectStateMatches(state, levelData, activeIndices, ArrayType, profile) {
+  return state?.representation === WEATHER_DIRECT_STATE_PACKED
+    && state.levelData === levelData
+    && state.profile === profile
+    && state.potentialActiveIndices === activeIndices
+    && state.channels?.rainMmh?.length === activeIndices.length
+    && state.channels.rainMmh.constructor === ArrayType
+    && state.coverageMasks?.rain?.length === activeIndices.length;
+}
+
+function createPackedDirectWeatherState(levelData, activeIndices, ArrayType, profile, reusable = null) {
+  if (packedDirectStateMatches(reusable, levelData, activeIndices, ArrayType, profile)) return reusable;
+  const state = {
+    representation: WEATHER_DIRECT_STATE_PACKED,
+    profile,
+    level: levelData.level,
+    levelData,
+    potentialActiveIndices: activeIndices,
+    channels: { rainMmh: new ArrayType(activeIndices.length) },
+    coverageMasks: { rain: new Uint8Array(activeIndices.length) }
+  };
+  if (profile !== WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) {
+    state.channels.storm = new ArrayType(activeIndices.length);
+    state.channels.hail = new ArrayType(activeIndices.length);
+    state.coverageMasks.storm = new Uint8Array(activeIndices.length);
+    state.coverageMasks.hail = new Uint8Array(activeIndices.length);
+  }
+  return state;
 }
 
 export function rainCoverageWeightForThreshold(summary, threshold) {
@@ -506,9 +538,51 @@ export function buildAggregationSetup(topology, ArrayType = Float32Array, reuse 
 
 export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, ArrayType = Float32Array, samplingGeometry = null, totalWeight = null) {
   const profile = summaryProfileForFrame(frame);
+  const activeIndices = samplingGeometry?.potentialActiveIndices ?? null;
+  if (levelData.level > WEATHER_REFERENCE_LEVEL && activeIndices) {
+    const state = createPackedDirectWeatherState(levelData, activeIndices, ArrayType, profile, reusable);
+    const temporalRain = frame?.supportsRainOnlyPreparedTemporalSampling === true
+      ? geographicPrepareTemporalSampling(frame, samplingGeometry)
+      : null;
+    const batchRain = !temporalRain && samplingGeometry && typeof frame.samplePreparedBatch === 'function'
+      ? geographicPreparedIntensityAtGeometryBatch(frame, samplingGeometry)
+      : null;
+    const value = { rainMmh: 0, storm: 0, hail: 0 };
+    const storedValue = ArrayType === Float32Array ? Math.fround : (number) => number;
+    for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
+      const index = activeIndices[activeIndex];
+      if (temporalRain) {
+        value.rainMmh = temporalRain(activeIndex);
+        value.storm = 0;
+        value.hail = 0;
+      } else if (batchRain) {
+        value.rainMmh = batchRain[activeIndex];
+        value.storm = 0;
+        value.hail = 0;
+      } else if (samplingGeometry) geographicPreparedIntensityAtGeometry(frame, samplingGeometry, index, value);
+      else {
+        const longitude = mercatorXToLongitude(mercatorXForIndex(levelData, index));
+        const latitude = mercatorYToLatitude(mercatorYForIndex(levelData, index));
+        geographicPreparedIntensityAtXY(frame, longitude, latitude, value);
+      }
+      const rainMmh = value.rainMmh;
+      state.channels.rainMmh[activeIndex] = storedValue(rainMmh);
+      let rainMask = 0;
+      for (let thresholdIndex = 0; thresholdIndex < RAIN_COVERAGE_THRESHOLDS_MMH.length; thresholdIndex++) {
+        if (rainMmh >= RAIN_COVERAGE_THRESHOLDS_MMH[thresholdIndex]) rainMask |= 1 << thresholdIndex;
+      }
+      state.coverageMasks.rain[activeIndex] = rainMask;
+      if (profile === WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) continue;
+      state.channels.storm[activeIndex] = storedValue(value.storm);
+      state.channels.hail[activeIndex] = storedValue(value.hail);
+      state.coverageMasks.storm[activeIndex] = value.storm > 0 ? 1 : 0;
+      state.coverageMasks.hail[activeIndex] = value.hail > 0 ? 1 : 0;
+    }
+    return state;
+  }
+
   const summary = createWeatherSummary(levelData, reusable, ArrayType, totalWeight, profile);
   initializeDirectTotalWeight(summary);
-  const activeIndices = samplingGeometry?.potentialActiveIndices ?? null;
   const previousActiveIndices = summary.potentialActiveIndices;
   if (activeIndices && previousActiveIndices !== activeIndices) {
     zeroWeatherFields(summary, previousActiveIndices || null);
@@ -909,9 +983,9 @@ export class GeographicWeatherPyramid {
         for (const values of geometry.spatialRainCache.values()) samplingGeometryBytes += bytes(values);
       }
     }
-    let relationBytes = 0;
+    let centeredRelationBytes = 0;
     for (const relation of this.centeredRelations.values()) {
-      relationBytes += [
+      centeredRelationBytes += [
         relation.x?.candidateCounts,
         relation.x?.rawCandidateCounts,
         relation.x?.candidateIndices,
@@ -920,19 +994,27 @@ export class GeographicWeatherPyramid {
         relation.y?.candidateIndices
       ].reduce((total, value) => total + bytes(value), 0);
     }
+    let transitionParentBytes = 0;
     for (const relation of this.topology?.transitionParents?.values?.() || []) {
-      relationBytes += [relation.childOffsets, relation.childIndices, relation.parentIndexByChild]
+      transitionParentBytes += [relation.childOffsets, relation.childIndices, relation.parentIndexByChild]
         .reduce((total, value) => total + bytes(value), 0);
     }
+    let directTransitionRelationBytes = 0;
     for (const relation of this.topology?.directTransitionRelations?.values?.() || []) {
-      relationBytes += [relation.lowerToHigherColumns, relation.lowerToHigherRows]
+      directTransitionRelationBytes += [relation.lowerToHigherColumns, relation.lowerToHigherRows]
         .reduce((total, value) => total + bytes(value), 0);
     }
+    const relationBytes = centeredRelationBytes + transitionParentBytes + directTransitionRelationBytes;
     return {
       counters: { ...this.diagnostics },
       samplingGeometryCount: this.samplingGeometries.size,
       samplingGeometryBytes,
       knownRelationBytes: relationBytes,
+      relationByteBreakdown: {
+        centeredContributionRelations: centeredRelationBytes,
+        transitionParents: transitionParentBytes,
+        directTransitionRelations: directTransitionRelationBytes
+      },
       knownTypedArrayBytes: samplingGeometryBytes + relationBytes,
       topologySetupTimings: this.topologySetupTimings ? { ...this.topologySetupTimings } : null,
       materializedLevels: [...this.levels.keys()]

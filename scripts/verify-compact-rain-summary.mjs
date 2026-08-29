@@ -34,6 +34,21 @@ function genericFrame(frame) {
 }
 function compare(level, compact, generic) {
   if (compact.profile !== WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY || generic.profile !== WEATHER_SUMMARY_PROFILE_GENERIC) throw new Error(`L${level}: incorrect profile`);
+  if (compact.representation === 'packed-direct') {
+    if (generic.representation !== 'packed-direct' || compact.levelData !== generic.levelData) {
+      throw new Error(`L${level}: direct states did not select the same packed representation`);
+    }
+    for (const field of ['rainMmh']) same(compact.channels[field], generic.channels[field], `L${level}.channels.${field}`);
+    same(compact.coverageMasks.rain, generic.coverageMasks.rain, `L${level}.coverageMasks.rain`);
+    const compactDots = mapDotsWeatherSummary(compact);
+    const genericDots = mapDotsWeatherSummary(generic);
+    for (const field of mappedDots) same(compactDots[field], genericDots[field], `L${level}.Dots.${field}`);
+    const compactSquares = mapSquaresWeatherSummary(compact);
+    const genericSquares = mapSquaresWeatherSummary(generic);
+    for (const field of mappedSquares) same(compactSquares[field], genericSquares[field], `L${level}.Squares.${field}`);
+    if (compact.potentialActiveIndices.length >= compact.levelData.count) throw new Error(`L${level}: packed direct state did not reduce the active index set`);
+    return;
+  }
   for (const field of fields) same(compact[field], generic[field], `L${level}.${field}`);
   for (const threshold of [0.05, 2.5]) same(rainCoverageWeightForThreshold(compact, threshold), rainCoverageWeightForThreshold(generic, threshold), `L${level}.coverage@${threshold}`);
   same(compact.potentialActiveIndices, generic.potentialActiveIndices, `L${level}.potentialActiveIndices`);

@@ -5,7 +5,7 @@ import {
   dotsStrongRainMmhToRadiusFraction,
   rainMmhToRadiusFraction
 } from './precipitation-mapping.js';
-import { GeographicWeatherPyramid, WEATHER_REFERENCE_LEVEL, rainCoverageWeightForThreshold, WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY } from './geographic-weather-pyramid.js';
+import { GeographicWeatherPyramid, WEATHER_DIRECT_STATE_PACKED, WEATHER_REFERENCE_LEVEL, rainCoverageWeightForThreshold, WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY } from './geographic-weather-pyramid.js';
 import { canonicalWindowsEqual, MAX_GRID_LEVEL, mercatorXForIndex, mercatorYForIndex } from './geographic-lod.js';
 import { geographicHazardRadii, geographicHazardRadiusForSeverity } from './hazard-renderer.js';
 
@@ -82,8 +82,29 @@ function weatherTypesForMapped(mapped) {
 }
 
 function makeMappedState(length, layout, reusable) {
-  if (reusable?.layout === layout && reusable.rainRadius?.length === length) return reusable;
-  const state = { layout, rainRadius: new Float32Array(length), strongRadius: new Float32Array(length) };
+  if (reusable?.representation === 'dense-mapped' && reusable.layout === layout && reusable.rainRadius?.length === length) return reusable;
+  const state = { representation: 'dense-mapped', layout, rainRadius: new Float32Array(length), strongRadius: new Float32Array(length) };
+  if (layout === 'full') {
+    state.stormRadius = new Float32Array(length);
+    state.hailRadius = new Float32Array(length);
+  }
+  return state;
+}
+
+function makePackedMappedState(summary, layout, reusable) {
+  const length = summary.potentialActiveIndices.length;
+  if (reusable?.representation === WEATHER_DIRECT_STATE_PACKED
+    && reusable.layout === layout
+    && reusable.potentialActiveIndices === summary.potentialActiveIndices
+    && reusable.rainRadius.length === length) return reusable;
+  const state = {
+    representation: WEATHER_DIRECT_STATE_PACKED,
+    layout,
+    levelData: summary.levelData,
+    potentialActiveIndices: summary.potentialActiveIndices,
+    rainRadius: new Float32Array(length),
+    strongRadius: new Float32Array(length)
+  };
   if (layout === 'full') {
     state.stormRadius = new Float32Array(length);
     state.hailRadius = new Float32Array(length);
@@ -131,6 +152,24 @@ function prepareMappedActiveSet(state, activeIndices) {
 // Pure presentation mapping: physical summary values never feed a coarser LOD.
 export function mapDotsWeatherSummary(summary, reusable = null) {
   const layout = mappedLayoutForSummary(summary);
+  if (summary.representation === WEATHER_DIRECT_STATE_PACKED) {
+    const state = makePackedMappedState(summary, layout, reusable);
+    const spacing = summary.levelData.spacing;
+    const rainValues = summary.channels.rainMmh;
+    const rainMask = summary.coverageMasks.rain;
+    for (let position = 0; position < rainValues.length; position++) {
+      const rainMmh = rainValues[position];
+      const rainCoverage = rainMask[position] & 1 ? 1 : 0;
+      state.rainRadius[position] = spacing * Math.sqrt(rainCoverage) * rainMmhToRadiusFraction(rainMmh);
+      state.strongRadius[position] = dotsStrongRainMmhToRadius(rainMmh, spacing);
+      if (layout !== 'full') continue;
+      geographicHazardRadii({
+        storm: summary.channels.storm[position],
+        hail: summary.channels.hail[position]
+      }, spacing, state);
+    }
+    return state;
+  }
   const state = makeMappedState(summary.levelData.count, layout, reusable);
   const activeIndices = summary.potentialActiveIndices;
   prepareMappedActiveSet(state, activeIndices);
@@ -248,6 +287,17 @@ function knownArrayBytes(value, seen = null) {
 
 function summaryBytes(summary, seen) {
   if (!summary) return 0;
+  if (summary.representation === WEATHER_DIRECT_STATE_PACKED) {
+    return [
+      summary.potentialActiveIndices,
+      summary.channels?.rainMmh,
+      summary.channels?.storm,
+      summary.channels?.hail,
+      summary.coverageMasks?.rain,
+      summary.coverageMasks?.storm,
+      summary.coverageMasks?.hail
+    ].reduce((total, value) => total + knownArrayBytes(value, seen), 0);
+  }
   return [
     summary.totalWeight,
     summary.potentialActiveIndices,
@@ -273,17 +323,18 @@ function mappedStateBytes(mapped, seen) {
   ].reduce((total, value) => total + knownArrayBytes(value, seen), 0);
 }
 
-function temporalStateBytes(temporal) {
-  if (!temporal) return 0;
+function temporalStateBreakdown(temporal) {
+  if (!temporal) return { physicalSummaryBytes: 0, mappedPresentationBytes: 0 };
   const seen = new Set();
-  let bytes = 0;
+  let physicalSummaryBytes = 0;
+  let mappedPresentationBytes = 0;
   for (const [level, levelState] of temporal.levels) {
     for (const frameState of [levelState.frames0, levelState.frames1]) {
-      bytes += summaryBytes(frameState?.summaries?.[level], seen);
-      bytes += mappedStateBytes(frameState?.mapped?.[level], seen);
+      physicalSummaryBytes += summaryBytes(frameState?.summaries?.[level], seen);
+      mappedPresentationBytes += mappedStateBytes(frameState?.mapped?.[level], seen);
     }
   }
-  return bytes;
+  return { physicalSummaryBytes, mappedPresentationBytes };
 }
 
 function buildHierarchicalTemporalInstances(coarseTime0, fineTime0, coarseTime1, fineTime1, coarseLevelData, fineLevelData, transitionParents, radiusKey, refining, writer) {
@@ -325,12 +376,89 @@ function buildSameLevelTemporalInstances(time0, time1, levelData, radiusKey, wri
   const count = activeIndices ? activeIndices.length : radii0.length;
   for (let position = 0; position < count; position++) {
     const index = activeIndices ? activeIndices[position] : position;
-    const radius0 = radii0[index];
-    const radius1 = radii1[index];
+    const radius0 = time0.representation === WEATHER_DIRECT_STATE_PACKED ? radii0[position] : radii0[index];
+    const radius1 = time1.representation === WEATHER_DIRECT_STATE_PACKED ? radii1[position] : radii1[index];
     if (!hasTemporalRadius(radius0, radius1)) continue;
     const x = mercatorXForIndex(levelData, index);
     const y = mercatorYForIndex(levelData, index);
     writer.push(x, y, x, y, radius0, radius1, radius0, radius1);
+  }
+  return writer.finish();
+}
+
+function mappedValueReader(mapped, key) {
+  if (mapped.representation !== WEATHER_DIRECT_STATE_PACKED) return { value: (index) => mapped[key][index] };
+  const activeIndices = mapped.potentialActiveIndices;
+  const values = mapped[key];
+  let position = 0;
+  return {
+    value(index) {
+      while (position < activeIndices.length && activeIndices[position] < index) position++;
+      return position < activeIndices.length && activeIndices[position] === index ? values[position] : 0;
+    }
+  };
+}
+
+function sharedHigherIndex(relation, higherIndex) {
+  const row = Math.floor(higherIndex / relation.higher.width);
+  const column = higherIndex - row * relation.higher.width;
+  const alignedRow = row >= relation.sharedHigherRowStart && row <= relation.sharedHigherRowEnd
+    && ((row - relation.sharedHigherRowStart) & 1) === 0;
+  return alignedRow && column >= relation.sharedHigherColumnStart && column <= relation.sharedHigherColumnEnd
+    && ((column - relation.sharedHigherColumnStart) & 1) === 0;
+}
+
+function buildDirectActiveTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, relation, fromIsLower, radiusKey, writer, lowerActive, higherActive) {
+  writer.reset();
+  const lowerTime0 = fromIsLower ? fromTime0 : toTime0;
+  const lowerTime1 = fromIsLower ? fromTime1 : toTime1;
+  const higherTime0 = fromIsLower ? toTime0 : fromTime0;
+  const higherTime1 = fromIsLower ? toTime1 : fromTime1;
+  const lowerReader0 = mappedValueReader(lowerTime0, radiusKey);
+  const lowerReader1 = mappedValueReader(lowerTime1, radiusKey);
+  const higherReader0 = mappedValueReader(higherTime0, radiusKey);
+  const higherReader1 = mappedValueReader(higherTime1, radiusKey);
+  const lowerWidth = relation.lower.width;
+  const higherWidth = relation.higher.width;
+
+  for (let position = 0; position < lowerActive.length; position++) {
+    const lowerIndex = lowerActive[position];
+    const lowerRow = Math.floor(lowerIndex / lowerWidth);
+    const lowerColumn = lowerIndex - lowerRow * lowerWidth;
+    const higherColumn = relation.lowerToHigherColumns[lowerColumn];
+    const higherRowBase = relation.lowerToHigherRows[lowerRow];
+    const higherIndex = higherRowBase >= 0 && higherColumn >= 0 ? higherRowBase + higherColumn : -1;
+    const lowerRadius0 = lowerReader0.value(lowerIndex);
+    const lowerRadius1 = lowerReader1.value(lowerIndex);
+    const higherRadius0 = higherIndex < 0 ? 0 : higherReader0.value(higherIndex);
+    const higherRadius1 = higherIndex < 0 ? 0 : higherReader1.value(higherIndex);
+    if (!hasTemporalRadius(lowerRadius0, lowerRadius1, higherRadius0, higherRadius1)) continue;
+    const lowerX = (relation.lower.minI + lowerColumn) * relation.lower.spacing;
+    const lowerY = (relation.lower.minJ + lowerRow) * relation.lower.spacing;
+    writer.push(lowerX, lowerY, lowerX, lowerY,
+      fromIsLower ? lowerRadius0 : higherRadius0,
+      fromIsLower ? lowerRadius1 : higherRadius1,
+      fromIsLower ? higherRadius0 : lowerRadius0,
+      fromIsLower ? higherRadius1 : lowerRadius1);
+  }
+
+  const higherOnlyReader0 = mappedValueReader(higherTime0, radiusKey);
+  const higherOnlyReader1 = mappedValueReader(higherTime1, radiusKey);
+  for (let position = 0; position < higherActive.length; position++) {
+    const higherIndex = higherActive[position];
+    if (sharedHigherIndex(relation, higherIndex)) continue;
+    const higherRadius0 = higherOnlyReader0.value(higherIndex);
+    const higherRadius1 = higherOnlyReader1.value(higherIndex);
+    if (!hasTemporalRadius(higherRadius0, higherRadius1)) continue;
+    const higherRow = Math.floor(higherIndex / higherWidth);
+    const higherColumn = higherIndex - higherRow * higherWidth;
+    const higherX = (relation.higher.minI + higherColumn) * relation.higher.spacing;
+    const higherY = (relation.higher.minJ + higherRow) * relation.higher.spacing;
+    writer.push(higherX, higherY, higherX, higherY,
+      fromIsLower ? 0 : higherRadius0,
+      fromIsLower ? 0 : higherRadius1,
+      fromIsLower ? higherRadius0 : 0,
+      fromIsLower ? higherRadius1 : 0);
   }
   return writer.finish();
 }
@@ -365,6 +493,15 @@ export function buildDirectTemporalInstancesReference(fromTime0, toTime0, fromTi
 // identical, so the hot loop needs only affine row/column arithmetic and no
 // pair array, canonical lookup, callback, or coordinate object.
 export function buildDirectTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, relation, fromIsLower, radiusKey, writer) {
+  const lowerTime0 = fromIsLower ? fromTime0 : toTime0;
+  const lowerTime1 = fromIsLower ? fromTime1 : toTime1;
+  const higherTime0 = fromIsLower ? toTime0 : fromTime0;
+  const higherTime1 = fromIsLower ? toTime1 : fromTime1;
+  const lowerActive = sharedPotentialActiveIndices(lowerTime0, lowerTime1);
+  const higherActive = sharedPotentialActiveIndices(higherTime0, higherTime1);
+  if (lowerActive && higherActive) {
+    return buildDirectActiveTemporalInstances(fromTime0, toTime0, fromTime1, toTime1, relation, fromIsLower, radiusKey, writer, lowerActive, higherActive);
+  }
   writer.reset();
   const lower = relation.lower;
   const higher = relation.higher;
@@ -825,8 +962,17 @@ export class GeographicDotsLayer {
     const allocatedInstanceBytes = Object.fromEntries(WEATHER_TYPES.map((type) => [type, this.instanceWriters[type].values.byteLength]));
     const gpuInstanceBytes = sumNumbers(Object.values(this.bufferCapacity));
     const staticGpuBytes = QUAD.byteLength * 2 + STORM.byteLength + HAIL.byteLength;
-    const temporalBytes = temporalStateBytes(this.temporal);
+    const temporalBreakdown = temporalStateBreakdown(this.temporal);
+    const temporalBytes = temporalBreakdown.physicalSummaryBytes + temporalBreakdown.mappedPresentationBytes;
     const cpuInstanceBytes = sumNumbers(Object.values(allocatedInstanceBytes));
+    const packedActiveCountByLevel = Object.fromEntries([...this.temporal?.levels || []].map(([level, state]) => {
+      const summary = state.frames0?.summaries?.[level];
+      return [level, summary?.representation === WEATHER_DIRECT_STATE_PACKED
+        ? summary.potentialActiveIndices.length : null];
+    }));
+    const stateRepresentationByLevel = Object.fromEntries([...this.temporal?.levels || []].map(([level, state]) => [
+      level, state.frames0?.summaries?.[level]?.representation || null
+    ]));
     return {
       active: this.active,
       stableLevel: this.transition ? null : this.levelData?.level ?? null,
@@ -842,6 +988,14 @@ export class GeographicDotsLayer {
       bufferCapacity: { ...this.bufferCapacity },
       currentInstanceBytes: sumNumbers(Object.values(instanceByteLengths)),
       cpuBytes: cpuInstanceBytes + temporalBytes,
+      cpuBreakdown: {
+        temporalPhysicalSummaryBytes: temporalBreakdown.physicalSummaryBytes,
+        mappedPresentationBytes: temporalBreakdown.mappedPresentationBytes,
+        instanceWriterAllocatedBytes: cpuInstanceBytes,
+        totalDotsCpuBytes: cpuInstanceBytes + temporalBytes
+      },
+      packedActiveCountByLevel,
+      stateRepresentationByLevel,
       estimatedGpuBufferBytes: gpuInstanceBytes + staticGpuBytes,
       lifecycle: { ...this.lifecycleDiagnostics }
     };

@@ -51,6 +51,10 @@ const hazardDots = mapDotsWeatherSummary(genericSummary(0.5, 0.8)); const hazard
 check(hazardDots.stormRadius.some((value) => value > 0) === false && hazardDots.hailRadius.some((value) => value > 0), 'full Dots keeps hail-over-storm priority');
 check(hazardSquares.stormCoverage.some((value) => value > 0) && hazardSquares.hailCoverage.some((value) => value > 0), 'full Squares keeps available hazard statistics');
 check(buildDots(hazardDots).counts.hail > 0, 'full Dots hazard packing remains active');
-check(mappedBytes(compactDots) * 2 === mappedBytes(zeroDots), 'compact Dots mapped bytes drop by half');
-check(mappedBytes(compactSquares) * 3 < mappedBytes(zeroSquares), 'compact Squares mapped bytes drop by at least three quarters');
+const compactMappedSampleCount = compactSummary.representation === 'packed-direct'
+  ? compactSummary.potentialActiveIndices.length : topology.levels.get(level).count;
+check(mappedBytes(compactDots) === compactMappedSampleCount * 2 * Float32Array.BYTES_PER_ELEMENT, 'compact Dots mapped bytes scale with packed active samples');
+check(mappedBytes(compactSquares) === compactMappedSampleCount * 2 * Float32Array.BYTES_PER_ELEMENT, 'compact Squares mapped bytes scale with packed active samples');
+check(mappedBytes(compactDots) * 2 < mappedBytes(zeroDots), 'compact Dots mapped bytes remain below half of dense hazard reference');
+check(mappedBytes(compactSquares) * 3 < mappedBytes(zeroSquares), 'compact Squares mapped bytes remain below one third of dense hazard reference');
 console.log('RENDERER CHANNEL LAYOUT VERIFICATION PASSED');

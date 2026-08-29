@@ -1,6 +1,6 @@
 import { prepareGeographicFieldFrame } from './geography.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
-import { GeographicWeatherPyramid, rainCoverageWeightForThreshold, WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY } from './geographic-weather-pyramid.js';
+import { GeographicWeatherPyramid, WEATHER_DIRECT_STATE_PACKED, rainCoverageWeightForThreshold, WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY } from './geographic-weather-pyramid.js';
 import { canonicalWindowsEqual, MAX_GRID_LEVEL, mercatorXForIndex, mercatorYForIndex } from './geographic-lod.js';
 import { RAIN_VISIBILITY_SHADER, STRONG_RAIN_SHADER } from './precipitation-mapping.js';
 
@@ -20,6 +20,17 @@ function knownArrayBytes(value, seen = null) {
 
 function summaryBytes(summary, seen) {
   if (!summary) return 0;
+  if (summary.representation === WEATHER_DIRECT_STATE_PACKED) {
+    return [
+      summary.potentialActiveIndices,
+      summary.channels?.rainMmh,
+      summary.channels?.storm,
+      summary.channels?.hail,
+      summary.coverageMasks?.rain,
+      summary.coverageMasks?.storm,
+      summary.coverageMasks?.hail
+    ].reduce((total, value) => total + knownArrayBytes(value, seen), 0);
+  }
   return [
     summary.totalWeight,
     summary.potentialActiveIndices,
@@ -85,8 +96,29 @@ function instanceStrideForLayout(layout) {
 }
 
 function makeMappedState(length, layout, reusable) {
-  if (reusable?.layout === layout && reusable.rainWetMeanMmh?.length === length) return reusable;
-  const state = { layout, rainWetMeanMmh: new Float32Array(length), rainCoverage: new Float32Array(length) };
+  if (reusable?.representation === 'dense-mapped' && reusable.layout === layout && reusable.rainWetMeanMmh?.length === length) return reusable;
+  const state = { representation: 'dense-mapped', layout, rainWetMeanMmh: new Float32Array(length), rainCoverage: new Float32Array(length) };
+  if (layout === 'full') Object.assign(state, {
+    stormCoverage: new Float32Array(length), stormMeanSeverity: new Float32Array(length), stormMaxSeverity: new Float32Array(length),
+    hailCoverage: new Float32Array(length), hailMeanSeverity: new Float32Array(length), hailMaxSeverity: new Float32Array(length)
+  });
+  return state;
+}
+
+function makePackedMappedState(summary, layout, reusable) {
+  const length = summary.potentialActiveIndices.length;
+  if (reusable?.representation === WEATHER_DIRECT_STATE_PACKED
+    && reusable.layout === layout
+    && reusable.potentialActiveIndices === summary.potentialActiveIndices
+    && reusable.rainWetMeanMmh.length === length) return reusable;
+  const state = {
+    representation: WEATHER_DIRECT_STATE_PACKED,
+    layout,
+    levelData: summary.levelData,
+    potentialActiveIndices: summary.potentialActiveIndices,
+    rainWetMeanMmh: new Float32Array(length),
+    rainCoverage: new Float32Array(length)
+  };
   if (layout === 'full') Object.assign(state, {
     stormCoverage: new Float32Array(length), stormMeanSeverity: new Float32Array(length), stormMaxSeverity: new Float32Array(length),
     hailCoverage: new Float32Array(length), hailMeanSeverity: new Float32Array(length), hailMaxSeverity: new Float32Array(length)
@@ -129,6 +161,26 @@ function prepareMappedActiveSet(state, activeIndices) {
 // Pure renderer mapping. Coverage remains separate from wet/positive severity.
 export function mapSquaresWeatherSummary(summary, reusable = null) {
   const layout = mappedLayoutForSummary(summary);
+  if (summary.representation === WEATHER_DIRECT_STATE_PACKED) {
+    const state = makePackedMappedState(summary, layout, reusable);
+    const count = summary.potentialActiveIndices.length;
+    const rainValues = summary.channels.rainMmh;
+    const rainMask = summary.coverageMasks.rain;
+    for (let position = 0; position < count; position++) {
+      state.rainCoverage[position] = rainMask[position] & 1 ? 1 : 0;
+      state.rainWetMeanMmh[position] = rainValues[position];
+      if (layout !== 'full') continue;
+      const stormValue = summary.channels.storm[position];
+      const hailValue = summary.channels.hail[position];
+      state.stormCoverage[position] = summary.coverageMasks.storm[position];
+      state.stormMeanSeverity[position] = stormValue;
+      state.stormMaxSeverity[position] = stormValue;
+      state.hailCoverage[position] = summary.coverageMasks.hail[position];
+      state.hailMeanSeverity[position] = hailValue;
+      state.hailMaxSeverity[position] = hailValue;
+    }
+    return state;
+  }
   const state = makeMappedState(summary.levelData.count, layout, reusable);
   const activeIndices = summary.potentialActiveIndices;
   prepareMappedActiveSet(state, activeIndices);
@@ -453,20 +505,22 @@ export class GeographicSquaresLayer {
     let result = this.instanceData[group];
     if (this.instanceLayouts[group] !== layout) result = new Float32Array();
     if (result.length < length) result = new Float32Array(Math.max(length, result.length * 2, stride * 256));
+    const valueAt = (state, key, index, position) => state.representation === WEATHER_DIRECT_STATE_PACKED
+      ? state[key][position] : state[key][index];
     if (layout === 'rain-only') for (let position = 0, offset = 0; position < count; position++, offset += stride) {
       const index = activeIndices ? activeIndices[position] : position;
       result[offset] = mercatorXForIndex(levelData, index); result[offset + 1] = mercatorYForIndex(levelData, index);
-      result[offset + 2] = state0.rainWetMeanMmh[index]; result[offset + 3] = state0.rainCoverage[index];
-      result[offset + 4] = state1.rainWetMeanMmh[index]; result[offset + 5] = state1.rainCoverage[index];
+      result[offset + 2] = valueAt(state0, 'rainWetMeanMmh', index, position); result[offset + 3] = valueAt(state0, 'rainCoverage', index, position);
+      result[offset + 4] = valueAt(state1, 'rainWetMeanMmh', index, position); result[offset + 5] = valueAt(state1, 'rainCoverage', index, position);
     } else for (let position = 0, offset = 0; position < count; position++, offset += stride) {
       const index = activeIndices ? activeIndices[position] : position;
       result[offset] = mercatorXForIndex(levelData, index); result[offset + 1] = mercatorYForIndex(levelData, index);
-      result[offset + 2] = state0.rainWetMeanMmh[index]; result[offset + 3] = state0.rainCoverage[index];
-      result[offset + 4] = state0.stormCoverage[index]; result[offset + 5] = state0.stormMeanSeverity[index]; result[offset + 6] = state0.stormMaxSeverity[index];
-      result[offset + 7] = state0.hailCoverage[index]; result[offset + 8] = state0.hailMeanSeverity[index]; result[offset + 9] = state0.hailMaxSeverity[index];
-      result[offset + 10] = state1.rainWetMeanMmh[index]; result[offset + 11] = state1.rainCoverage[index];
-      result[offset + 12] = state1.stormCoverage[index]; result[offset + 13] = state1.stormMeanSeverity[index]; result[offset + 14] = state1.stormMaxSeverity[index];
-      result[offset + 15] = state1.hailCoverage[index]; result[offset + 16] = state1.hailMeanSeverity[index]; result[offset + 17] = state1.hailMaxSeverity[index];
+      result[offset + 2] = valueAt(state0, 'rainWetMeanMmh', index, position); result[offset + 3] = valueAt(state0, 'rainCoverage', index, position);
+      result[offset + 4] = valueAt(state0, 'stormCoverage', index, position); result[offset + 5] = valueAt(state0, 'stormMeanSeverity', index, position); result[offset + 6] = valueAt(state0, 'stormMaxSeverity', index, position);
+      result[offset + 7] = valueAt(state0, 'hailCoverage', index, position); result[offset + 8] = valueAt(state0, 'hailMeanSeverity', index, position); result[offset + 9] = valueAt(state0, 'hailMaxSeverity', index, position);
+      result[offset + 10] = valueAt(state1, 'rainWetMeanMmh', index, position); result[offset + 11] = valueAt(state1, 'rainCoverage', index, position);
+      result[offset + 12] = valueAt(state1, 'stormCoverage', index, position); result[offset + 13] = valueAt(state1, 'stormMeanSeverity', index, position); result[offset + 14] = valueAt(state1, 'stormMaxSeverity', index, position);
+      result[offset + 15] = valueAt(state1, 'hailCoverage', index, position); result[offset + 16] = valueAt(state1, 'hailMeanSeverity', index, position); result[offset + 17] = valueAt(state1, 'hailMaxSeverity', index, position);
     }
     this.instanceData[group] = result;
     this.instanceLayouts[group] = layout;

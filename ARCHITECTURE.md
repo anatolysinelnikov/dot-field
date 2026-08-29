@@ -257,8 +257,14 @@ known typed-array sizes, and `diagnostics()` snapshots from RAW, Dots, and
 Squares. RAW reports exact retained precipitation/hazard geometry bytes and
 its existing geometry-build timings. Dots and Squares report active instance
 sizes, capacities, lifecycle counters, and estimated Dot Field GPU buffer
-bytes. Weather Resource Timing records retain sanitized same-origin relative
-paths and expose transfer, encoded, and decoded sizes for Brotli comparison.
+bytes. Dots additionally reports exact temporal physical-summary bytes, mapped
+presentation bytes, instance-writer allocation bytes, total tracked CPU bytes,
+the packed active count for each direct level, and whether each active level is
+`dense-summary` or `packed-direct`. The pyramid reports the exact known typed
+array floor split between sampling geometry, centered contribution relations,
+transition parents, and direct-transition relations. Weather Resource Timing
+records retain sanitized same-origin relative paths and expose transfer,
+encoded, and decoded sizes for Brotli comparison.
 
 Export uses schema version 1 with session metadata, environment, limitations,
 summary, samples, events, and weather resources. MapTiler keys,
@@ -600,9 +606,25 @@ summary object or a full temporal rain array; it retains the cached L12 total
 weights, tests coverage thresholds against the unrounded physical values, and
 applies the existing Float32 L13 storage boundary before weighted sums and
 maxima are accumulated. L12→L11→L10 then uses the existing recursive
-aggregation. Requests that include L13, direct L14/L15 engine requests, and
-providers without this explicit rain-only capability retain the direct-summary
-fallback, including storm and hail channels.
+aggregation. Requests that include L13, providers without this explicit
+rain-only capability, and direct levels without a potentially-active set retain
+the dense direct-summary fallback, including storm and hail channels. For
+direct levels above L13 with a potentially-active set, the pyramid instead
+returns a packed direct physical state: canonical active indices remain in
+row-major order and rain/storm/hail channel values plus compact coverage masks
+are aligned to that list. This state is extensible to independent future
+weather channels and contains no full-topology `totalWeight`, weighted-
+statistic, or per-threshold arrays. Dots and Squares map packed direct values
+into packed presentation arrays; they do not expand L14 back to the rectangular
+topology. L13 remains the weather-reference/aggregation boundary and may
+remain dense, so an L13→L14 transition intentionally supports mixed
+dense-reference and packed-direct temporal state while using the existing
+canonical direct-transition relation. Consequently high-LOD temporal CPU
+memory scales with potentially-active samples and the two adjacent keyframes
+rather than the full L14 rectangle. The source sequence continues to retain
+all 19 validated frames under the existing source-residency policy; this
+representation change does not alter that policy, the L14 ceiling, or visual
+semantics.
 
 ```text
 provider source grid
