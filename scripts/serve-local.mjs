@@ -39,13 +39,18 @@ function sourceAssetCanUseBrotli(pathname) {
   return pathname.endsWith('.f32') || pathname.endsWith('/support.mask');
 }
 
-export function createLocalServer({ root = process.cwd(), compression = 'identity' } = {}) {
+export function createLocalServer({ root = process.cwd(), compression = 'identity', logWeatherRequests = false } = {}) {
   if (compression !== 'identity' && compression !== 'br') throw new Error('compression must be identity or br.');
   const absoluteRoot = resolve(root);
   return createServer(async (request, response) => {
+    let weatherPathname = null;
+    let weatherRequestLogged = false;
+    let servedEncoding = 'identity';
+    let selectedFileBytes = null;
     try {
       const requestUrl = new URL(request.url || '/', 'http://local.invalid');
       let pathname = decodeURIComponent(requestUrl.pathname);
+      if (sourceAssetCanUseBrotli(pathname)) weatherPathname = pathname;
       if (pathname.endsWith('/')) pathname += 'index.html';
       const asset = resolve(absoluteRoot, `.${pathname}`);
       if (asset !== absoluteRoot && !asset.startsWith(`${absoluteRoot}${sep}`)) {
@@ -67,6 +72,13 @@ export function createLocalServer({ root = process.cwd(), compression = 'identit
       }
       const details = await stat(selectedAsset);
       if (!details.isFile()) throw new Error('Not a file');
+      selectedFileBytes = details.size;
+      servedEncoding = encoded ? 'br' : 'identity';
+      if (logWeatherRequests && weatherPathname) {
+        const acceptEncoding = request.headers['accept-encoding'];
+        console.log(`${request.method || 'GET'} ${weatherPathname} | accept-encoding=${JSON.stringify(acceptEncoding ?? '<absent>')} | compression=${compression} | served=${servedEncoding} | bytes=${selectedFileBytes}`);
+        weatherRequestLogged = true;
+      }
       const headers = {
         'Content-Type': contentType(pathname),
         'Content-Length': details.size
@@ -77,6 +89,10 @@ export function createLocalServer({ root = process.cwd(), compression = 'identit
       if (request.method === 'HEAD') return response.end();
       createReadStream(selectedAsset).pipe(response);
     } catch (error) {
+      if (logWeatherRequests && weatherPathname && !weatherRequestLogged) {
+        const acceptEncoding = request.headers['accept-encoding'];
+        console.log(`${request.method || 'GET'} ${weatherPathname} | accept-encoding=${JSON.stringify(acceptEncoding ?? '<absent>')} | compression=${compression} | served=${servedEncoding} | bytes=${selectedFileBytes ?? '<unavailable>'}`);
+      }
       const status = error?.code === 'ENOENT' ? 404 : 400;
       response.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
       response.end(status === 404 ? 'Not found' : 'Bad request');
@@ -85,15 +101,16 @@ export function createLocalServer({ root = process.cwd(), compression = 'identit
 }
 
 function parseArguments(argv) {
-  const options = { host: '127.0.0.1', port: 8000, compression: 'identity', root: process.cwd() };
+  const options = { host: '127.0.0.1', port: 8000, compression: 'identity', root: process.cwd(), logWeatherRequests: false };
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
     if (argument === '--host') options.host = argv[++index];
     else if (argument === '--port') options.port = Number(argv[++index]);
     else if (argument === '--compression') options.compression = argv[++index];
     else if (argument === '--root') options.root = resolve(argv[++index]);
+    else if (argument === '--log-weather-requests') options.logWeatherRequests = true;
     else if (argument === '--help') {
-      console.log('Usage: node scripts/serve-local.mjs [--host 127.0.0.1] [--port 8000] [--compression identity|br] [--root path]');
+      console.log('Usage: node scripts/serve-local.mjs [--host 127.0.0.1] [--port 8000] [--compression identity|br] [--root path] [--log-weather-requests]');
       process.exit(0);
     } else throw new Error(`Unknown argument: ${argument}`);
   }
