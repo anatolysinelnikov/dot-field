@@ -1002,7 +1002,7 @@ async function loadSequenceMetadata(metadataUrl, timing) {
   return validated;
 }
 
-function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getSourceCacheEntryCount, getResidentSourceFrameIndices, fetchFrame, sourceFrameByteLength, retainAllSourceFrames, onResidencyChange }) {
+function createSourceFrameScheduler({ frameCount, concurrency, sourceFrameCacheLimit, isAvailable, getSourceCacheEntryCount, getResidentSourceFrameIndices, fetchFrame, sourceFrameByteLength, retainAllSourceFrames, onResidencyChange }) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('Source-frame fetch concurrency must be a positive integer.');
   const requests = new Map();
   const replacementKeys = new Map();
@@ -1035,6 +1035,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, isAvailable, getS
     sourceCacheBytes: 0,
     peakSourceCacheBytes: 0,
     sourceFrameCount: frameCount,
+    sourceFrameCacheLimit,
     residentSourceFrameCount: 0,
     residentSourceBytes: 0,
     residentSourceFrameIndices: Object.freeze([]),
@@ -1250,6 +1251,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
     return potentialWeatherMask;
   });
   let scheduler = null;
+  let sequenceForDiagnostics = null;
   const sequenceReady = Promise.all([metadataReady, supportReady]).then(([validated, potentialWeatherMask]) => {
     const { longitudes, latitudes } = axesFromSequenceMetadata(validated);
     const sequence = new RealWeatherSequence({
@@ -1259,6 +1261,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
       timestamps: validated.timestamps, potentialWeatherMask, sourceFrameCacheLimit, retainAllSourceFrames,
       onSourceFrameCacheEvent: (event) => scheduler?.recordCacheEvent(event)
     });
+    sequenceForDiagnostics = sequence;
     timing('weather-sequence-construction-complete');
     return sequence;
   });
@@ -1266,6 +1269,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
     scheduler = createSourceFrameScheduler({
       frameCount: validated.frameCount,
       concurrency: sourceFrameFetchConcurrency,
+      sourceFrameCacheLimit: sequence.sourceFrameCacheLimit,
       isAvailable: (frameIndex) => sequence.isSourceFrameAvailable(frameIndex),
       getSourceCacheEntryCount: () => sequence.sourceFrames.size,
       getResidentSourceFrameIndices: () => sequence.residentSourceFrameIndices(),
@@ -1331,7 +1335,18 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
       void schedulerReady.then((frameScheduler) => frameScheduler.setBackgroundPrefetchPaused(paused));
     },
     diagnostics() {
-      return scheduler?.diagnostics() || null;
+      const snapshot = scheduler?.diagnostics();
+      if (!snapshot) return null;
+      const rawFrame = sequenceForDiagnostics?.rawFrame;
+      const rawFrameIndex = Number.isInteger(rawFrame?.frameIndex) ? rawFrame.frameIndex : null;
+      const rawFrameBytes = rawFrame?.mmh?.byteLength || 0;
+      return {
+        ...snapshot,
+        rawExactFrameIndex: rawFrameIndex,
+        rawExactFrameBytes: rawFrameBytes,
+        rawExactFrameOutsideCache: rawFrameIndex !== null
+          && !sequenceForDiagnostics.sourceFrames.has(rawFrameIndex)
+      };
     }
   };
 }

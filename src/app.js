@@ -240,7 +240,7 @@ function diagnosticsEnvironment() {
 }
 
 function diagnosticsSnapshot() {
-  const source = weatherLoad.diagnostics();
+  let source = weatherLoad.diagnostics();
   const raw = rawLayer?.diagnostics() || null;
   const dots = weatherLayer?.diagnostics() || null;
   const squares = squaresLayer?.diagnostics() || null;
@@ -253,6 +253,17 @@ function diagnosticsSnapshot() {
   const estimatedGpuBufferBytes = (raw?.estimatedGpuBufferBytes || 0)
     + (dots?.estimatedGpuBufferBytes || 0)
     + (squares?.estimatedGpuBufferBytes || 0);
+  if (source && raw) {
+    const rawFrameIndex = raw.sourceFrameIndex;
+    source = {
+      ...source,
+      rawLayerExactFrameIndex: rawFrameIndex,
+      rawLayerExactFrameBytes: raw.sourceFramePayloadBytes || 0,
+      rawLayerExactFrameOutsideCache: Number.isInteger(rawFrameIndex)
+        && activeWeatherField?.isSourceFrameAvailable
+        && !activeWeatherField.isSourceFrameAvailable(rawFrameIndex)
+    };
+  }
   let center = null;
   try {
     const point = map.getCenter();

@@ -98,7 +98,7 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
   try {
     field = await loadRealWeatherSequence(
       ACTIVE_REAL_WEATHER_METADATA_URL,
-      { onTiming, retainAllSourceFrames: true }
+      { onTiming }
     );
   } catch (error) {
     if (!(error instanceof RealWeatherSequenceAssetsUnavailableError)) throw error;
@@ -112,7 +112,7 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
 export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = null } = {}) {
   const sequenceLoad = beginRealWeatherSequenceLoad(
     ACTIVE_REAL_WEATHER_METADATA_URL,
-    { onTiming, onResidencyChange, retainAllSourceFrames: true }
+    { onTiming, onResidencyChange }
   );
   let fallbackPromise = null;
   const metadataReady = sequenceLoad.metadataReady.catch((error) => {
@@ -184,12 +184,10 @@ export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = nu
       const field = await this.loadSequence(0);
       if (field.frameCount === undefined) return field;
       await sequenceLoad.requestSourceFrames(sourceFrameIndicesForInitialPlayback(field), { priority: 'high' });
-      // Keep the small rolling horizon first so the resident fill does not
-      // consume LOW work that is immediately useful to playback.
+      // Keep only the small rolling horizon proactive. The sequence cache is
+      // bounded, so a full-sequence resident fill would defeat its policy.
       void rebaseRollingPrefetch(field, 0)
-        .catch((error) => console.error('Unable to prefetch the initial rolling playback weather buffer.', error))
-        .then(() => sequenceLoad.fillAllSourceFrames())
-        .catch((error) => console.error('Unable to fill the resident source-frame sequence.', error));
+        .catch((error) => console.error('Unable to prefetch the initial rolling playback weather buffer.', error));
       return { field, frameIndices: sourceFrameIndicesForInitialPlayback(field) };
     },
     rebaseRollingPrefetch(normalizedTime) {
@@ -202,7 +200,8 @@ export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = nu
       sequenceLoad.setBackgroundPrefetchPaused(paused);
     },
     diagnostics() {
-      return sequenceLoad.diagnostics();
+      const diagnostics = sequenceLoad.diagnostics();
+      return diagnostics ? { ...diagnostics, automaticFullSequenceFill: false } : diagnostics;
     }
   };
 }

@@ -318,9 +318,11 @@ export class RawWeatherLayer {
   diagnostics() {
     const precipitationCpuBytes = this.geometryStats?.precipitationCpuBytes || 0;
     const hazardCpuBytes = this.geometryStats?.hazardCpuBytes || 0;
+    const sourceFramePayloadBytes = this.field?.mmh?.byteLength || 0;
     return {
       active: this.active,
       sourceFrameIndex: Number.isInteger(this.field?.frameIndex) ? this.field.frameIndex : null,
+      sourceFramePayloadBytes,
       wetPrecipitationCellCount: this.geometryStats?.wetPrecipitationCellCount || 0,
       precipitationVertexCount: this.geometryStats?.precipitationVertexCount || 0,
       precipitationCpuBytes,
