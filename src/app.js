@@ -1,6 +1,6 @@
 import { LOD_MORPH_SECONDS, LOOP_SECONDS } from './engine/config.js';
 import { clamp, smoothstep } from './engine/math.js';
-import { beginActiveWeatherLoad, WEATHER_REGION } from './engine/geography.js';
+import { beginActiveWeatherLoad, prepareGeographicSamplingGeometry, WEATHER_REGION } from './engine/geography.js';
 import { residentSourceFrameIntervals } from './timeline-residency.js';
 import {
   MAX_LOGICAL_SAMPLING_ZOOM,
@@ -17,6 +17,7 @@ import {
 import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
+import { GpuMotionReconstructor } from './engine/gpu-motion-reconstruction.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
@@ -72,6 +73,8 @@ let rawWeatherField = null;
 let sourceFrameCount = 1;
 let sourceTimestamps = [];
 let timelineResidencyEnabled = false;
+const gpuMotionExperimentEnabled = new URLSearchParams(window.location.search).get('gpuMotion') === '1';
+let gpuMotionReconstructor = null;
 
 function updateTimelineResidency(residentSourceFrameIndices = []) {
   const intervals = timelineResidencyEnabled
@@ -626,6 +629,46 @@ function commitLevelData(level, levelData) {
   updateLodDiagnostics();
 }
 
+// This is intentionally opt-in. It exercises the existing canonical L14
+// geometry without changing Dots/Squares evaluation or their CPU fallback.
+function installGpuMotionExperiment() {
+  if (!gpuMotionExperimentEnabled || window.__dotFieldGpuMotion) return;
+  window.__dotFieldGpuMotion = {
+    diagnostics() { return gpuMotionReconstructor?.diagnostics() || { active: false, reason: 'not initialized' }; },
+    run(normalizedTime = state.time / LOOP_SECONDS, { measureGpu = true } = {}) {
+      if (!activeWeatherField?.motion) throw new Error('Motion weather assets are not available.');
+      const frame = activeWeatherField.prepareFrame(normalizedTime);
+      for (const index of activeWeatherField.requiredSourceFrames(normalizedTime)) {
+        if (!activeWeatherField.isSourceFrameAvailable(index)) throw new Error(`Source frame ${index} is not resident yet.`);
+      }
+      // The live display range can omit L14 at lower zooms. The experiment
+      // owns a matching current-window L14 descriptor instead of changing
+      // live renderer topology merely to benchmark it.
+      const levelData = new GeographicLodTopology(state.canonicalWindow, { minLevel: 13, maxLevel: 14 }).levels.get(14);
+      const geometry = prepareGeographicSamplingGeometry(frame, levelData, gpuMotionReconstructor?.geometry || null);
+      if (!gpuMotionReconstructor || gpuMotionReconstructor.geometry !== geometry) {
+        gpuMotionReconstructor?.destroy();
+        const created = GpuMotionReconstructor.create({ sequence: activeWeatherField, geometry });
+        if (!created.active) return { active: false, reason: created.reason };
+        gpuMotionReconstructor = created.value;
+      }
+      return gpuMotionReconstructor.update(frame, { measureGpu });
+    },
+    validate(normalizedTime = state.time / LOOP_SECONDS, options = {}) {
+      this.run(normalizedTime, { measureGpu: false });
+      return gpuMotionReconstructor.validate(activeWeatherField.prepareFrame(normalizedTime), options);
+    },
+    validateSuite() {
+      const times = [0, 1 / 18, .5 / 18, .25, .347, .5, .777, 1];
+      return times.map((time) => this.validate(time));
+    },
+    rapidScrub() {
+      return [0, 1, .3, .9, .1, .7].map((time) => ({ time, ...this.run(time) }));
+    }
+  };
+  console.info('GPU motion experiment available at window.__dotFieldGpuMotion (experimental; CPU remains active).');
+}
+
 function tryInitializeWeatherLayer() {
   if (state.mapReady || !state.styleReady || !state.weatherReady) return;
   const initialBounds = visibleMercatorBounds();
@@ -743,6 +786,7 @@ function tryInitializeWeatherLayer() {
   markStartup('initial-weather-topology-ready');
   markStartup('first-weather-keyframe-evaluated');
   markStartup('first-renderer-instance-payload-ready');
+  installGpuMotionExperiment();
   map.triggerRepaint();
 }
 

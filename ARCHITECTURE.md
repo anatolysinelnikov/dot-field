@@ -439,6 +439,34 @@ rain summaries. This v1 local matcher cannot reliably model deformation,
 rotation, occlusion, or newly formed rain. Use `?temporal=linear` for a
 development-only A/B comparison; RAW remains exact under either mode.
 
+### Experimental GPU motion reconstruction
+
+`src/engine/gpu-motion-reconstruction.js` is an opt-in WebGL2 proof of
+concept, exposed only when the application is loaded with `?gpuMotion=1`.
+It does not replace the CPU path: `RealWeatherSequence` remains the semantic
+reference and the production Dots/Squares evaluator. The experiment creates a
+separate current-window canonical L14 geometry so it never changes the live
+renderer topology at lower zooms. That one-time geometry upload is an `RG32F`
+source-grid-coordinate texture. On an interval update it uploads only the two
+required Float32 source frames to reusable `R16F` rain textures and the
+existing packed forward/backward motion interval to a reusable `RGBA32F`
+texture. A fullscreen WebGL2 pass manually performs the same source-grid and
+motion-grid bilinear arithmetic as the CPU, writes a physical-rain `R16F`
+canonical L14 texture, and does no CPU per-canonical-sample temporal work.
+
+Exact source timestamps take an explicit shader endpoint path which samples
+only the corresponding source texture; no motion displacement is evaluated at
+an endpoint. `EXT_color_buffer_float`, a complete R16F render target, and
+WebGL2 are required. If any is unavailable the harness reports inactive and
+the existing CPU path continues unchanged. Manual `texelFetch` interpolation
+avoids assuming platform float-linear filtering support. GPU timer-query
+measurements use `EXT_disjoint_timer_query_webgl2` when available and are
+reported only after completion; submission time is recorded separately as
+main-thread preparation. The normal experiment has no readback. Explicit
+`window.__dotFieldGpuMotion.validate()` samples the R16F result into a bounded
+RGBA8 bit-pattern diagnostic target for portable readback solely to compare CPU
+reference samples, and labels that measurement as including readback.
+
 ### Physical weather-summary profiles
 
 `geographic-weather-pyramid.js` retains the generic hazard-capable physical
