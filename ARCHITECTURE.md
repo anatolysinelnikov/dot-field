@@ -524,6 +524,8 @@ and rebuilds the bounded tile residency. The experiment has no GPU LOD pyramid
 yet and does not change the motion estimator or reconstruction mathematics. Its
 3D tile uploads use tightly packed pixel-store state only for the upload batch
 and restore all prior WebGL unpack state before returning control to MapLibre.
+When a physical pass runs inside a MapLibre custom-layer render, it also restores
+the invocation's framebuffer, viewport, and VAO binding before presentation.
 
 ### Physical weather-summary profiles
 
