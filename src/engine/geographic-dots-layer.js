@@ -8,8 +8,15 @@ import {
 import { GeographicWeatherPyramid, WEATHER_DIRECT_STATE_PACKED, WEATHER_REFERENCE_LEVEL, rainCoverageWeightForThreshold, WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY } from './geographic-weather-pyramid.js';
 import { canonicalWindowsEqual, MAX_GRID_LEVEL, mercatorXForIndex, mercatorYForIndex } from './geographic-lod.js';
 import { geographicHazardRadii, geographicHazardRadiusForSeverity } from './hazard-renderer.js';
+import {
+  createGpuWeatherProgram,
+  gpuWeatherProjectionLocations,
+  GPU_DOTS_RAIN_MAPPING_SHADER,
+  GPU_WEATHER_COMMON_VERTEX
+} from './geographic-gpu-weather-presentation.js';
 
 const REFERENCE_GRID_LEVEL = WEATHER_REFERENCE_LEVEL;
+const GPU_WEATHER_LEVEL = 14;
 export const STORM_INNER_RATIO = 0.38;
 
 const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1], storm: [1, 0, 1, 1], hail: [1, 0.831, 0, 1] };
@@ -612,6 +619,44 @@ function makeProgram(gl, shaderData, kind) {
   };
 }
 
+function makeGpuWeatherProgram(gl, shaderData, strong) {
+  const vertexSource = `${GPU_WEATHER_COMMON_VERTEX}
+${GPU_DOTS_RAIN_MAPPING_SHADER}
+out vec2 v_local;
+void main() {
+  int sampleIndex;
+  float rain = gpuRainAt(sampleIndex);
+  float radius = u_spacing * ${strong ? 'dotsStrongRadiusFraction(rain)' : 'rainRadiusFraction(rain)'};
+  v_local = a_vertex;
+  gl_Position = projectTile(gpuWeatherCenter(sampleIndex) + a_vertex * radius);
+}`;
+  const fragmentSource = `in vec2 v_local;
+uniform vec4 u_color;
+uniform float u_opacity;
+out vec4 fragColor;
+void main() {
+  float distanceToCenter = length(v_local);
+  float edge = fwidth(distanceToCenter);
+  float alpha = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distanceToCenter);
+  fragColor = vec4(u_color.rgb, u_color.a * u_opacity * alpha);
+}`;
+  const program = createGpuWeatherProgram(gl, shaderData, vertexSource, fragmentSource, 'GPU Dots weather');
+  return {
+    program,
+    locations: {
+      vertex: gl.getAttribLocation(program, 'a_vertex'),
+      weather: gl.getUniformLocation(program, 'u_weather'),
+      width: gl.getUniformLocation(program, 'u_width'),
+      minI: gl.getUniformLocation(program, 'u_minI'),
+      minJ: gl.getUniformLocation(program, 'u_minJ'),
+      spacing: gl.getUniformLocation(program, 'u_spacing'),
+      opacity: gl.getUniformLocation(program, 'u_opacity'),
+      color: gl.getUniformLocation(program, 'u_color'),
+      ...gpuWeatherProjectionLocations(gl, program)
+    }
+  };
+}
+
 function isHierarchicalTransition(fromLevel, toLevel) {
   return Math.abs(fromLevel - toLevel) === 1 && Math.max(fromLevel, toLevel) <= REFERENCE_GRID_LEVEL;
 }
@@ -633,6 +678,8 @@ export class GeographicDotsLayer {
     this.transitionProgress = 1;
     this.temporal = null;
     this.temporalProgress = 0;
+    this.gpuWeatherMode = false;
+    this.gpuWeatherSource = null;
     this.buffersDirty = true;
     this.active = true;
     this.hazardsVisible = true;
@@ -653,7 +700,9 @@ export class GeographicDotsLayer {
   }
 
   onRemove(map, gl) {
-    for (const programs of this.programs.values()) { gl.deleteProgram(programs.circle.program); gl.deleteProgram(programs.hazard.program); }
+    for (const programs of this.programs.values()) {
+      for (const entry of Object.values(programs)) if (entry?.program) gl.deleteProgram(entry.program);
+    }
     for (const buffer of [...Object.values(this.instanceBuffers || {}), ...Object.values(this.vertexBuffers || {})]) if (buffer) gl.deleteBuffer(buffer);
   }
 
@@ -675,6 +724,7 @@ export class GeographicDotsLayer {
       this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
       this.bufferCapacity = { rain: 0, strong: 0, storm: 0, hail: 0 };
       this.buffersDirty = true;
+      this.gpuWeatherSource = null;
     } else {
       const retainedCurrent = retainedLevelData(previousTopology, topology, previousLevelData);
       this.levelData = retainedCurrent ? previousLevelData : null;
@@ -708,6 +758,30 @@ export class GeographicDotsLayer {
   setHazardsVisible(visible) {
     this.hazardsVisible = visible;
     if (this.active) this.map?.triggerRepaint();
+  }
+
+  setGpuWeatherMode(enabled, time = 0) {
+    const next = Boolean(enabled);
+    if (this.gpuWeatherMode === next) return;
+    this.gpuWeatherMode = next;
+    this.gpuWeatherSource = null;
+    this.temporal = null;
+    if (next) {
+      this.instances = { rain: new Float32Array(), strong: new Float32Array(), storm: new Float32Array(), hail: new Float32Array() };
+      this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
+      this.instanceWriters = { rain: new InstanceWriter(), strong: new InstanceWriter(), storm: new InstanceWriter(), hail: new InstanceWriter() };
+      this.buffersDirty = false;
+    } else if (this.active && this.levelData) this.rebuildTemporal(time);
+    this.map?.triggerRepaint();
+  }
+
+  setGpuWeatherSource(source) {
+    if (!this.gpuWeatherMode) return;
+    if (source && (source.levelData !== this.levelData || source.levelData?.level !== GPU_WEATHER_LEVEL)) {
+      throw new Error('GPU weather source must match the active L14 topology.');
+    }
+    this.gpuWeatherSource = source;
+    this.map?.triggerRepaint();
   }
 
   activeLevels() {
@@ -770,6 +844,14 @@ export class GeographicDotsLayer {
 
   setLevelData(levelData, time) {
     const level = levelData?.level ?? null;
+    if (this.gpuWeatherMode && level === GPU_WEATHER_LEVEL) {
+      this.levelData = levelData;
+      this.transition = null;
+      this.temporal = null;
+      this.temporalProgress = 0;
+      this.map?.triggerRepaint();
+      return;
+    }
     if (this.active && this.transition && level === this.transition.toLevelData.level) {
       const promoted = this.temporal?.levels.get(level);
       if (promoted) {
@@ -997,6 +1079,15 @@ export class GeographicDotsLayer {
       packedActiveCountByLevel,
       stateRepresentationByLevel,
       estimatedGpuBufferBytes: gpuInstanceBytes + staticGpuBytes,
+      gpuWeather: {
+        enabled: this.gpuWeatherMode,
+        source: Boolean(this.gpuWeatherSource),
+        physicalField: this.gpuWeatherSource ? 'gpu-r16f' : null,
+        level: this.gpuWeatherSource?.levelData?.level ?? null,
+        currentFieldBytes: this.gpuWeatherSource?.width * this.gpuWeatherSource?.height * 2 || 0,
+        mappedCpuBytes: this.gpuWeatherSource ? 0 : temporalBreakdown.mappedPresentationBytes,
+        mappedBufferUploads: this.gpuWeatherSource ? 0 : null
+      },
       lifecycle: { ...this.lifecycleDiagnostics }
     };
   }
@@ -1008,6 +1099,53 @@ export class GeographicDotsLayer {
       this.programs.set(shaderData.variantName, programs);
     }
     return programs;
+  }
+
+  gpuProgramsFor(gl, shaderData) {
+    const key = `gpu:${shaderData.variantName}`;
+    let programs = this.programs.get(key);
+    if (!programs) {
+      programs = {
+        rain: makeGpuWeatherProgram(gl, shaderData, false),
+        strong: makeGpuWeatherProgram(gl, shaderData, true)
+      };
+      this.programs.set(key, programs);
+    }
+    return programs;
+  }
+
+  renderGpuWeather(gl, shaderData, projection) {
+    const source = this.gpuWeatherSource;
+    const levelData = this.levelData;
+    if (!source || !levelData || levelData.level !== GPU_WEATHER_LEVEL) return;
+    const programs = this.gpuProgramsFor(gl, shaderData);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(-1, -1);
+    for (const type of ['rain', 'strong']) {
+      const entry = programs[type];
+      const { locations } = entry;
+      gl.useProgram(entry.program);
+      setGeographicProjection(gl, locations, projection);
+      gl.uniform1i(locations.weather, 0);
+      gl.uniform1i(locations.width, levelData.width);
+      gl.uniform1i(locations.minI, levelData.minI);
+      gl.uniform1i(locations.minJ, levelData.minJ);
+      gl.uniform1f(locations.spacing, levelData.spacing);
+      gl.uniform1f(locations.opacity, 1);
+      gl.uniform4fv(locations.color, COLORS[type]);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, source.texture);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffers[type]);
+      gl.enableVertexAttribArray(locations.vertex);
+      gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, levelData.count);
+    }
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.depthMask(true);
   }
 
   renderInstances(gl, entry, projection, types) {
@@ -1052,6 +1190,10 @@ export class GeographicDotsLayer {
 
   render(gl, args) {
     if (!this.active) return;
+    if (this.gpuWeatherMode && !this.transition && this.levelData?.level === GPU_WEATHER_LEVEL && this.gpuWeatherSource) {
+      this.renderGpuWeather(gl, args.shaderData, args.defaultProjectionData);
+      return;
+    }
     this.uploadBuffers(gl);
     const programs = this.programsFor(gl, args.shaderData);
     gl.enable(gl.BLEND);

@@ -62,7 +62,9 @@ purpose is viewport-bounded spatial residency with complete temporal residency.
 The harness rebuilds a bounded atlas on spatial changes and uploads all source
 times/intervals per selected tile; resident timeline scrubs select layers and
 progress without temporal fetch/upload. The output remains the experimental
-canonical L14 field: Dots/Squares/LOD integration is not implemented.
+canonical L14 field. With the separate opt-in `?gpuWeather=1` switch, that
+field is consumed directly by the real Dots/Squares layers at stable L14; the
+default CPU/reference renderer remains unchanged.
 
 The spatial runtime separates provider/data bounds from the active render
 window and from sample identity:
@@ -504,6 +506,19 @@ rain frames and motion intervals, while its exact stored rain support covers
 motion displacement. Persistent R16F and RGBA32F `TEXTURE_2D_ARRAY` atlas
 layers are populated only when spatial residency changes. `?diagnostics=1`
 composes with both GPU experiments and reports tiled residency counters.
+
+`?gpuWeather=1` connects the same immutable all-time temporal tile residency
+to the real Dots/Squares path at stable L14. The tiled GPU pass materializes the
+current physical rain field into an R16F texture in MapLibre's WebGL2 context;
+the Dots and Squares renderers both sample that one physical mm/h texture and
+apply their existing representation mappings in their presentation shaders.
+They do not read the field back to the CPU, rebuild canonical geometry, or
+duplicate temporal reconstruction. L10–L13 and LOD transitions use the CPU
+reference path, with an explicit diagnostics fallback reason. A stable L14
+viewport change rebuilds the bounded tile residency; a timeline-only change
+selects the resident temporal interval and submits one reconstruction draw.
+The experiment has no GPU LOD pyramid yet and does not change the motion
+estimator or reconstruction mathematics.
 
 ### Physical weather-summary profiles
 
