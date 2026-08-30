@@ -643,7 +643,7 @@ function installGpuMotionExperiment() {
     window.__dotFieldGpuMotion = {
       tiled: true,
       diagnostics() { return gpuMotionTileReconstructor?.diagnostics() || { active: false, reason: 'not initialized' }; },
-      async run(normalizedTime = state.time / LOOP_SECONDS) {
+      async run(normalizedTime = state.time / LOOP_SECONDS, { measureGpu = true } = {}) {
         if (!activeWeatherField?.motion) throw new Error('Motion weather assets are not available.');
         const frame = activeWeatherField.prepareFrame(normalizedTime);
         const levelData = new GeographicLodTopology(state.canonicalWindow, { minLevel: 13, maxLevel: 14 }).levels.get(14);
@@ -658,7 +658,14 @@ function installGpuMotionExperiment() {
           });
         }
         await gpuMotionTileReconstructor.ensureResident();
-        return gpuMotionTileReconstructor.update(frame);
+        return gpuMotionTileReconstructor.update(frame, { measureGpu });
+      },
+      validate(normalizedTime = state.time / LOOP_SECONDS, options = {}) {
+        return this.run(normalizedTime, { measureGpu: false }).then(() => gpuMotionTileReconstructor.validate(activeWeatherField.prepareFrame(normalizedTime), options));
+      },
+      readback() {
+        if (!gpuMotionTileReconstructor) throw new Error('Tiled GPU reconstruction has not run yet.');
+        return gpuMotionTileReconstructor.readback();
       },
       async rapidScrub() {
         const results = [];
@@ -693,6 +700,10 @@ function installGpuMotionExperiment() {
     validate(normalizedTime = state.time / LOOP_SECONDS, options = {}) {
       this.run(normalizedTime, { measureGpu: false });
       return gpuMotionReconstructor.validate(activeWeatherField.prepareFrame(normalizedTime), options);
+    },
+    readback() {
+      if (!gpuMotionReconstructor) throw new Error('GPU reconstruction has not run yet.');
+      return gpuMotionReconstructor.readback();
     },
     validateSuite() {
       const times = [0, 1 / 18, .5 / 18, .25, .347, .5, .777, 1];
