@@ -19,7 +19,7 @@ export const WEATHER_REGION = Object.freeze({
 });
 
 let activeWeatherField = null;
-const ACTIVE_REAL_WEATHER_METADATA_URL = './data/generated/current/metadata.json';
+export const ACTIVE_REAL_WEATHER_METADATA_URL = './data/generated/current/metadata.json';
 
 export function geographicToSynthetic(longitude, latitude) {
   // Preserve the shared renderer-facing function name; real-data frames use

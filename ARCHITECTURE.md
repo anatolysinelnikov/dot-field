@@ -46,10 +46,10 @@ viewport-windowed scalar reconstruction.
 
 Generated generations also contain additive experimental temporal tiles. The
 existing Float32 source-frame assets remain the active/reference browser
-transport; temporal tiles are not consumed by the browser yet. Each 128×128
-provider-grid interior uses the established 5-source-node sequence-wide rain
-halo when that is conservative; generation derives a wider halo when the
-actual motion field requires it rather than publishing unsafe storage. All 19
+transport; `?gpuMotion=1&gpuMotionTiles=1` consumes them only in a separate
+experimental GPU source-residency harness. Each 128×128 provider-grid interior
+uses the generation-defined sequence-wide rain halo; runtime reads that value
+from metadata rather than depending on a fixed renderer constant. All 19
 physical mm/h endpoint planes are encoded as little-endian R16F in time-major
 row-major order. Each emitted tile also contains the exact motion bilinear
 subgrid for all 18 existing RGBA32F interval fields, preserving the current
@@ -58,8 +58,11 @@ the normalized crop grid; presence is a deterministic sequence-wide decision
 using the motion-expanded support mask and is never time-varying. These assets
 participate in the same unpublished-staging validation, gzip sidecars, content
 digest, immutable generation, and atomic `current/` pointer flow. Their future
-purpose is viewport-bounded spatial residency with complete temporal residency,
-not a new runtime path.
+purpose is viewport-bounded spatial residency with complete temporal residency.
+The harness rebuilds a bounded atlas on spatial changes and uploads all source
+times/intervals per selected tile; resident timeline scrubs select layers and
+progress without temporal fetch/upload. The output remains the experimental
+canonical L14 field: Dots/Squares/LOD integration is not implemented.
 
 The spatial runtime separates provider/data bounds from the active render
 window and from sample identity:
@@ -483,6 +486,15 @@ main-thread preparation. The normal experiment has no readback. Explicit
 `window.__dotFieldGpuMotion.validate()` samples the R16F result into a bounded
 RGBA8 bit-pattern diagnostic target for portable readback solely to compare CPU
 reference samples, and labels that measurement as including readback.
+
+`?gpuMotion=1` remains the full-frame A/B reference. `&gpuMotionTiles=1`
+selects the independent tiled proof: geometric 128×128 owners are selected
+from canonical provider-grid base positions, never current rain/time; safely
+omitted metadata tiles are permanently zero. Each selected tile provides all
+rain frames and motion intervals, while its exact stored rain support covers
+motion displacement. Persistent R16F and RGBA32F `TEXTURE_2D_ARRAY` atlas
+layers are populated only when spatial residency changes. `?diagnostics=1`
+composes with both GPU experiments and reports tiled residency counters.
 
 ### Physical weather-summary profiles
 

@@ -1,6 +1,6 @@
 import { LOD_MORPH_SECONDS, LOOP_SECONDS } from './engine/config.js';
 import { clamp, smoothstep } from './engine/math.js';
-import { beginActiveWeatherLoad, prepareGeographicSamplingGeometry, WEATHER_REGION } from './engine/geography.js';
+import { ACTIVE_REAL_WEATHER_METADATA_URL, beginActiveWeatherLoad, prepareGeographicSamplingGeometry, WEATHER_REGION } from './engine/geography.js';
 import { residentSourceFrameIntervals } from './timeline-residency.js';
 import {
   MAX_LOGICAL_SAMPLING_ZOOM,
@@ -18,6 +18,7 @@ import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
 import { GpuMotionReconstructor } from './engine/gpu-motion-reconstruction.js';
+import { GpuTemporalTileReconstructor } from './engine/gpu-temporal-tile-reconstruction.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
@@ -74,7 +75,9 @@ let sourceFrameCount = 1;
 let sourceTimestamps = [];
 let timelineResidencyEnabled = false;
 const gpuMotionExperimentEnabled = new URLSearchParams(window.location.search).get('gpuMotion') === '1';
+const gpuMotionTilesExperimentEnabled = gpuMotionExperimentEnabled && new URLSearchParams(window.location.search).get('gpuMotionTiles') === '1';
 let gpuMotionReconstructor = null;
+let gpuMotionTileReconstructor = null;
 
 function updateTimelineResidency(residentSourceFrameIndices = []) {
   const intervals = timelineResidencyEnabled
@@ -312,6 +315,9 @@ function diagnosticsSnapshot() {
     source,
     renderers: { raw, dots, squares },
     pyramid,
+    gpuMotion: gpuMotionExperimentEnabled ? (gpuMotionTilesExperimentEnabled
+      ? gpuMotionTileReconstructor?.diagnostics() || { active: false, reason: 'not initialized' }
+      : gpuMotionReconstructor?.diagnostics() || { active: false, reason: 'not initialized' }) : null,
     memory: {
       sourceResidentBytes,
       rawCpuGeometryBytes: raw?.totalCpuGeometryBytes || 0,
@@ -633,6 +639,36 @@ function commitLevelData(level, levelData) {
 // geometry without changing Dots/Squares evaluation or their CPU fallback.
 function installGpuMotionExperiment() {
   if (!gpuMotionExperimentEnabled || window.__dotFieldGpuMotion) return;
+  if (gpuMotionTilesExperimentEnabled) {
+    window.__dotFieldGpuMotion = {
+      tiled: true,
+      diagnostics() { return gpuMotionTileReconstructor?.diagnostics() || { active: false, reason: 'not initialized' }; },
+      async run(normalizedTime = state.time / LOOP_SECONDS) {
+        if (!activeWeatherField?.motion) throw new Error('Motion weather assets are not available.');
+        const frame = activeWeatherField.prepareFrame(normalizedTime);
+        const levelData = new GeographicLodTopology(state.canonicalWindow, { minLevel: 13, maxLevel: 14 }).levels.get(14);
+        const geometry = prepareGeographicSamplingGeometry(frame, levelData, gpuMotionTileReconstructor?.geometry || null);
+        if (!gpuMotionTileReconstructor || gpuMotionTileReconstructor.geometry !== geometry) {
+          gpuMotionTileReconstructor?.destroy();
+          gpuMotionTileReconstructor = await GpuTemporalTileReconstructor.create({
+            metadataUrl: ACTIVE_REAL_WEATHER_METADATA_URL,
+            generationId: activeWeatherField.generationId,
+            geometry,
+            sequence: activeWeatherField
+          });
+        }
+        await gpuMotionTileReconstructor.ensureResident();
+        return gpuMotionTileReconstructor.update(frame);
+      },
+      async rapidScrub() {
+        const results = [];
+        for (const time of [0, 1, .3, .9, .1, .7]) results.push({ time, ...(await this.run(time)) });
+        return results;
+      }
+    };
+    console.info('GPU temporal-tile residency experiment available at window.__dotFieldGpuMotion (experimental; CPU remains active).');
+    return;
+  }
   window.__dotFieldGpuMotion = {
     diagnostics() { return gpuMotionReconstructor?.diagnostics() || { active: false, reason: 'not initialized' }; },
     run(normalizedTime = state.time / LOOP_SECONDS, { measureGpu = true } = {}) {
