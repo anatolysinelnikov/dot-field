@@ -521,7 +521,9 @@ rebuild canonical geometry, or duplicate temporal reconstruction. L10–L13 and
 LOD transitions use the CPU reference path, with an explicit diagnostics
 fallback reason. A stable L14 viewport change invalidates both physical fields
 and rebuilds the bounded tile residency. The experiment has no GPU LOD pyramid
-yet and does not change the motion estimator or reconstruction mathematics.
+yet and does not change the motion estimator or reconstruction mathematics. Its
+3D tile uploads use tightly packed pixel-store state only for the upload batch
+and restore all prior WebGL unpack state before returning control to MapLibre.
 
 ### Physical weather-summary profiles
 
