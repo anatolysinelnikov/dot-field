@@ -12,7 +12,7 @@ These instructions apply to the entire repository.
 
 ## Before changing code
 
-For non-trivial rendering, algorithm, architecture, LOD, sampling, reconstruction, Areas, Blur, hazard, or performance work:
+For non-trivial rendering, algorithm, architecture, LOD, sampling, reconstruction, Areas, Blur, hazard, real-weather-data, or performance work:
 
 1. Read `ARCHITECTURE.md`.
 2. Inspect the relevant implementation files on the requested branch.
@@ -29,8 +29,9 @@ For small isolated UI/CSS/documentation changes, keep the inspection proportiona
 - Zoom must not change the spatial identity of samples.
 - LOD must preserve visual density while adding detail on zoom-in.
 - LOD transitions must not introduce popping, grid jumps, or spatial discontinuities.
-- Rain, thunderstorm, hail, and future weather layers are data, not decorative effects.
+- Rain, thunderstorm, hail, and other weather layers are data, not decorative effects.
 - Hazard visualization must remain derived from the same deterministic weather field/grid semantics.
+- Physical meteorological values must remain data values through normalization, interpolation, and sampling/reconstruction; presentation mappings belong downstream unless a concrete architecture change justifies otherwise.
 - Do not hide mathematical or spatial bugs with decorative workarounds.
 
 ### Dots
@@ -71,10 +72,10 @@ Keep these boundaries unless a concrete task justifies changing them:
 
 - `src/app.js` owns DOM interaction, mutable UI/application state, camera setup, animation, and render routing.
 - Renderer modules receive drawing/state inputs; they should not own DOM/UI state.
-- `field.js` is the synthetic weather data source and must stay independent of renderers and UI.
+- Weather data sources/adapters must remain independent of renderers and UI.
 - Shared sampling/reconstruction/mapping code should remain reusable by representations that need it.
 - Engine/data layers should remain as independent from DOM/UI as practical.
-- Do not couple renderers directly to a future weather provider. Keep provider format -> normalization -> temporal/spatial interpolation -> sampling/reconstruction -> rendering separable.
+- Do not couple renderers directly to a weather provider. Keep provider format -> validation/normalization -> temporal/spatial interpolation -> sampling/reconstruction -> presentation mapping/rendering separable.
 
 ## Rendering and algorithm checks
 
@@ -89,6 +90,8 @@ When working on rendering or spatial algorithms, explicitly inspect:
 - camera transform and zoom/world-space invariance;
 - DPR/Canvas scaling;
 - temporal continuity and loop seams.
+
+For performance or memory problems, distinguish CPU, memory, GPU, network/data loading, and rendering costs. Prefer measurement through existing diagnostics/instrumentation over assumptions, and do not label a crash or reload a memory leak without evidence.
 
 ## Change discipline
 
@@ -112,11 +115,11 @@ At minimum for code changes:
 For meaningful rendering changes, manually smoke-test as relevant:
 
 - initial render;
-- Dots / Squares / Blur / Areas;
-- Areas with `Smooth` both off and on when affected;
-- play/pause and timeline scrubbing;
+- active representations on the current branch;
+- inactive or retained representations only when the task affects them;
+- play/pause and timeline scrubbing when applicable;
 - zoom and LOD transitions;
-- rain/thunderstorm/hail, including hail priority;
+- rain/thunderstorm/hail when available or affected, including hazard priority;
 - resize, DPR, and mobile/responsive UI.
 
 Do not claim manual verification that was not actually performed.
@@ -137,5 +140,5 @@ Keep `AGENTS.md` short and instruction-focused. Put implementation architecture 
 ## Git safety
 
 - Work on the branch requested by the task; otherwise inspect the current branch before changing anything.
-- Prefer a separate branch for meaningful features/refactors; small isolated low-risk fixes may be made directly on `main` when explicitly appropriate.
+- Prefer a separate branch for meaningful features/refactors; small isolated low-risk fixes may be made directly on the current working branch when explicitly appropriate.
 - Do not merge, delete branches, force-push, or rewrite history unless explicitly requested.
