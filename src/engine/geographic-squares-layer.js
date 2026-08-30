@@ -695,6 +695,12 @@ export class GeographicSquaresLayer {
     if (!this.gpuWeatherPresentationEnabled) return;
     const startedAt = performance.now();
     const query = this.gpuPresentationTiming.begin(gl);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(-1, -1);
     const entry = this.gpuProgramFor(gl, shaderData);
     const { locations } = entry;
     gl.useProgram(entry.program);
@@ -715,6 +721,8 @@ export class GeographicSquaresLayer {
     gl.enableVertexAttribArray(locations.vertex);
     gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, levelData.count);
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.depthMask(true);
     this.lifecycleDiagnostics.gpuWeatherPresentationDrawCalls++;
     this.gpuPresentationTiming.end(gl, query, startedAt);
   }
@@ -809,15 +817,7 @@ export class GeographicSquaresLayer {
   render(gl, args) {
     if (!this.active) return;
     if (this.gpuWeatherMode && !this.transition && this.levelData?.level === GPU_WEATHER_LEVEL && this.gpuWeatherSource) {
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      gl.enable(gl.DEPTH_TEST);
-      gl.depthMask(false);
-      gl.enable(gl.POLYGON_OFFSET_FILL);
-      gl.polygonOffset(-1, -1);
       this.renderGpuWeather(gl, args.shaderData, args.defaultProjectionData);
-      gl.disable(gl.POLYGON_OFFSET_FILL);
-      gl.depthMask(true);
       return;
     }
     if (!this.temporal) return;
