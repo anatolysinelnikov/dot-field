@@ -263,6 +263,15 @@ transition is active. Paused map navigation and static updates use MapLibre's
 own repaint scheduling; beginning or reversing an LOD transition wakes the
 application RAF so its progress still completes while paused.
 
+An opt-in cadence probe is available with `?cadence=1`. It records bounded
+numeric samples from the application RAF and synchronous Dots/Squares weather
+updates, including wall-clock gaps, logical-time deltas, update duration,
+active LOD/mode, and lightweight ordering counters. `playbackRate=0.5` or
+`0.25` changes only diagnostic logical playback speed; the normal product rate
+is unchanged. The probe also exposes `window.__dotFieldCadence.step([...])`
+for paused, deterministic normalized-time stepping. It performs no readback,
+large per-frame serialization, trajectory analysis, or per-frame logging.
+
 ### Runtime performance diagnostics — `src/runtime-diagnostics.js`
 
 The optional runtime diagnostics system is activated only by `?diagnostics=1`.

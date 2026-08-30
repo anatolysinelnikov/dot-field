@@ -22,6 +22,7 @@ import { GpuTemporalTileReconstructor } from './engine/gpu-temporal-tile-reconst
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
+import { createRuntimeCadenceDiagnostics } from './runtime-cadence-diagnostics.js';
 
 const applicationStartupAt = performance.now();
 const startupTimings = Object.create(null);
@@ -204,6 +205,12 @@ let basemapFallbackTimer = null;
 let weatherRequestGeneration = 0;
 
 const diagnosticsEnabled = new URLSearchParams(window.location.search).get('diagnostics') === '1';
+const queryParameters = new URLSearchParams(window.location.search);
+const cadenceEnabled = queryParameters.get('cadence') === '1';
+const requestedPlaybackRate = Number(queryParameters.get('playbackRate'));
+const diagnosticPlaybackRate = cadenceEnabled && Number.isFinite(requestedPlaybackRate) && requestedPlaybackRate > 0 && requestedPlaybackRate <= 1
+  ? requestedPlaybackRate : 1;
+const runtimeCadence = createRuntimeCadenceDiagnostics({ enabled: cadenceEnabled, playbackRate: diagnosticPlaybackRate });
 
 function numericSummary(values) {
   if (!values.length) return { count: 0, lastMs: 0, meanMs: 0, p95Ms: 0, maxMs: 0 };
@@ -332,6 +339,7 @@ const runtimeDiagnostics = createRuntimeDiagnostics({
   getSnapshot: diagnosticsSnapshot,
   getEnvironment: diagnosticsEnvironment
 });
+if (runtimeCadence) window.__dotFieldCadence = runtimeCadence;
 const diagnosticsHud = runtimeDiagnostics?.attachHud(lodDiagnostics) || null;
 if (runtimeDiagnostics) window.__dotFieldDiagnostics = runtimeDiagnostics;
 
@@ -937,8 +945,15 @@ function rendererSourcesAreAvailable(requirements) {
 
 function renderCurrentWeather() {
   if (!state.mapReady || state.renderMode === 'raw') return;
+  const started = performance.now();
   if (state.renderMode === 'dots') weatherLayer.updateWeather(state.time / LOOP_SECONDS);
   else if (state.renderMode === 'squares') squaresLayer.updateWeather(state.time / LOOP_SECONDS);
+  runtimeCadence?.recordWeatherUpdate({
+    prepared: true,
+    committed: true,
+    durationMs: performance.now() - started,
+    logicalTime: state.time
+  });
   map.triggerRepaint();
 }
 
@@ -951,28 +966,30 @@ function rebasePlaybackHorizon(normalizedTime, requirements) {
 }
 
 function requestWeatherTime(normalizedTime, { playback = false } = {}) {
-  if (!activeWeatherField) return;
+  if (!activeWeatherField) return Promise.resolve();
   const requirements = rendererTemporalRequirements(normalizedTime);
   if (playback && rendererSourcesAreAvailable(requirements)) {
     rebasePlaybackHorizon(normalizedTime, requirements);
     renderCurrentWeather();
-    return;
+    return Promise.resolve();
   }
   const requestGeneration = ++weatherRequestGeneration;
   // Dots/Squares retain two adjacent 100 ms renderer keyframes. Resolve both
   // provider times as one coalesced HIGH source requirement before asking
   // either layer to evaluate. A manual scrub replaces only its older target.
-  void weatherLoad.requestTimes(requirements.times, {
+  return weatherLoad.requestTimes(requirements.times, {
     priority: 'high',
     replaceKey: state.scrubbing ? 'manual-temporal-target' : playback ? 'playback-required' : null,
     latestTargetGeneration: requestGeneration
   }).then(({ result } = {}) => {
-    if (result?.status === 'superseded') return;
-    if (requestGeneration !== weatherRequestGeneration || !state.mapReady || state.renderMode === 'raw') return;
+    if (result?.status === 'superseded') return result;
+    if (requestGeneration !== weatherRequestGeneration || !state.mapReady || state.renderMode === 'raw') return result;
+    runtimeCadence?.recordRequestCommit(requestGeneration);
     // Temporal reconstruction remains synchronous once the adjacent source
     // frames are present. A stale load cannot overwrite a newer timeline target.
     rebasePlaybackHorizon(state.time / LOOP_SECONDS, rendererTemporalRequirements(state.time / LOOP_SECONDS));
     renderCurrentWeather();
+    return result;
   }).catch((error) => console.error('Unable to load requested weather time.', error));
 }
 
@@ -1394,7 +1411,7 @@ function waitForPlaybackRequirements(normalizedTime) {
 
 function frame(now) {
   applicationFrameQueued = false;
-  const delta = Math.min((now - state.lastFrame) / 1000, 0.1);
+  const delta = Math.min((now - state.lastFrame) / 1000, 0.1) * diagnosticPlaybackRate;
   state.lastFrame = now;
   let reachedEndpoint = false;
   if (state.playing && !state.scrubbing) {
@@ -1427,8 +1444,51 @@ function frame(now) {
       ? String(normalizedTimeForSourceFrame(state.rawFrameIndex))
       : String(state.time / LOOP_SECONDS);
   }
+  const temporalFrame = geographicTemporalFrameAt(state.time / LOOP_SECONDS);
+  runtimeCadence?.recordFrame(now, {
+    logicalTime: state.time,
+    interval: temporalFrame.index,
+    progress: temporalFrame.progress,
+    lod: state.lod.level,
+    renderMode: state.renderMode,
+    weatherPrepared: !state.playbackStalled,
+    weatherCommitted: !state.playbackStalled
+  });
   updateTimestamp();
   if ((state.playing && !state.scrubbing && !state.playbackStalled) || state.lodTransition) wakeApplicationFrame();
 }
 
 wakeApplicationFrame();
+
+if (runtimeCadence) {
+  window.__dotFieldCadence = {
+    ...runtimeCadence,
+    snapshot: diagnosticsSnapshot,
+    setCamera({ center, zoom }) {
+      if (!Array.isArray(center) || center.length !== 2 || !Number.isFinite(zoom)) throw new TypeError('setCamera expects center: [longitude, latitude] and numeric zoom.');
+      map.jumpTo({ center, zoom });
+    },
+    async step(times = []) {
+      if (!Array.isArray(times)) throw new TypeError('step(times) expects an array of normalized times.');
+      setPlaying(false);
+      const results = [];
+      for (const value of times) {
+        const normalizedTime = clamp(Number(value), 0, 1);
+        state.time = normalizedTime * LOOP_SECONDS;
+        state.playbackStalled = false;
+        await requestWeatherTime(normalizedTime);
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        const temporalFrame = geographicTemporalFrameAt(normalizedTime);
+        runtimeCadence.recordDeterministicStep({
+          normalizedTime,
+          interval: temporalFrame.index,
+          progress: temporalFrame.progress,
+          lod: state.lod.level,
+          renderMode: state.renderMode
+        });
+        results.push(this.summary());
+      }
+      return results;
+    }
+  };
+}
