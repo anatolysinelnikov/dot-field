@@ -300,7 +300,9 @@ void main() {
     program,
     locations: {
       vertex: gl.getAttribLocation(program, 'a_vertex'),
-      weather: gl.getUniformLocation(program, 'u_weather'),
+      weatherA: gl.getUniformLocation(program, 'u_weather_a'),
+      weatherB: gl.getUniformLocation(program, 'u_weather_b'),
+      weatherProgress: gl.getUniformLocation(program, 'u_weather_progress'),
       width: gl.getUniformLocation(program, 'u_width'),
       minI: gl.getUniformLocation(program, 'u_minI'),
       minJ: gl.getUniformLocation(program, 'u_minJ'),
@@ -336,7 +338,7 @@ export class GeographicSquaresLayer {
     this.programs = new Map();
     this.lifecycleDiagnostics = {
       evaluateKeyframeCalls: 0, evaluateTransitionKeyframeCalls: 0, weatherEvaluationMs: 0, mappingMs: 0,
-      instanceRebuildCalls: 0, instanceRebuildMs: 0, preservedTopologyStates: 0
+      instanceRebuildCalls: 0, instanceRebuildMs: 0, preservedTopologyStates: 0, gpuWeatherRenderCalls: 0
     };
   }
 
@@ -429,13 +431,13 @@ export class GeographicSquaresLayer {
     this.map?.triggerRepaint();
   }
 
-  setGpuWeatherSource(source) {
+  setGpuWeatherSource(source, { requestRepaint = true } = {}) {
     if (!this.gpuWeatherMode) return;
     if (source && (source.levelData !== this.levelData || source.levelData?.level !== GPU_WEATHER_LEVEL)) {
       throw new Error('GPU weather source must match the active L14 topology.');
     }
     this.gpuWeatherSource = source;
-    this.map?.triggerRepaint();
+    if (requestRepaint) this.map?.triggerRepaint();
   }
 
   setHazardsVisible(visible) {
@@ -670,18 +672,23 @@ export class GeographicSquaresLayer {
     const source = this.gpuWeatherSource;
     const levelData = this.levelData;
     if (!source || !levelData || levelData.level !== GPU_WEATHER_LEVEL) return;
+    this.lifecycleDiagnostics.gpuWeatherRenderCalls++;
     const entry = this.gpuProgramFor(gl, shaderData);
     const { locations } = entry;
     gl.useProgram(entry.program);
     setGeographicProjection(gl, locations, projection);
-    gl.uniform1i(locations.weather, 0);
+    gl.uniform1i(locations.weatherA, 0);
+    gl.uniform1i(locations.weatherB, 1);
+    gl.uniform1f(locations.weatherProgress, source.progress ?? 0);
     gl.uniform1i(locations.width, levelData.width);
     gl.uniform1i(locations.minI, levelData.minI);
     gl.uniform1i(locations.minJ, levelData.minJ);
     gl.uniform1f(locations.spacing, levelData.spacing);
     gl.uniform1f(locations.opacity, 1);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, source.texture);
+    gl.bindTexture(gl.TEXTURE_2D, source.textureA || source.texture);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, source.textureB || source.textureA || source.texture);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
     gl.enableVertexAttribArray(locations.vertex);
     gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);

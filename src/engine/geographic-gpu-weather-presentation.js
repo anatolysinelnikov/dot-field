@@ -91,7 +91,9 @@ export function gpuWeatherProjectionLocations(gl, program) {
 
 export const GPU_WEATHER_COMMON_VERTEX = `
 in vec2 a_vertex;
-uniform sampler2D u_weather;
+uniform sampler2D u_weather_a;
+uniform sampler2D u_weather_b;
+uniform float u_weather_progress;
 uniform int u_width;
 uniform int u_minI;
 uniform int u_minJ;
@@ -100,7 +102,8 @@ float gpuRainAt(out int sampleIndex) {
   sampleIndex = gl_InstanceID;
   int column = sampleIndex % u_width;
   int row = sampleIndex / u_width;
-  return texelFetch(u_weather, ivec2(column, row), 0).r;
+  ivec2 coordinate = ivec2(column, row);
+  return mix(texelFetch(u_weather_a, coordinate, 0).r, texelFetch(u_weather_b, coordinate, 0).r, u_weather_progress);
 }
 vec2 gpuWeatherCenter(int sampleIndex) {
   int column = sampleIndex % u_width;

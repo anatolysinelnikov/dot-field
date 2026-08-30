@@ -508,17 +508,20 @@ layers are populated only when spatial residency changes. `?diagnostics=1`
 composes with both GPU experiments and reports tiled residency counters.
 
 `?gpuWeather=1` connects the same immutable all-time temporal tile residency
-to the real Dots/Squares path at stable L14. The tiled GPU pass materializes the
-current physical rain field into an R16F texture in MapLibre's WebGL2 context;
-the Dots and Squares renderers both sample that one physical mm/h texture and
-apply their existing representation mappings in their presentation shaders.
-They do not read the field back to the CPU, rebuild canonical geometry, or
-duplicate temporal reconstruction. L10–L13 and LOD transitions use the CPU
-reference path, with an explicit diagnostics fallback reason. A stable L14
-viewport change rebuilds the bounded tile residency; a timeline-only change
-selects the resident temporal interval and submits one reconstruction draw.
-The experiment has no GPU LOD pyramid yet and does not change the motion
-estimator or reconstruction mathematics.
+to the real Dots/Squares path at stable L14. The tiled GPU pass materializes two
+persistent physical renderer-keyframe fields into R16F textures in MapLibre's
+WebGL2 context. Both Dots and Squares receive the same A/B physical mm/h
+textures and renderer temporal progress, then apply their independent existing
+presentation mappings in their shaders. Motion reconstruction runs when the
+existing 100 ms renderer-keyframe pair changes, not on every playback RAF;
+sequential playback reuses the prior B field while reconstructing only the new
+C field. Arbitrary timeline jumps reconstruct only missing members of the
+two-field working set. The renderers do not read the fields back to the CPU,
+rebuild canonical geometry, or duplicate temporal reconstruction. L10–L13 and
+LOD transitions use the CPU reference path, with an explicit diagnostics
+fallback reason. A stable L14 viewport change invalidates both physical fields
+and rebuilds the bounded tile residency. The experiment has no GPU LOD pyramid
+yet and does not change the motion estimator or reconstruction mathematics.
 
 ### Physical weather-summary profiles
 
