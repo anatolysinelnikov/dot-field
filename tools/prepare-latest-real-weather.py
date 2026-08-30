@@ -22,6 +22,14 @@ from datetime import datetime
 from pathlib import Path
 from posixpath import normpath
 
+import numpy as np
+
+from temporal_tiles import (
+    TEMPORAL_TILE_CONTRACT,
+    tile_supports_weather,
+    tiles_for_grid,
+)
+
 
 FILENAME_TIMESTAMP = "%Y%m%d%H%M"
 
@@ -135,7 +143,7 @@ def map_manifest_assets(value: object, mapper) -> object:
     if isinstance(value, dict):
         mapped = {}
         for key, child in value.items():
-            if key == "asset" and isinstance(child, str):
+            if (key == "asset" or key.endswith("_asset")) and isinstance(child, str):
                 mapped[key] = mapper(child)
             elif key.endswith("_assets") and isinstance(child, list):
                 mapped[key] = [mapper(asset) if isinstance(asset, str) else asset for asset in child]
@@ -153,7 +161,7 @@ def manifest_asset_references(metadata: dict) -> list[str]:
     def collect(value: object) -> object:
         if isinstance(value, dict):
             for key, child in value.items():
-                if key == "asset" and isinstance(child, str):
+                if (key == "asset" or key.endswith("_asset")) and isinstance(child, str):
                     references.append(child)
                 elif key.endswith("_assets") and isinstance(child, list):
                     references.extend(asset for asset in child if isinstance(asset, str))
@@ -183,9 +191,85 @@ def resolve_manifest_asset(
     if path.is_absolute() or (".." in path.parts and not generation_relative):
         raise SystemExit(f"manifest asset must be a relative path inside its generation: {asset}")
     resolved = (directory / path).resolve()
-    if resolved != directory.resolve() and directory.resolve() not in resolved.parents:
+    allowed_generation_root = directory.parent.resolve() / expected_generation_id if generation_relative else directory.resolve()
+    if resolved != allowed_generation_root and allowed_generation_root not in resolved.parents:
         raise SystemExit(f"manifest asset escapes its generation: {asset}")
     return resolved
+
+
+def validate_temporal_tiles(directory: Path, metadata: dict, expected_generation_id: str | None) -> None:
+    section = metadata.get("temporal_tiles")
+    if section is None:
+        return
+    if section.get("contract_version") != TEMPORAL_TILE_CONTRACT:
+        raise SystemExit("unsupported temporal tile contract version")
+    grid = metadata.get("spatial_grid") or {}
+    width, height = grid.get("width"), grid.get("height")
+    frame_count = (metadata.get("time") or {}).get("count")
+    if section.get("tile_interior_source_nodes") != 128:
+        raise SystemExit("temporal tile interior dimensions are invalid")
+    motion_descriptor = metadata.get("motion") or {}
+    motion_width, motion_height = motion_descriptor.get("grid_width"), motion_descriptor.get("grid_height")
+    rain_halo = section.get("rain_halo_source_nodes")
+    if not isinstance(rain_halo, int) or rain_halo < 1:
+        raise SystemExit("temporal tile rain halo is invalid")
+    motion_assets = motion_descriptor.get("interval_assets", [])
+    motion_paths_for_halo = [resolve_manifest_asset(directory, asset, expected_generation_id) for asset in motion_assets]
+    maximum_motion_component = max(float(np.max(np.abs(np.fromfile(path, dtype="<f4")))) for path in motion_paths_for_halo)
+    if rain_halo != int(np.ceil(maximum_motion_component)) + 1:
+        raise SystemExit("temporal tile rain halo is not conservative for the motion assets")
+    expected_tiles = tiles_for_grid(width, height, motion_width, motion_height, rain_halo)
+    if section.get("geometric_tile_count") != len(expected_tiles):
+        raise SystemExit("temporal tile geometric count is invalid")
+    expected_by_id = {f"{tile.tile_x},{tile.tile_y}": tile for tile in expected_tiles}
+    tile_records = section.get("tiles")
+    if not isinstance(tile_records, list) or len(tile_records) != section.get("emitted_tile_count"):
+        raise SystemExit("temporal tile emitted count is invalid")
+    support_descriptor = metadata.get("support_mask") or {}
+    support_path = resolve_manifest_asset(directory, support_descriptor["asset"], expected_generation_id)
+    support_bytes = np.frombuffer(support_path.read_bytes(), dtype=np.uint8)
+    support = np.unpackbits(support_bytes, bitorder="little")[:width * height].reshape(height, width).astype(bool)
+    frame_paths = [resolve_manifest_asset(directory, asset, expected_generation_id) for asset in (metadata.get("rain") or {}).get("frame_assets", [])]
+    frames = [np.fromfile(path, dtype="<f4").reshape(height, width) for path in frame_paths]
+    motion_paths = motion_paths_for_halo
+    motion_intervals = [np.fromfile(path, dtype="<f4").reshape(4, motion_descriptor["grid_height"], motion_descriptor["grid_width"]) for path in motion_paths]
+    seen = set()
+    for record in tile_records:
+        tile_id = record.get("id")
+        if tile_id in seen or tile_id not in expected_by_id:
+            raise SystemExit("temporal tile identities are duplicate or outside the deterministic grid")
+        seen.add(tile_id)
+        tile = expected_by_id[tile_id]
+        interior = record.get("interior") or {}
+        rain = record.get("rain") or {}
+        motion = record.get("motion") or {}
+        expected_interior = {"x_start": tile.interior_x, "x_end": tile.interior_x + tile.interior_width - 1, "y_start": tile.interior_y, "y_end": tile.interior_y + tile.interior_height - 1, "width": tile.interior_width, "height": tile.interior_height}
+        if interior != expected_interior:
+            raise SystemExit(f"temporal tile {tile_id} has inconsistent interior bounds")
+        for key, value in {"stored_x_start": tile.stored_x, "stored_y_start": tile.stored_y, "stored_width": tile.stored_width, "stored_height": tile.stored_height}.items():
+            if rain.get(key) != value:
+                raise SystemExit(f"temporal tile {tile_id} has inconsistent rain bounds")
+        for key, value in {"grid_x_start": tile.motion_x, "grid_y_start": tile.motion_y, "grid_width": tile.motion_width, "grid_height": tile.motion_height}.items():
+            if motion.get(key) != value:
+                raise SystemExit(f"temporal tile {tile_id} has inconsistent motion bounds")
+        if not tile_supports_weather(tile, support):
+            raise SystemExit(f"temporal tile {tile_id} is emitted despite empty motion-safe support")
+        rain_path = resolve_manifest_asset(directory, rain["asset"], expected_generation_id)
+        rain_values = np.fromfile(rain_path, dtype="<f2")
+        expected_count = frame_count * tile.stored_width * tile.stored_height
+        if rain_values.size != expected_count or rain.get("byte_length") != expected_count * 2:
+            raise SystemExit(f"temporal tile {tile_id} has invalid rain payload length")
+        expected_rain = np.stack([frame[tile.stored_y:tile.stored_y + tile.stored_height, tile.stored_x:tile.stored_x + tile.stored_width] for frame in frames]).astype("<f2").reshape(-1)
+        if not np.array_equal(rain_values, expected_rain) or not np.all(np.isfinite(rain_values)) or np.any(rain_values < 0):
+            raise SystemExit(f"temporal tile {tile_id} rain payload does not match Float16 source conversion")
+        motion_path = resolve_manifest_asset(directory, motion["asset"], expected_generation_id)
+        motion_values = np.fromfile(motion_path, dtype="<f4")
+        expected_motion = np.stack([interval[:, tile.motion_y:tile.motion_y + tile.motion_height, tile.motion_x:tile.motion_x + tile.motion_width] for interval in motion_intervals]).astype("<f4").reshape(-1)
+        if motion_values.size != expected_motion.size or motion.get("byte_length") != expected_motion.size * 4 or not np.array_equal(motion_values, expected_motion):
+            raise SystemExit(f"temporal tile {tile_id} motion payload does not match global motion assets")
+    for tile in expected_tiles:
+        if f"{tile.tile_x},{tile.tile_y}" not in seen and tile_supports_weather(tile, support):
+            raise SystemExit(f"motion-relevant temporal tile {tile.tile_x},{tile.tile_y} was omitted")
 
 
 def validate_generated_directory(directory: Path, expected_generation_id: str | None = None) -> dict:
@@ -234,6 +318,7 @@ def validate_generated_directory(directory: Path, expected_generation_id: str | 
         path = resolve_manifest_asset(directory, asset, expected_generation_id)
         if path.stat().st_size != expected_frame_bytes:
             raise SystemExit(f"generated rain frame has the wrong byte length: {path}")
+    validate_temporal_tiles(directory, metadata, expected_generation_id)
     return metadata
 
 

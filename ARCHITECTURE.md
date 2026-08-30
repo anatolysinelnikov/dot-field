@@ -44,6 +44,23 @@ delivered exact source frames, (2) viewport- and
 LOD-bounded Dots/Squares topology, and (3) reintroduction of Blur/Areas after
 viewport-windowed scalar reconstruction.
 
+Generated generations also contain additive experimental temporal tiles. The
+existing Float32 source-frame assets remain the active/reference browser
+transport; temporal tiles are not consumed by the browser yet. Each 128×128
+provider-grid interior uses the established 5-source-node sequence-wide rain
+halo when that is conservative; generation derives a wider halo when the
+actual motion field requires it rather than publishing unsafe storage. All 19
+physical mm/h endpoint planes are encoded as little-endian R16F in time-major
+row-major order. Each emitted tile also contains the exact motion bilinear
+subgrid for all 18 existing RGBA32F interval fields, preserving the current
+component order and source-node units. Tile coordinates are derived only from
+the normalized crop grid; presence is a deterministic sequence-wide decision
+using the motion-expanded support mask and is never time-varying. These assets
+participate in the same unpublished-staging validation, gzip sidecars, content
+digest, immutable generation, and atomic `current/` pointer flow. Their future
+purpose is viewport-bounded spatial residency with complete temporal residency,
+not a new runtime path.
+
 The spatial runtime separates provider/data bounds from the active render
 window and from sample identity:
 

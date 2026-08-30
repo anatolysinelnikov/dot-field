@@ -24,6 +24,17 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+from temporal_tiles import (
+    MOTION_SPACING,
+    TEMPORAL_TILE_CONTRACT,
+    TILE_INTERIOR,
+    motion_payload,
+    rain_payload,
+    tile_metadata,
+    tile_supports_weather,
+    tiles_for_grid,
+)
+
 try:
     import numpy as np
 except ImportError as error:  # pragma: no cover - depends on the local machine
@@ -707,6 +718,7 @@ def sequence_metadata(
     first_frame_coverage: dict[str, Any] | None,
     per_frame_coverage: list[dict[str, Any] | None],
     motion: dict[str, Any],
+    temporal_tiles: dict[str, Any],
 ) -> dict[str, Any]:
     union_y, union_x = np.nonzero(union_nonzero)
     frame_node_count = crop["node_count"]
@@ -809,6 +821,7 @@ def sequence_metadata(
             "per_frame_statistics": frame_statistics,
         },
         "motion": motion,
+        "temporal_tiles": temporal_tiles,
         "channels": {
             "rain": True,
             "phenomena": False,
@@ -842,6 +855,74 @@ def sequence_metadata(
             "per_frame_nonzero_coverage": per_frame_coverage,
             "interpretation": "observation footprint only; forecast/nowcast rain outside it remains valid source data",
         },
+    }
+
+
+def generate_temporal_tiles(
+    output_dir: Path,
+    frames: list[np.ndarray],
+    motion_intervals: list[np.ndarray],
+    support: np.ndarray,
+) -> dict[str, Any]:
+    """Write additive all-time tile payloads and return their manifest section."""
+    motion_height, motion_width = motion_intervals[0].shape[1:]
+    maximum_component_displacement = float(max(np.max(np.abs(interval)) for interval in motion_intervals))
+    rain_halo = math.ceil(maximum_component_displacement) + 1
+    tiles = tiles_for_grid(frames[0].shape[1], frames[0].shape[0], motion_width, motion_height, rain_halo)
+    rain_dir = output_dir / "temporal-tiles" / "rain"
+    motion_dir = output_dir / "temporal-tiles" / "motion"
+    rain_dir.mkdir(parents=True, exist_ok=True)
+    motion_dir.mkdir(parents=True, exist_ok=True)
+    emitted = []
+    maximum_error = 0.0
+    error_sum = 0.0
+    error_count = 0
+    for tile in tiles:
+        if not tile_supports_weather(tile, support):
+            continue
+        rain_bytes, quantization = rain_payload(frames, tile)
+        motion_bytes = motion_payload(motion_intervals, tile)
+        rain_asset = f"temporal-tiles/rain/tile-{tile.tile_x}-{tile.tile_y}.f16"
+        motion_asset = f"temporal-tiles/motion/tile-{tile.tile_x}-{tile.tile_y}.f32"
+        (output_dir / rain_asset).write_bytes(rain_bytes)
+        (output_dir / motion_asset).write_bytes(motion_bytes)
+        maximum_error = max(maximum_error, quantization["maximum_absolute_mmh"])
+        error_sum += quantization["mean_absolute_mmh"] * quantization["sample_count"]
+        error_count += quantization["sample_count"]
+        emitted.append(tile_metadata(tile, rain_asset, len(rain_bytes), motion_asset, len(motion_bytes)))
+    return {
+        "contract_version": TEMPORAL_TILE_CONTRACT,
+        "tile_interior_source_nodes": TILE_INTERIOR,
+        "rain_halo_source_nodes": rain_halo,
+        "maximum_absolute_motion_component_source_nodes": maximum_component_displacement,
+        "provider_grid_origin": "normalized crop source node [0,0], x west_to_east and y south_to_north",
+        "geometric_tile_columns": math.ceil(frames[0].shape[1] / TILE_INTERIOR),
+        "geometric_tile_rows": math.ceil(frames[0].shape[0] / TILE_INTERIOR),
+        "geometric_tile_count": len(tiles),
+        "emitted_tile_count": len(emitted),
+        "omission_rule": f"omit only when the sequence-wide motion-expanded support mask has no positive node in the tile's clipped rain stored footprint (interior plus {rain_halo}-node halo)",
+        "rain": {
+            "dtype": "Float16",
+            "byte_order": "little-endian",
+            "physical_units": "mm/h",
+            "temporal_plane_count": len(frames),
+            "plane_layout": "time-major; each plane row-major y south_to_north then x west_to_east",
+            "quantization": {
+                "conversion": "deterministic NumPy IEEE-754 binary16 round-to-nearest-even",
+                "maximum_absolute_endpoint_error_mmh": maximum_error,
+                "mean_absolute_endpoint_error_mmh": error_sum / error_count if error_count else 0.0,
+            },
+        },
+        "motion": {
+            "dtype": "Float32",
+            "byte_order": "little-endian",
+            "units": "source_grid_nodes_per_interval",
+            "temporal_interval_count": len(motion_intervals),
+            "layout": "interval-major; each interval is current component-major forwardX, forwardY, backwardX, backwardY row-major planes",
+            "grid_spacing_source_nodes": MOTION_SPACING,
+            "component_convention": "forward_xy_then_backward_xy",
+        },
+        "tiles": emitted,
     }
 
 
@@ -904,6 +985,7 @@ def convert_sequence(args: argparse.Namespace) -> int:
         rain_dir.mkdir(parents=True, exist_ok=True)
         motion_dir.mkdir(parents=True, exist_ok=True)
         try:
+            crop_frames = []
             for time_index, timestamp in enumerate(timestamps):
                 values = read_validated_source_frame(precipitation, time_index)
                 normalized = values * factor
@@ -916,6 +998,7 @@ def convert_sequence(args: argparse.Namespace) -> int:
                     temporary_frame_path.replace(frame_path)
                 finally:
                     temporary_frame_path.unlink(missing_ok=True)
+                crop_frames.append(np.asarray(crop_values, dtype=np.float32, order="C"))
                 nonzero = crop_values > 0
                 nonzero_y, nonzero_x = np.nonzero(nonzero)
                 inside = crop_availability[nonzero_y, nonzero_x] if crop_availability is not None else None
@@ -930,6 +1013,7 @@ def convert_sequence(args: argparse.Namespace) -> int:
             motion_width, motion_height = motion_grid_shape(crop["width"], crop["height"])
             interval_byte_length = motion_width * motion_height * 4 * 4
             motion_assets = []
+            motion_intervals = []
             for interval in range(len(timestamps) - 1):
                 frame_a = np.fromfile(rain_dir / f"frame-{interval:03d}.f32", dtype="<f4").reshape(crop["height"], crop["width"])
                 frame_b = np.fromfile(rain_dir / f"frame-{interval + 1:03d}.f32", dtype="<f4").reshape(crop["height"], crop["width"])
@@ -941,6 +1025,7 @@ def convert_sequence(args: argparse.Namespace) -> int:
                 if motion_path.stat().st_size != interval_byte_length:
                     raise ValueError(f"motion interval {interval} has unexpected byte length")
                 motion_assets.append(f"motion/interval-{interval:03d}.f32")
+                motion_intervals.append(packed_motion)
             motion = {
                 "available": True,
                 "dtype": "Float32",
@@ -969,8 +1054,9 @@ def convert_sequence(args: argparse.Namespace) -> int:
                     "maximum_displacement_source_nodes": MOTION_SEARCH_RADIUS,
                 },
             }
+            expanded_support = expand_motion_support(crop_union_nonzero)
             packed_support = np.packbits(
-                np.asarray(expand_motion_support(crop_union_nonzero), dtype=np.uint8).ravel(order="C"),
+                np.asarray(expanded_support, dtype=np.uint8).ravel(order="C"),
                 bitorder="little",
             )
             with NamedTemporaryFile(dir=output_dir, prefix=".support.", suffix=".mask.tmp", delete=False) as temporary:
@@ -980,6 +1066,10 @@ def convert_sequence(args: argparse.Namespace) -> int:
                 temporary_support_path.replace(support_path)
             finally:
                 temporary_support_path.unlink(missing_ok=True)
+
+            temporal_tiles = generate_temporal_tiles(
+                output_dir, crop_frames, motion_intervals, expanded_support
+            )
 
             metadata = sequence_metadata(
                 source,
@@ -1002,6 +1092,7 @@ def convert_sequence(args: argparse.Namespace) -> int:
                 per_frame_coverage[0],
                 per_frame_coverage,
                 motion,
+                temporal_tiles,
             )
             with metadata_path.open("w", encoding="utf-8") as handle:
                 json.dump(metadata, handle, indent=2, sort_keys=True)
