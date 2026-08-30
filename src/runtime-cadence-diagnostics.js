@@ -7,7 +7,7 @@ function percentile(values, fraction) {
 }
 
 function summarize(values) {
-  if (!values.length) return { count: 0, medianMs: null, p95Ms: null, p99Ms: null, maxMs: null, over16_7Pct: null, over33_3Pct: null, over50Pct: null, over100Pct: null };
+  if (!values.length) return { count: 0, medianMs: null, p95Ms: null, p99Ms: null, maxMs: null, over16_7Pct: null, over25Pct: null, over33_3Pct: null, over50Pct: null, over100Pct: null };
   const over = (threshold) => values.filter((value) => value > threshold).length * 100 / values.length;
   return {
     count: values.length,
@@ -16,6 +16,7 @@ function summarize(values) {
     p99Ms: percentile(values, 0.99),
     maxMs: Math.max(...values),
     over16_7Pct: over(16.7),
+    over25Pct: over(25),
     over33_3Pct: over(33.3),
     over50Pct: over(50),
     over100Pct: over(100)

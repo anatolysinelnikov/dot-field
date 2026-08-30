@@ -102,7 +102,21 @@ const gpuWeatherTimelineStats = {
   physicalKeyframeReconstructionDraws: 0,
   reusedPhysicalKeyframes: 0,
   presentationUpdates: 0,
-  repaintRequests: 0
+  repaintRequests: 0,
+  presentationMode: 'normal',
+  presentationSyncMode: 'playback',
+  presentationHzCap: null,
+  playbackRafCount: 0,
+  presentationOpportunityCount: 0,
+  presentationAcceptedCount: 0,
+  presentationSkippedCount: 0,
+  mapLayerRenderCount: 0,
+  weatherRepaintRequestCount: 0,
+  presentationStateUpdatesFromPlayback: 0,
+  presentationStateUpdatesFromRender: 0,
+  presentationRenderSamples: 0,
+  redundantRepaintRequests: 0,
+  lastPresentationAt: null
 };
 
 function updateTimelineResidency(residentSourceFrameIndices = []) {
@@ -232,6 +246,12 @@ let weatherRequestGeneration = 0;
 const diagnosticsEnabled = new URLSearchParams(window.location.search).get('diagnostics') === '1';
 const queryParameters = new URLSearchParams(window.location.search);
 const cadenceEnabled = queryParameters.get('cadence') === '1';
+const gpuWeatherHzCap = Number(queryParameters.get('gpuWeatherHz')) === 60 ? 60 : null;
+const gpuWeatherPresentationMode = queryParameters.get('gpuWeatherPresentation') === 'none' ? 'maplibre-only' : 'normal';
+const gpuWeatherPresentationSyncMode = queryParameters.get('gpuWeatherPresentationSync') === 'render';
+gpuWeatherTimelineStats.presentationMode = gpuWeatherPresentationMode;
+gpuWeatherTimelineStats.presentationSyncMode = gpuWeatherPresentationSyncMode ? 'render' : 'playback';
+gpuWeatherTimelineStats.presentationHzCap = gpuWeatherHzCap;
 const requestedPlaybackRate = Number(queryParameters.get('playbackRate'));
 const diagnosticPlaybackRate = cadenceEnabled && Number.isFinite(requestedPlaybackRate) && requestedPlaybackRate > 0 && requestedPlaybackRate <= 1
   ? requestedPlaybackRate : 1;
@@ -336,7 +356,7 @@ async function initializeGpuWeatherPath() {
   return result;
 }
 
-function setGpuWeatherPresentation(frame, physicalA, physicalB) {
+function setGpuWeatherPresentation(frame, physicalA, physicalB, presentationTimestamp = null, { requestRepaint = true, origin = 'playback' } = {}) {
   const source = {
     textureA: physicalA.texture,
     textureB: physicalB.texture,
@@ -350,13 +370,30 @@ function setGpuWeatherPresentation(frame, physicalA, physicalB) {
   weatherLayer.setGpuWeatherSource(source, { requestRepaint: false });
   squaresLayer.setGpuWeatherSource(source, { requestRepaint: false });
   gpuWeatherTimelineStats.presentationUpdates++;
-  map.triggerRepaint();
-  gpuWeatherTimelineStats.repaintRequests++;
+  gpuWeatherTimelineStats.presentationAcceptedCount++;
+  if (origin === 'render') gpuWeatherTimelineStats.presentationStateUpdatesFromRender++;
+  else gpuWeatherTimelineStats.presentationStateUpdatesFromPlayback++;
+  gpuWeatherTimelineStats.lastPresentationAt = presentationTimestamp;
+  if (requestRepaint) {
+    map.triggerRepaint();
+    gpuWeatherTimelineStats.repaintRequests++;
+    gpuWeatherTimelineStats.weatherRepaintRequestCount++;
+  }
   return source;
 }
 
-function updateGpuWeatherTime(normalizedTime) {
+let gpuWeatherLastRenderSampleTime = null;
+function updateGpuWeatherTime(normalizedTime, { presentationTimestamp = null, requestRepaint = true, origin = 'playback' } = {}) {
   if (!gpuWeatherRequestedAtCurrentLevel()) return false;
+  if (presentationTimestamp !== null) {
+    gpuWeatherTimelineStats.presentationOpportunityCount++;
+    const interval = 1000 / gpuWeatherHzCap;
+    if (gpuWeatherHzCap && gpuWeatherTimelineStats.lastPresentationAt !== null
+      && presentationTimestamp - gpuWeatherTimelineStats.lastPresentationAt < interval) {
+      gpuWeatherTimelineStats.presentationSkippedCount++;
+      return { status: 'presentation-skipped' };
+    }
+  }
   if (!gpuWeatherUsingGpu || !gpuWeatherTileReconstructor?.layout) {
     if (!gpuWeatherInitializationPromise) {
       gpuWeatherInitializationPromise = initializeGpuWeatherPath().finally(() => {
@@ -375,7 +412,7 @@ function updateGpuWeatherTime(normalizedTime) {
     gpuWeatherKeyframes.progress = frame.progress;
     gpuWeatherTimelineStats.temporalChanges++;
     gpuWeatherTimelineStats.lastUpdateMs = performance.now() - started;
-    setGpuWeatherPresentation(frame, gpuWeatherKeyframes.a, gpuWeatherKeyframes.b);
+    setGpuWeatherPresentation(frame, gpuWeatherKeyframes.a, gpuWeatherKeyframes.b, presentationTimestamp, { requestRepaint, origin });
     return gpuWeatherKeyframes;
   }
   const desired = [frame.index, frame.nextIndex];
@@ -407,11 +444,24 @@ function updateGpuWeatherTime(normalizedTime) {
   gpuWeatherTimelineStats.temporalChanges++;
   gpuWeatherTimelineStats.rendererPairChanges++;
   gpuWeatherTimelineStats.lastUpdateMs = performance.now() - started;
-  return setGpuWeatherPresentation(frame, next[0], next[1]);
+  return setGpuWeatherPresentation(frame, next[0], next[1], presentationTimestamp, { requestRepaint, origin });
+}
+
+function synchronizeGpuWeatherPresentationForRender() {
+  if (!gpuWeatherPresentationSyncMode || gpuWeatherHzCap || !gpuWeatherRequestedAtCurrentLevel()) return;
+  const normalizedTime = state.time / LOOP_SECONDS;
+  if (gpuWeatherLastRenderSampleTime === normalizedTime) return;
+  gpuWeatherLastRenderSampleTime = normalizedTime;
+  gpuWeatherTimelineStats.presentationRenderSamples++;
+  updateGpuWeatherTime(normalizedTime, { requestRepaint: false, origin: 'render' });
 }
 
 function gpuWeatherDiagnostics() {
   const tile = gpuWeatherTileReconstructor?.diagnostics() || null;
+  const dotsDiagnostics = weatherLayer?.diagnostics() || null;
+  const squaresDiagnostics = squaresLayer?.diagnostics() || null;
+  gpuWeatherTimelineStats.mapLayerRenderCount = (dotsDiagnostics?.lifecycle?.gpuWeatherRenderCalls || 0)
+    + (squaresDiagnostics?.lifecycle?.gpuWeatherRenderCalls || 0);
   return {
     enabled: gpuWeatherExperimentEnabled,
     active: gpuWeatherUsingGpu,
@@ -435,6 +485,19 @@ function gpuWeatherDiagnostics() {
         progress: gpuWeatherKeyframes.progress
       } : null
     } : null,
+    presentation: {
+      mode: gpuWeatherPresentationMode,
+      hzCap: gpuWeatherHzCap,
+      sync: gpuWeatherPresentationSyncMode ? 'render' : 'playback',
+      dots: dotsDiagnostics ? {
+        timing: dotsDiagnostics.gpuPresentationTiming,
+        lifecycle: dotsDiagnostics.lifecycle
+      } : null,
+      squares: squaresDiagnostics ? {
+        timing: squaresDiagnostics.gpuPresentationTiming,
+        lifecycle: squaresDiagnostics.lifecycle
+      } : null
+    },
     timeline: { ...gpuWeatherTimelineStats },
     residency: tile
   };
@@ -864,7 +927,7 @@ function installGpuWeatherExperiment() {
       return results;
     }
   };
-  console.info('GPU weather Dots/Squares experiment available at ?gpuWeather=1 (stable L14 only; CPU fallback elsewhere).');
+  console.info('GPU weather Dots/Squares experiment available at ?gpuWeather=1 (stable L14 only; CPU fallback elsewhere). Diagnostics: add &gpuWeatherHz=60 to cap presentation, &gpuWeatherPresentation=none for MapLibre-only redraw measurement, or &gpuWeatherPresentationSync=render to sample presentation in the MapLibre render callback.');
 }
 
 // This is intentionally opt-in. It exercises the existing canonical L14
@@ -960,6 +1023,14 @@ function tryInitializeWeatherLayer() {
   );
   weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid);
   squaresLayer = new GeographicSquaresLayer(geographicWeatherPyramid);
+  weatherLayer.setGpuWeatherPresentationEnabled(gpuWeatherPresentationMode !== 'maplibre-only');
+  squaresLayer.setGpuWeatherPresentationEnabled(gpuWeatherPresentationMode !== 'maplibre-only');
+  weatherLayer.setGpuWeatherTimingEnabled(diagnosticsEnabled);
+  squaresLayer.setGpuWeatherTimingEnabled(diagnosticsEnabled);
+  if (gpuWeatherPresentationSyncMode) {
+    weatherLayer.setGpuWeatherRenderSynchronizer(synchronizeGpuWeatherPresentationForRender);
+    squaresLayer.setGpuWeatherRenderSynchronizer(synchronizeGpuWeatherPresentationForRender);
+  }
   geographicLayers = [rawLayer, squaresLayer, weatherLayer];
   state.canonicalWindow = initialWindow;
   const styleLayers = map.getStyle().layers || [];
@@ -1144,13 +1215,19 @@ function updateLODTransition(now) {
 
 function queueWeatherUpdate() {
   if (state.weatherQueued) return;
+  if (gpuWeatherPresentationSyncMode && !gpuWeatherHzCap && gpuWeatherRequestedAtCurrentLevel()) {
+    map.triggerRepaint();
+    gpuWeatherTimelineStats.repaintRequests++;
+    gpuWeatherTimelineStats.weatherRepaintRequestCount++;
+    return;
+  }
   state.weatherQueued = true;
-  requestAnimationFrame(() => {
+  requestAnimationFrame((presentationTimestamp) => {
     state.weatherQueued = false;
     if (!state.mapReady || !activeWeatherField) return;
     const time = state.time / LOOP_SECONDS;
     if (state.renderMode === 'raw') return;
-    requestWeatherTime(time, { playback: state.playing });
+    requestWeatherTime(time, { playback: state.playing, presentationTimestamp });
   });
 }
 
@@ -1194,10 +1271,10 @@ function rebasePlaybackHorizon(normalizedTime, requirements) {
   });
 }
 
-function requestWeatherTime(normalizedTime, { playback = false } = {}) {
+function requestWeatherTime(normalizedTime, { playback = false, presentationTimestamp = null } = {}) {
   if (!activeWeatherField) return Promise.resolve();
   if (gpuWeatherRequestedAtCurrentLevel()) {
-    updateGpuWeatherTime(normalizedTime);
+    updateGpuWeatherTime(normalizedTime, { presentationTimestamp });
     return Promise.resolve({ status: 'gpu-weather' });
   }
   const requirements = rendererTemporalRequirements(normalizedTime);
@@ -1644,6 +1721,7 @@ function waitForPlaybackRequirements(normalizedTime) {
 
 function frame(now) {
   applicationFrameQueued = false;
+  if (gpuWeatherExperimentEnabled) gpuWeatherTimelineStats.playbackRafCount++;
   const delta = Math.min((now - state.lastFrame) / 1000, 0.1) * diagnosticPlaybackRate;
   state.lastFrame = now;
   let reachedEndpoint = false;

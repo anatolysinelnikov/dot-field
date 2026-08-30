@@ -9,6 +9,7 @@ import {
   GPU_SQUARES_RAIN_MAPPING_SHADER,
   GPU_WEATHER_COMMON_VERTEX
 } from './geographic-gpu-weather-presentation.js';
+import { createGpuPresentationTiming } from './gpu-presentation-timing.js';
 
 const GPU_WEATHER_LEVEL = 14;
 
@@ -329,6 +330,9 @@ export class GeographicSquaresLayer {
     this.temporalProgress = 0;
     this.gpuWeatherMode = false;
     this.gpuWeatherSource = null;
+    this.gpuWeatherPresentationEnabled = true;
+    this.gpuWeatherRenderSynchronizer = null;
+    this.gpuPresentationTiming = createGpuPresentationTiming();
     this.instanceData = [new Float32Array(), new Float32Array()];
     this.instanceLayouts = [null, null];
     this.instanceCounts = [0, 0];
@@ -338,12 +342,14 @@ export class GeographicSquaresLayer {
     this.programs = new Map();
     this.lifecycleDiagnostics = {
       evaluateKeyframeCalls: 0, evaluateTransitionKeyframeCalls: 0, weatherEvaluationMs: 0, mappingMs: 0,
-      instanceRebuildCalls: 0, instanceRebuildMs: 0, preservedTopologyStates: 0, gpuWeatherRenderCalls: 0
+      instanceRebuildCalls: 0, instanceRebuildMs: 0, preservedTopologyStates: 0,
+      gpuWeatherRenderCalls: 0, gpuWeatherPresentationDrawCalls: 0
     };
   }
 
   onAdd(map, gl) {
     this.map = map;
+    this.gpuPresentationTiming.attach(gl);
     this.vertexBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, CELL_VERTICES, gl.STATIC_DRAW);
@@ -438,6 +444,18 @@ export class GeographicSquaresLayer {
     }
     this.gpuWeatherSource = source;
     if (requestRepaint) this.map?.triggerRepaint();
+  }
+
+  setGpuWeatherPresentationEnabled(enabled) {
+    this.gpuWeatherPresentationEnabled = Boolean(enabled);
+  }
+
+  setGpuWeatherTimingEnabled(enabled) {
+    this.gpuPresentationTiming.setEnabled(enabled);
+  }
+
+  setGpuWeatherRenderSynchronizer(callback) {
+    this.gpuWeatherRenderSynchronizer = typeof callback === 'function' ? callback : null;
   }
 
   setHazardsVisible(visible) {
@@ -669,10 +687,14 @@ export class GeographicSquaresLayer {
   }
 
   renderGpuWeather(gl, shaderData, projection) {
+    this.gpuWeatherRenderSynchronizer?.();
     const source = this.gpuWeatherSource;
     const levelData = this.levelData;
     if (!source || !levelData || levelData.level !== GPU_WEATHER_LEVEL) return;
     this.lifecycleDiagnostics.gpuWeatherRenderCalls++;
+    if (!this.gpuWeatherPresentationEnabled) return;
+    const startedAt = performance.now();
+    const query = this.gpuPresentationTiming.begin(gl);
     const entry = this.gpuProgramFor(gl, shaderData);
     const { locations } = entry;
     gl.useProgram(entry.program);
@@ -693,6 +715,8 @@ export class GeographicSquaresLayer {
     gl.enableVertexAttribArray(locations.vertex);
     gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, levelData.count);
+    this.lifecycleDiagnostics.gpuWeatherPresentationDrawCalls++;
+    this.gpuPresentationTiming.end(gl, query, startedAt);
   }
 
   renderGroup(gl, entry, projection, group, opacity) {
@@ -770,10 +794,14 @@ export class GeographicSquaresLayer {
         source: Boolean(this.gpuWeatherSource),
         physicalField: this.gpuWeatherSource ? 'gpu-r16f' : null,
         level: this.gpuWeatherSource?.levelData?.level ?? null,
+        sampleCount: this.gpuWeatherSource?.levelData?.count || 0,
+        drawCallCount: this.gpuWeatherMode && this.gpuWeatherSource ? 1 : 0,
+        vertexCountPerDraw: 6,
         currentFieldBytes: this.gpuWeatherSource?.width * this.gpuWeatherSource?.height * 2 || 0,
         mappedCpuBytes: this.gpuWeatherSource ? 0 : temporalStateBytes(this.temporal),
         mappedBufferUploads: this.gpuWeatherSource ? 0 : null
       },
+      gpuPresentationTiming: this.gpuPresentationTiming.diagnostics(this.map?.painter?.context?.gl),
       lifecycle: { ...this.lifecycleDiagnostics }
     };
   }

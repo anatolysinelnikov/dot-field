@@ -14,6 +14,7 @@ import {
   GPU_DOTS_RAIN_MAPPING_SHADER,
   GPU_WEATHER_COMMON_VERTEX
 } from './geographic-gpu-weather-presentation.js';
+import { createGpuPresentationTiming } from './gpu-presentation-timing.js';
 
 const REFERENCE_GRID_LEVEL = WEATHER_REFERENCE_LEVEL;
 const GPU_WEATHER_LEVEL = 14;
@@ -682,17 +683,22 @@ export class GeographicDotsLayer {
     this.temporalProgress = 0;
     this.gpuWeatherMode = false;
     this.gpuWeatherSource = null;
+    this.gpuWeatherPresentationEnabled = true;
+    this.gpuWeatherRenderSynchronizer = null;
+    this.gpuPresentationTiming = createGpuPresentationTiming();
     this.buffersDirty = true;
     this.active = true;
     this.hazardsVisible = true;
     this.lifecycleDiagnostics = {
       evaluateKeyframeCalls: 0, evaluateTransitionKeyframeCalls: 0, weatherEvaluationMs: 0, mappingMs: 0,
-      instanceRebuildCalls: 0, instanceRebuildMs: 0, preservedTopologyStates: 0, gpuWeatherRenderCalls: 0
+      instanceRebuildCalls: 0, instanceRebuildMs: 0, preservedTopologyStates: 0,
+      gpuWeatherRenderCalls: 0, gpuWeatherPresentationDrawCalls: 0
     };
   }
 
   onAdd(map, gl) {
     this.map = map;
+    this.gpuPresentationTiming.attach(gl);
     this.instanceBuffers = Object.fromEntries(WEATHER_TYPES.map((type) => [type, gl.createBuffer()]));
     this.vertexBuffers = { rain: gl.createBuffer(), strong: gl.createBuffer(), storm: gl.createBuffer(), hail: gl.createBuffer() };
     for (const [type, vertices] of Object.entries({ rain: QUAD, strong: QUAD, storm: STORM, hail: HAIL })) {
@@ -784,6 +790,18 @@ export class GeographicDotsLayer {
     }
     this.gpuWeatherSource = source;
     if (requestRepaint) this.map?.triggerRepaint();
+  }
+
+  setGpuWeatherPresentationEnabled(enabled) {
+    this.gpuWeatherPresentationEnabled = Boolean(enabled);
+  }
+
+  setGpuWeatherTimingEnabled(enabled) {
+    this.gpuPresentationTiming.setEnabled(enabled);
+  }
+
+  setGpuWeatherRenderSynchronizer(callback) {
+    this.gpuWeatherRenderSynchronizer = typeof callback === 'function' ? callback : null;
   }
 
   activeLevels() {
@@ -1086,10 +1104,14 @@ export class GeographicDotsLayer {
         source: Boolean(this.gpuWeatherSource),
         physicalField: this.gpuWeatherSource ? 'gpu-r16f' : null,
         level: this.gpuWeatherSource?.levelData?.level ?? null,
+        sampleCount: this.gpuWeatherSource?.levelData?.count || 0,
+        drawCallCount: this.gpuWeatherMode && this.gpuWeatherSource ? 2 : 0,
+        vertexCountPerDraw: 6,
         currentFieldBytes: this.gpuWeatherSource?.width * this.gpuWeatherSource?.height * 2 || 0,
         mappedCpuBytes: this.gpuWeatherSource ? 0 : temporalBreakdown.mappedPresentationBytes,
         mappedBufferUploads: this.gpuWeatherSource ? 0 : null
       },
+      gpuPresentationTiming: this.gpuPresentationTiming.diagnostics(this.map?.painter?.context?.gl),
       lifecycle: { ...this.lifecycleDiagnostics }
     };
   }
@@ -1117,10 +1139,14 @@ export class GeographicDotsLayer {
   }
 
   renderGpuWeather(gl, shaderData, projection) {
+    this.gpuWeatherRenderSynchronizer?.();
     const source = this.gpuWeatherSource;
     const levelData = this.levelData;
     if (!source || !levelData || levelData.level !== GPU_WEATHER_LEVEL) return;
     this.lifecycleDiagnostics.gpuWeatherRenderCalls++;
+    if (!this.gpuWeatherPresentationEnabled) return;
+    const startedAt = performance.now();
+    const query = this.gpuPresentationTiming.begin(gl);
     const programs = this.gpuProgramsFor(gl, shaderData);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -1153,6 +1179,8 @@ export class GeographicDotsLayer {
     }
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.depthMask(true);
+    this.lifecycleDiagnostics.gpuWeatherPresentationDrawCalls += 2;
+    this.gpuPresentationTiming.end(gl, query, startedAt);
   }
 
   renderInstances(gl, entry, projection, types) {
