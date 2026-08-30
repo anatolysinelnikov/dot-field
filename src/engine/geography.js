@@ -90,10 +90,10 @@ export function setActiveWeatherField(field) {
   setGeographicWeatherSupport(field.weatherSupport || field.bounds);
 }
 
-export async function loadActiveWeatherField({ onTiming = null } = {}) {
+export async function loadActiveWeatherField({ onTiming = null, temporalMode = 'motion' } = {}) {
   const sequenceLoad = beginRealWeatherSequenceLoad(
     ACTIVE_REAL_WEATHER_METADATA_URL,
-    { onTiming, retainAllSourceFrames: true, sourceFrameFetchConcurrency: 1 }
+    { onTiming, temporalMode, retainAllSourceFrames: true, sourceFrameFetchConcurrency: 1 }
   );
   const field = await sequenceLoad.loadSequence();
   await sequenceLoad.fillAllSourceFrames();
@@ -101,12 +101,13 @@ export async function loadActiveWeatherField({ onTiming = null } = {}) {
   return field;
 }
 
-export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = null } = {}) {
+export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = null, temporalMode = 'motion' } = {}) {
   const sequenceLoad = beginRealWeatherSequenceLoad(
     ACTIVE_REAL_WEATHER_METADATA_URL,
     {
       onTiming,
       onResidencyChange,
+      temporalMode,
       // The active finite forecast is intentionally fully resident after its
       // background fill. This is source payload ownership, not derived LOD
       // materialization; the latter remains bounded by the renderer lifecycle.

@@ -34,7 +34,6 @@ for (let index = 0; index < oldLevelData.count; index++) {
 }
 const oldGeometryPrepared = weather.prepareSamplingGeometry(oldLongitudes, oldLatitudes);
 const oldGeometry = { ...oldGeometryPrepared };
-delete oldGeometry.potentialActiveIndices;
 
 function oldChain(frame, minimumLevel, reusable = null) {
   const genericFrame = Object.create(frame);

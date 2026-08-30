@@ -32,7 +32,6 @@ for (let index = 0; index < topology.levels.get(13).count; index++) {
 }
 const densePreparedGeometry = weather.prepareSamplingGeometry(denseLongitudes, denseLatitudes);
 const denseGeometry = { ...densePreparedGeometry };
-delete denseGeometry.potentialActiveIndices;
 
 function denseChain(pyramid, frame, minimumLevel) {
   let summary = evaluateDirectWeatherSummary(pyramid.levels.get(13), frame, null, Float32Array, denseGeometry, pyramid.totalWeights.get(13));
@@ -70,11 +69,10 @@ function maxDifference(left, right) {
 
 function materializedTemporalReference(frame, geometry) {
   const activeIndices = geometry.potentialActiveIndices;
-  const rain0 = frame.preparedSourceFrame(geometry, frame.frame0);
-  const rain1 = frame.preparedSourceFrame(geometry, frame.frame1);
+  const temporal = frame.prepareTemporalSampling(geometry);
   const values = new Float64Array(activeIndices.length);
   for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
-    values[activeIndex] = rain0[activeIndex] + (rain1[activeIndex] - rain0[activeIndex]) * frame.progress;
+    values[activeIndex] = temporal(activeIndex);
   }
   return values;
 }

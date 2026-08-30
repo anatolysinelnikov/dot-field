@@ -17,11 +17,19 @@ const potentialWeatherMask = decodePackedWeatherSupport(
 );
 const longitudes = Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing);
 const latitudes = Float64Array.from({ length: grid.height }, (_, index) => grid.latitude_start + index * grid.latitude_spacing);
+const motion = metadata.motion ? {
+  width: metadata.motion.grid_width, height: metadata.motion.grid_height,
+  spacing: metadata.motion.grid_spacing_source_nodes,
+  intervals: await Promise.all(metadata.motion.interval_assets.map(async (asset) => {
+    const buffer = await readFile(new URL(asset, root));
+    return new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / Float32Array.BYTES_PER_ELEMENT);
+  }))
+} : null;
 const sequence = new RealWeatherSequence({
   longitudes, latitudes, sourceFrames, frameCount: metadata.time.count,
   longitudeSpacing: grid.longitude_spacing, latitudeSpacing: grid.latitude_spacing,
   weatherSupport: grid.weather_support,
-  timestamps: metadata.time.timestamps, potentialWeatherMask,
+  timestamps: metadata.time.timestamps, potentialWeatherMask, motion, temporalMode: 'linear',
   sourceFrameCacheLimit: metadata.time.count
 });
 
@@ -70,6 +78,10 @@ if (terminal.frame0 !== 18 || terminal.frame1 !== 18 || terminal.progress !== 0)
 
 const expectedPackedSupport = new Uint8Array(frameSize);
 for (const values of sourceFrames.values()) for (let index = 0; index < values.length; index++) if (values[index] > 0) expectedPackedSupport[index] = 1;
-for (let index = 0; index < frameSize; index++) same(potentialWeatherMask[index], expectedPackedSupport[index], `support bit ${index}`);
+if (metadata.support_mask.positive_condition === 'rain > 0') {
+  for (let index = 0; index < frameSize; index++) same(potentialWeatherMask[index], expectedPackedSupport[index], `support bit ${index}`);
+} else if (metadata.support_mask.positive_condition !== 'rain > 0 expanded by motion search radius') {
+  throw new Error(`unsupported support condition ${metadata.support_mask.positive_condition}`);
+}
 
 console.log(`Real weather sequence verification passed: ${sequence.frameCount} independent exact Float32 frames; every exact time, every interval source-node interpolation, packed sequence-wide support, prepared reconstruction, and terminal semantics.`);

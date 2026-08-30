@@ -86,7 +86,8 @@ function updateTimelineResidency(residentSourceFrameIndices = []) {
   }));
 }
 
-const weatherLoad = beginActiveWeatherLoad({ onTiming: markStartup, onResidencyChange: updateTimelineResidency });
+const temporalDiagnostic = new URLSearchParams(window.location.search).get('temporal') === 'linear' ? 'linear' : 'motion';
+const weatherLoad = beginActiveWeatherLoad({ onTiming: markStartup, onResidencyChange: updateTimelineResidency, temporalMode: temporalDiagnostic });
 
 async function loadMapTilerKey() {
   try {

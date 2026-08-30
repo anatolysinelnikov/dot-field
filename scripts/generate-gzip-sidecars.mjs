@@ -1,4 +1,4 @@
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -26,9 +26,22 @@ const metadata = JSON.parse(await readFile(resolve(directory, 'metadata.json'), 
 if (metadata.generation_id) {
   throw new Error(`Refusing to mutate a generation-published directory: ${directory}`);
 }
-const rainDirectory = resolve(directory, 'rain');
-const rainFrames = (await readdir(rainDirectory)).filter((name) => name.endsWith('.f32')).sort();
-const assets = [...rainFrames.map((name) => resolve(rainDirectory, name)), resolve(directory, 'support.mask')];
+function manifestAssets(value, result = []) {
+  if (Array.isArray(value)) {
+    for (const child of value) manifestAssets(child, result);
+  } else if (value && typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'asset' && typeof child === 'string') result.push(child);
+      else if (key.endsWith('_assets') && Array.isArray(child)) {
+        for (const asset of child) if (typeof asset === 'string') result.push(asset);
+      } else manifestAssets(child, result);
+    }
+  }
+  return result;
+}
+
+const assets = [...new Set(manifestAssets(metadata))].map((asset) => resolve(directory, asset));
+if (!assets.length) throw new Error('metadata.json does not reference any logical assets');
 let logicalBytes = 0;
 let encodedBytes = 0;
 

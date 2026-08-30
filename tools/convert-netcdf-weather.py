@@ -26,12 +26,13 @@ from typing import Any
 
 try:
     import numpy as np
-    from netCDF4 import Dataset, num2date
 except ImportError as error:  # pragma: no cover - depends on the local machine
-    raise SystemExit(
-        "This offline converter requires Python packages netCDF4 and NumPy. "
-        "Install them outside the repository and retry."
-    ) from error
+    raise SystemExit("This offline converter requires NumPy.") from error
+try:
+    from netCDF4 import Dataset, num2date
+except ImportError:  # The isolated motion verifier imports the dependency-free matcher.
+    Dataset = None
+    num2date = None
 
 
 SCHEMA_VERSION = "dot-field-normalized-weather-v1"
@@ -42,6 +43,154 @@ COORDINATE_FORMAT = ".17g"
 SEQUENCE_SCHEMA_VERSION = "dot-field-weather-transport-v2"
 SEQUENCE_HALO_CELLS = 1
 DEFAULT_AVAILABILITY_PATH = Path("data/availability/available_region_latest.json")
+MOTION_GRID_SPACING = 16
+MOTION_BLOCK_RADIUS = 4
+MOTION_SEARCH_RADIUS = 8
+MOTION_MIN_SIGNAL = 0.08
+MOTION_MIN_VARIANCE = 0.0025
+MOTION_MIN_IMPROVEMENT = 0.08
+MOTION_FILL_RADIUS_CELLS = 4
+MOTION_BLOCK_OFFSETS = tuple(
+    (offset_x, offset_y)
+    for offset_y in (-4, 0, 4)
+    for offset_x in (-4, 0, 4)
+)
+
+
+def motion_grid_shape(width: int, height: int) -> tuple[int, int]:
+    return (math.ceil((width - 1) / MOTION_GRID_SPACING) + 1,
+            math.ceil((height - 1) / MOTION_GRID_SPACING) + 1)
+
+
+def match_motion_block(
+    source_log: np.ndarray,
+    target_log: np.ndarray,
+    center_x: int,
+    center_y: int,
+) -> dict[str, float | int | bool]:
+    """Evaluate one v1 9x9 offset-block hypothesis deterministically."""
+    height, width = source_log.shape
+    x0, x1 = max(0, center_x - MOTION_BLOCK_RADIUS), min(width, center_x + MOTION_BLOCK_RADIUS + 1)
+    y0, y1 = max(0, center_y - MOTION_BLOCK_RADIUS), min(height, center_y + MOTION_BLOCK_RADIUS + 1)
+    block = source_log[y0:y1, x0:x1]
+    signal = float(np.mean(block))
+    variance = float(np.var(block))
+    result: dict[str, float | int | bool] = {
+        "dx": 0, "dy": 0, "best_error": math.inf, "reliable": False,
+    }
+    if signal < MOTION_MIN_SIGNAL or variance < MOTION_MIN_VARIANCE:
+        return result
+    best_error = math.inf
+    zero_error = math.inf
+    best_dx = best_dy = 0
+    for dy in range(-MOTION_SEARCH_RADIUS, MOTION_SEARCH_RADIUS + 1):
+        ty0, ty1 = y0 + dy, y1 + dy
+        if ty0 < 0 or ty1 > height:
+            continue
+        for dx in range(-MOTION_SEARCH_RADIUS, MOTION_SEARCH_RADIUS + 1):
+            tx0, tx1 = x0 + dx, x1 + dx
+            if tx0 < 0 or tx1 > width:
+                continue
+            # Mean absolute error of log1p rain limits dominance by a single
+            # high-intensity cell without changing the physical rain data.
+            error = float(np.mean(np.abs(block - target_log[ty0:ty1, tx0:tx1])))
+            if dx == 0 and dy == 0:
+                zero_error = error
+            if error < best_error:
+                best_error, best_dx, best_dy = error, dx, dy
+    result.update(dx=best_dx, dy=best_dy, best_error=best_error)
+    if (math.isfinite(best_error) and zero_error > 0
+            and (zero_error - best_error) / zero_error >= MOTION_MIN_IMPROVEMENT):
+        result["reliable"] = True
+    return result
+
+
+def dominant_offset_motion(hypotheses: list[dict[str, float | int | bool]]) -> dict[str, float | int | bool] | None:
+    """Choose Candidate A's dominant Chebyshev-consistent medoid exactly."""
+    reliable = [hypothesis for hypothesis in hypotheses if hypothesis["reliable"]]
+    if not reliable:
+        return None
+    clusters = []
+    for seed_index, seed in enumerate(reliable):
+        cluster = [
+            hypothesis for hypothesis in reliable
+            if max(abs(int(hypothesis["dx"]) - int(seed["dx"])), abs(int(hypothesis["dy"]) - int(seed["dy"]))) <= 1
+        ]
+        # The diagnostic chooses the earliest offset hypothesis when cluster
+        # sizes tie; preserve that explicit ordering rather than relying on a
+        # container implementation detail.
+        clusters.append((len(cluster), -seed_index, cluster))
+    _, _, dominant = max(clusters, key=lambda cluster: (cluster[0], cluster[1]))
+    if len(dominant) < 3 or len(dominant) < math.ceil(0.6 * len(reliable)):
+        return None
+    medoids = []
+    for candidate_index, candidate in enumerate(dominant):
+        total_distance = sum(
+            (int(candidate["dx"]) - int(other["dx"])) ** 2
+            + (int(candidate["dy"]) - int(other["dy"])) ** 2
+            for other in dominant
+        )
+        # Candidate A's diagnostic records the group error sum as a secondary
+        # key (equal for all medoid candidates), then preserves group order.
+        group_error = sum(float(other["best_error"]) for other in dominant)
+        medoids.append((total_distance, group_error, candidate_index, candidate))
+    return min(medoids, key=lambda medoid: (medoid[0], medoid[1], medoid[2]))[3]
+
+
+def estimate_motion_one_direction(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Return Candidate A's deterministic coarse source->target XY field."""
+    height, width = source.shape
+    grid_width, grid_height = motion_grid_shape(width, height)
+    result = np.zeros((4, grid_height, grid_width), dtype=np.float32)
+    source_log = np.log1p(source.astype(np.float64, copy=False))
+    target_log = np.log1p(target.astype(np.float64, copy=False))
+    reliable = np.zeros((grid_height, grid_width), dtype=bool)
+    for gy in range(grid_height):
+        cy = min(height - 1, gy * MOTION_GRID_SPACING)
+        for gx in range(grid_width):
+            cx = min(width - 1, gx * MOTION_GRID_SPACING)
+            hypotheses = [
+                match_motion_block(source_log, target_log, cx + offset_x, cy + offset_y)
+                for offset_x, offset_y in MOTION_BLOCK_OFFSETS
+            ]
+            chosen = dominant_offset_motion(hypotheses)
+            if chosen is None:
+                continue
+            result[0, gy, gx] = int(chosen["dx"])
+            result[1, gy, gx] = int(chosen["dy"])
+            result[2, gy, gx] = 1.0
+            reliable[gy, gx] = True
+    # Fill only from nearby reliable cells; dry/unstructured regions remain
+    # zero motion rather than receiving invented long-range vectors.
+    for gy in range(grid_height):
+        for gx in range(grid_width):
+            if reliable[gy, gx]:
+                continue
+            candidates = []
+            for oy in range(-MOTION_FILL_RADIUS_CELLS, MOTION_FILL_RADIUS_CELLS + 1):
+                for ox in range(-MOTION_FILL_RADIUS_CELLS, MOTION_FILL_RADIUS_CELLS + 1):
+                    ny, nx = gy + oy, gx + ox
+                    distance2 = ox * ox + oy * oy
+                    if distance2 == 0 or distance2 > MOTION_FILL_RADIUS_CELLS * MOTION_FILL_RADIUS_CELLS:
+                        continue
+                    if 0 <= ny < grid_height and 0 <= nx < grid_width and reliable[ny, nx]:
+                        candidates.append((distance2, ny, nx))
+            if candidates:
+                _, ny, nx = min(candidates)
+                result[0, gy, gx] = result[0, ny, nx]
+                result[1, gy, gx] = result[1, ny, nx]
+    return result
+
+
+def expand_motion_support(mask: np.ndarray) -> np.ndarray:
+    """Expand positive support enough for any bounded displaced bilinear tap."""
+    radius = MOTION_SEARCH_RADIUS + 1
+    expanded = np.zeros_like(mask, dtype=bool)
+    ys, xs = np.nonzero(mask)
+    for y, x in zip(ys, xs):
+        expanded[max(0, y - radius):min(mask.shape[0], y + radius + 1),
+                 max(0, x - radius):min(mask.shape[1], x + radius + 1)] = True
+    return expanded
 
 
 def parser() -> argparse.ArgumentParser:
@@ -557,6 +706,7 @@ def sequence_metadata(
     crop_available_nodes: int | None,
     first_frame_coverage: dict[str, Any] | None,
     per_frame_coverage: list[dict[str, Any] | None],
+    motion: dict[str, Any],
 ) -> dict[str, Any]:
     union_y, union_x = np.nonzero(union_nonzero)
     frame_node_count = crop["node_count"]
@@ -642,7 +792,7 @@ def sequence_metadata(
             "encoding": "bitset-lsb0",
             "node_count": frame_node_count,
             "byte_length": (frame_node_count + 7) // 8,
-            "positive_condition": "rain > 0",
+            "positive_condition": "rain > 0 expanded by motion search radius",
             "trailing_unused_bits": "zero",
         },
         "rain": {
@@ -658,6 +808,7 @@ def sequence_metadata(
             "union_distinct_nonzero_nodes": int(union_nonzero.sum()),
             "per_frame_statistics": frame_statistics,
         },
+        "motion": motion,
         "channels": {
             "rain": True,
             "phenomena": False,
@@ -695,6 +846,8 @@ def sequence_metadata(
 
 
 def convert_sequence(args: argparse.Namespace) -> int:
+    if Dataset is None or num2date is None:
+        raise SystemExit("This offline converter requires the netCDF4 package. Install it outside this repository and retry.")
     source = args.source.resolve()
     availability_path = args.availability.resolve()
     if not source.is_file():
@@ -745,9 +898,11 @@ def convert_sequence(args: argparse.Namespace) -> int:
         output_dir = args.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         rain_dir = output_dir / "rain"
+        motion_dir = output_dir / "motion"
         support_path = output_dir / "support.mask"
         metadata_path = output_dir / "metadata.json"
         rain_dir.mkdir(parents=True, exist_ok=True)
+        motion_dir.mkdir(parents=True, exist_ok=True)
         try:
             for time_index, timestamp in enumerate(timestamps):
                 values = read_validated_source_frame(precipitation, time_index)
@@ -771,8 +926,51 @@ def convert_sequence(args: argparse.Namespace) -> int:
                     "outside_observation": int((~inside).sum()) if inside is not None else None,
                 })
 
+            crop_union_nonzero = union_nonzero[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1]
+            motion_width, motion_height = motion_grid_shape(crop["width"], crop["height"])
+            interval_byte_length = motion_width * motion_height * 4 * 4
+            motion_assets = []
+            for interval in range(len(timestamps) - 1):
+                frame_a = np.fromfile(rain_dir / f"frame-{interval:03d}.f32", dtype="<f4").reshape(crop["height"], crop["width"])
+                frame_b = np.fromfile(rain_dir / f"frame-{interval + 1:03d}.f32", dtype="<f4").reshape(crop["height"], crop["width"])
+                forward = estimate_motion_one_direction(frame_a, frame_b)
+                backward = estimate_motion_one_direction(frame_b, frame_a)
+                packed_motion = np.stack((forward[0], forward[1], backward[0], backward[1])).astype("<f4", copy=False)
+                motion_path = motion_dir / f"interval-{interval:03d}.f32"
+                packed_motion.tofile(motion_path)
+                if motion_path.stat().st_size != interval_byte_length:
+                    raise ValueError(f"motion interval {interval} has unexpected byte length")
+                motion_assets.append(f"motion/interval-{interval:03d}.f32")
+            motion = {
+                "available": True,
+                "dtype": "Float32",
+                "byte_order": "little-endian",
+                "units": "source_grid_nodes_per_interval",
+                "component_convention": "forward_xy_then_backward_xy",
+                "grid_width": motion_width,
+                "grid_height": motion_height,
+                "grid_spacing_source_nodes": MOTION_GRID_SPACING,
+                "grid_origin_source_nodes": [0, 0],
+                "grid_last_sample_source_nodes": [
+                    min(crop["width"] - 1, (motion_width - 1) * MOTION_GRID_SPACING),
+                    min(crop["height"] - 1, (motion_height - 1) * MOTION_GRID_SPACING),
+                ],
+                "interval_count": len(timestamps) - 1,
+                "interval_byte_length": interval_byte_length,
+                "interval_assets": motion_assets,
+                "estimator": {
+                    "signal_transform": "log1p(rain_mmh)",
+                    "block_radius_source_nodes": MOTION_BLOCK_RADIUS,
+                    "block_center_offsets_source_nodes": [list(offset) for offset in MOTION_BLOCK_OFFSETS],
+                    "search_radius_source_nodes": MOTION_SEARCH_RADIUS,
+                    "metric": "mean_absolute_difference",
+                    "reliability": "each offset needs mean_log1p >= 0.08, variance >= 0.0025, and relative error improvement >= 0.08; accept a >=3, >=60% reliable, Chebyshev-1 dominant cluster and use its deterministic medoid",
+                    "unreliable_fill": "nearest reliable motion-grid cell within four motion-grid cells; otherwise zero",
+                    "maximum_displacement_source_nodes": MOTION_SEARCH_RADIUS,
+                },
+            }
             packed_support = np.packbits(
-                np.asarray(union_nonzero[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1], dtype=np.uint8).ravel(order="C"),
+                np.asarray(expand_motion_support(crop_union_nonzero), dtype=np.uint8).ravel(order="C"),
                 bitorder="little",
             )
             with NamedTemporaryFile(dir=output_dir, prefix=".support.", suffix=".mask.tmp", delete=False) as temporary:
@@ -791,7 +989,7 @@ def convert_sequence(args: argparse.Namespace) -> int:
                 timestamps,
                 crop,
                 frame_statistics,
-                union_nonzero[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1],
+                crop_union_nonzero,
                 crop_longitudes,
                 crop_latitudes,
                 original_units,
@@ -803,6 +1001,7 @@ def convert_sequence(args: argparse.Namespace) -> int:
                 int(crop_availability.sum()) if crop_availability is not None else None,
                 per_frame_coverage[0],
                 per_frame_coverage,
+                motion,
             )
             with metadata_path.open("w", encoding="utf-8") as handle:
                 json.dump(metadata, handle, indent=2, sort_keys=True)
@@ -834,6 +1033,8 @@ def convert_sequence(args: argparse.Namespace) -> int:
 
 
 def convert_csv(args: argparse.Namespace) -> int:
+    if Dataset is None or num2date is None:
+        raise SystemExit("This offline converter requires the netCDF4 package. Install it outside this repository and retry.")
     source = args.source.resolve()
     if not source.is_file():
         raise SystemExit(f"source file does not exist: {source}")

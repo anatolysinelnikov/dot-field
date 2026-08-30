@@ -15,6 +15,11 @@ export const ROLLING_PLAYBACK_AHEAD_FRAME_COUNT = 3;
 const SPATIAL_RAIN_CACHE_LIMIT = 4;
 const COMPACT_RECTANGULAR_GEOMETRY = 'compact-rectangular';
 const DENSE_GENERIC_GEOMETRY = 'dense-generic';
+const MOTION_COMPONENT_COUNT = 4;
+const MOTION_FORWARD_X = 0;
+const MOTION_FORWARD_Y = 1;
+const MOTION_BACKWARD_X = 2;
+const MOTION_BACKWARD_Y = 3;
 const monotonicNow = () => globalThis.performance?.now?.() ?? Date.now();
 
 function fail(message) {
@@ -52,6 +57,34 @@ function interpolatePrepared(values, baseIndex, x1y0, x0y1, x1y1, longitudeFract
   const lower = values[baseIndex] + (values[x1y0] - values[baseIndex]) * longitudeFraction;
   const upper = values[x0y1] + (values[x1y1] - values[x0y1]) * longitudeFraction;
   return clamp(lower + (upper - lower) * latitudeFraction, minimum, maximum);
+}
+
+// Source-grid coordinates use x increasing west -> east and y increasing
+// south -> north. Motion components are in source-grid nodes per interval.
+// This deliberately has no relationship to screen or Mercator coordinates.
+function bilinearSourceGrid(values, width, height, x, y) {
+  if (x < 0 || y < 0 || x > width - 1 || y > height - 1) return null;
+  const x0 = Math.min(width - 2, Math.floor(x));
+  const y0 = Math.min(height - 2, Math.floor(y));
+  const fx = x - x0;
+  const fy = y - y0;
+  const base = y0 * width + x0;
+  return interpolatePrepared(values, base, base + 1, base + width, base + width + 1, fx, fy, 0, Number.POSITIVE_INFINITY);
+}
+
+function motionAt(values, motionWidth, motionHeight, motionSpacing, x, y, component) {
+  const motionX = x / motionSpacing;
+  const motionY = y / motionSpacing;
+  const x0 = Math.min(motionWidth - 2, Math.max(0, Math.floor(motionX)));
+  const y0 = Math.min(motionHeight - 2, Math.max(0, Math.floor(motionY)));
+  const fx = Math.min(1, Math.max(0, motionX - x0));
+  const fy = Math.min(1, Math.max(0, motionY - y0));
+  const nodeCount = motionWidth * motionHeight;
+  const offset = component * nodeCount;
+  const base = offset + y0 * motionWidth + x0;
+  const lower = values[base] + (values[base + 1] - values[base]) * fx;
+  const upper = values[base + motionWidth] + (values[base + motionWidth + 1] - values[base + motionWidth]) * fx;
+  return lower + (upper - lower) * fy;
 }
 
 function sortedIndexOf(values, target) {
@@ -364,7 +397,7 @@ export class RealWeatherSequenceFrame {
 }
 
 export class RealWeatherSequence extends RealWeatherField {
-  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, weatherSupport = null, timestamps, potentialWeatherMask = null, generationId = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
+  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, weatherSupport = null, timestamps, potentialWeatherMask = null, motion = null, temporalMode = 'motion', generationId = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
     const frameSize = longitudes.length * latitudes.length;
     const emptyCodes = new Uint8Array(frameSize);
     const emptyChannel = new Float32Array(frameSize);
@@ -387,6 +420,8 @@ export class RealWeatherSequence extends RealWeatherField {
     this.frameSize = frameSize;
     this.timestamps = Object.freeze([...timestamps]);
     this.generationId = generationId;
+    this.motion = motion;
+    this.temporalMode = temporalMode === 'linear' || !motion ? 'linear' : 'motion';
     this.sourceFrameCacheLimit = sourceFrameCacheLimit;
     this.retainAllSourceFrames = Boolean(retainAllSourceFrames);
     this.onSourceFrameCacheEvent = typeof onSourceFrameCacheEvent === 'function' ? onSourceFrameCacheEvent : null;
@@ -422,6 +457,10 @@ export class RealWeatherSequence extends RealWeatherField {
       }
     }
     this.rawFrame = this.sourceFrames.has(0) ? this.exactSourceFrameAt(0) : null;
+  }
+
+  setTemporalMode(mode) {
+    this.temporalMode = mode === 'linear' || !this.motion ? 'linear' : 'motion';
   }
 
   sourceFrameAt(frameIndex) {
@@ -666,12 +705,83 @@ export class RealWeatherSequence extends RealWeatherField {
   }
 
   prepareTemporalSampling(frame, geometry) {
-    const rain0 = this.preparedSourceFrame(geometry, frame.frame0);
-    const rain1 = this.preparedSourceFrame(geometry, frame.frame1);
+    if (frame.progress === 0 || frame.frame0 === frame.frame1 || this.temporalMode === 'linear') {
+      const rain0 = this.preparedSourceFrame(geometry, frame.frame0);
+      const rain1 = frame.frame0 === frame.frame1 ? rain0 : this.preparedSourceFrame(geometry, frame.frame1);
+      const progress = frame.progress;
+      return (activeIndex) => rain0[activeIndex] + (rain1[activeIndex] - rain0[activeIndex]) * progress;
+    }
+    // Motion uses the raw source frames directly; the old same-location
+    // Float64 spatial-frame cache would only retain obsolete work.
+    geometry.spatialRainCache?.clear();
+    const motionState = this.prepareMotionIntervalState(frame, geometry);
+    const rain0 = this.sourceFrameAt(frame.frame0);
+    const rain1 = this.sourceFrameAt(frame.frame1);
     const progress = frame.progress;
-    // Keep temporal reconstruction provider-owned. The returned callable is
-    // one evaluation-scoped capability, not a per-sample allocation.
-    return (activeIndex) => rain0[activeIndex] + (rain1[activeIndex] - rain0[activeIndex]) * progress;
+    const inverseProgress = 1 - progress;
+    const { sourceX, sourceY, forwardX, forwardY, backwardX, backwardY } = motionState;
+    const width = this.longitudes.length;
+    const height = this.latitudes.length;
+    return (activeIndex) => {
+      const x = sourceX[activeIndex];
+      const y = sourceY[activeIndex];
+      // The stored forward vector maps an A location to B. Tracing A back
+      // from x therefore subtracts it; backward is independently estimated
+      // from B to A and is likewise subtracted from the B contribution.
+      const fromA = bilinearSourceGrid(rain0, width, height, x - progress * forwardX[activeIndex], y - progress * forwardY[activeIndex]);
+      const fromB = bilinearSourceGrid(rain1, width, height, x - inverseProgress * backwardX[activeIndex], y - inverseProgress * backwardY[activeIndex]);
+      // An out-of-domain trace is unavailable, not dry. Preserve the valid
+      // contribution instead of introducing false dry erosion at the edge.
+      if (fromA === null) return fromB === null ? 0 : fromB;
+      if (fromB === null) return fromA;
+      return fromA + (fromB - fromA) * progress;
+    };
+  }
+
+  prepareMotionIntervalState(frame, geometry) {
+    const activeIndices = geometry.potentialActiveIndices || new Uint32Array(0);
+    const motion = this.motion;
+    const intervalValues = motion?.intervals?.[frame.frame0];
+    if (!intervalValues) throw new Error(`Motion asset for interval ${frame.frame0} is not available.`);
+    let state = geometry.motionIntervalState;
+    if (!state || state.length !== activeIndices.length) {
+      state = {
+        interval: -1,
+        length: activeIndices.length,
+        sourceX: new Float32Array(activeIndices.length), sourceY: new Float32Array(activeIndices.length),
+        forwardX: new Float32Array(activeIndices.length), forwardY: new Float32Array(activeIndices.length),
+        backwardX: new Float32Array(activeIndices.length), backwardY: new Float32Array(activeIndices.length)
+      };
+      geometry.motionIntervalState = state;
+    }
+    if (state.interval === frame.frame0) return state;
+    for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
+      const index = activeIndices[activeIndex];
+      let x; let y;
+      if (geometry.kind === COMPACT_RECTANGULAR_GEOMETRY) {
+        const column = index % geometry.width;
+        const row = (index - column) / geometry.width;
+        x = geometry.sourceColumn[column] + geometry.longitudeFraction[column];
+        y = geometry.sourceRowBase[row] / geometry.sourceWidth + geometry.latitudeFraction[row];
+      } else {
+        const baseIndex = geometry.baseIndex[index];
+        x = baseIndex % geometry.sourceWidth + geometry.longitudeFraction[index];
+        y = Math.floor(baseIndex / geometry.sourceWidth) + geometry.latitudeFraction[index];
+      }
+      state.sourceX[activeIndex] = x;
+      state.sourceY[activeIndex] = y;
+      state.forwardX[activeIndex] = motionAt(intervalValues, motion.width, motion.height, motion.spacing, x, y, MOTION_FORWARD_X);
+      state.forwardY[activeIndex] = motionAt(intervalValues, motion.width, motion.height, motion.spacing, x, y, MOTION_FORWARD_Y);
+      state.backwardX[activeIndex] = motionAt(intervalValues, motion.width, motion.height, motion.spacing, x, y, MOTION_BACKWARD_X);
+      state.backwardY[activeIndex] = motionAt(intervalValues, motion.width, motion.height, motion.spacing, x, y, MOTION_BACKWARD_Y);
+    }
+    state.interval = frame.frame0;
+    return state;
+  }
+
+  motionPreparedBytes(geometry) {
+    const state = geometry?.motionIntervalState;
+    return state ? state.sourceX.byteLength + state.sourceY.byteLength + state.forwardX.byteLength + state.forwardY.byteLength + state.backwardX.byteLength + state.backwardY.byteLength : 0;
   }
 
   samplePreparedFrameBatch(frame, geometry) {
@@ -711,14 +821,22 @@ export class RealWeatherSequence extends RealWeatherField {
     if (geometry.potentialActiveIndices) {
       const activeIndex = sortedIndexOf(geometry.potentialActiveIndices, index);
       if (activeIndex < 0) return output;
-      const rain0 = this.preparedSourceFrame(geometry, frame.frame0)[activeIndex];
-      const rain1 = this.preparedSourceFrame(geometry, frame.frame1)[activeIndex];
-      output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
+      // This compatibility path is also used by generic summary evaluation.
+      // It must use the same motion-aware temporal reconstruction as the
+      // optimized prepared sampler, rather than reverting active samples to
+      // same-location linear interpolation.
+      output.rainMmh = this.prepareTemporalSampling(frame, geometry)(activeIndex);
       return output;
     }
     const x1y0 = baseIndex + 1;
     const x0y1 = baseIndex + geometry.sourceWidth;
     const x1y1 = x0y1 + 1;
+    if (frame.progress !== 0 && frame.frame0 !== frame.frame1 && this.temporalMode !== 'linear') {
+      const x = baseIndex % geometry.sourceWidth + longitudeFraction;
+      const y = Math.floor(baseIndex / geometry.sourceWidth) + latitudeFraction;
+      output.rainMmh = this.motionRainAt(frame, x, y);
+      return output;
+    }
     const rain0 = this.interpolateRain(frame.frame0, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
     const rain1 = this.interpolateRain(frame.frame1, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
     output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
@@ -737,10 +855,31 @@ export class RealWeatherSequence extends RealWeatherField {
     const x1y0 = baseIndex + 1;
     const x0y1 = baseIndex + this.longitudes.length;
     const x1y1 = x0y1 + 1;
-    const rain0 = this.interpolateRain(frame.frame0, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
-    const rain1 = this.interpolateRain(frame.frame1, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
-    output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
+    if (frame.progress === 0 || frame.frame0 === frame.frame1 || this.temporalMode === 'linear') {
+      const rain0 = this.interpolateRain(frame.frame0, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
+      const rain1 = frame.frame0 === frame.frame1 ? rain0 : this.interpolateRain(frame.frame1, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
+      output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
+      return output;
+    }
+    output.rainMmh = this.motionRainAt(frame, x.index + x.fraction, y.index + y.fraction);
     return output;
+  }
+
+  motionRainAt(frame, x, y) {
+    const values = this.motion?.intervals?.[frame.frame0];
+    if (!values) throw new Error(`Motion asset for interval ${frame.frame0} is not available.`);
+    const { width: motionWidth, height: motionHeight, spacing } = this.motion;
+    const progress = frame.progress;
+    const inverseProgress = 1 - progress;
+    const fromA = bilinearSourceGrid(this.sourceFrameAt(frame.frame0), this.longitudes.length, this.latitudes.length,
+      x - progress * motionAt(values, motionWidth, motionHeight, spacing, x, y, MOTION_FORWARD_X),
+      y - progress * motionAt(values, motionWidth, motionHeight, spacing, x, y, MOTION_FORWARD_Y));
+    const fromB = bilinearSourceGrid(this.sourceFrameAt(frame.frame1), this.longitudes.length, this.latitudes.length,
+      x - inverseProgress * motionAt(values, motionWidth, motionHeight, spacing, x, y, MOTION_BACKWARD_X),
+      y - inverseProgress * motionAt(values, motionWidth, motionHeight, spacing, x, y, MOTION_BACKWARD_Y));
+    if (fromA === null) return fromB === null ? 0 : fromB;
+    if (fromB === null) return fromA;
+    return fromA + (fromB - fromA) * progress;
   }
 }
 
@@ -884,7 +1023,9 @@ function validateSequenceMetadata(metadata) {
   if (sequenceInteger(supportMask.node_count, 'support_mask.node_count') !== frameNodeCount) failSequence('support_mask.node_count does not match the spatial grid.');
   const expectedSupportByteCount = Math.ceil(frameNodeCount / 8);
   if (sequenceInteger(supportMask.byte_length, 'support_mask.byte_length') !== expectedSupportByteCount) failSequence('support_mask.byte_length does not match the packed node count.');
-  assertSequenceEqual(supportMask.positive_condition, 'rain > 0', 'support_mask.positive_condition');
+  if (supportMask.positive_condition !== 'rain > 0' && supportMask.positive_condition !== 'rain > 0 expanded by motion search radius') {
+    failSequence('support_mask.positive_condition is unsupported.');
+  }
   assertSequenceEqual(supportMask.trailing_unused_bits, 'zero', 'support_mask.trailing_unused_bits');
 
   const longitudeStart = sequenceNumber(grid.longitude_start, 'spatial_grid.longitude_start');
@@ -927,12 +1068,33 @@ function validateSequenceMetadata(metadata) {
   }
   if (channels.phenomena !== Boolean(phenomena?.available)) failSequence('channels.phenomena must match phenomena availability.');
 
+  let motion = null;
+  if (root.motion !== undefined) {
+    const descriptor = objectAt(root.motion, 'motion');
+    if (descriptor.available !== true) failSequence('motion.available must be true when motion is present.');
+    assertSequenceEqual(descriptor.dtype, 'Float32', 'motion.dtype');
+    assertSequenceEqual(descriptor.byte_order, 'little-endian', 'motion.byte_order');
+    assertSequenceEqual(descriptor.units, 'source_grid_nodes_per_interval', 'motion.units');
+    assertSequenceEqual(descriptor.component_convention, 'forward_xy_then_backward_xy', 'motion.component_convention');
+    const motionWidth = sequenceInteger(descriptor.grid_width, 'motion.grid_width');
+    const motionHeight = sequenceInteger(descriptor.grid_height, 'motion.grid_height');
+    const motionSpacing = sequenceInteger(descriptor.grid_spacing_source_nodes, 'motion.grid_spacing_source_nodes');
+    if (!Array.isArray(descriptor.grid_origin_source_nodes) || descriptor.grid_origin_source_nodes[0] !== 0 || descriptor.grid_origin_source_nodes[1] !== 0) failSequence('motion grid must start at source node [0, 0].');
+    if (!Array.isArray(descriptor.grid_last_sample_source_nodes) || descriptor.grid_last_sample_source_nodes.length !== 2) failSequence('motion.grid_last_sample_source_nodes must describe the source-grid relationship.');
+    const intervalCount = sequenceInteger(descriptor.interval_count, 'motion.interval_count');
+    if (motionWidth < 2 || motionHeight < 2 || motionSpacing < 1 || intervalCount !== frameCount - 1) failSequence('motion grid dimensions or interval count are invalid.');
+    const expectedMotionBytes = motionWidth * motionHeight * MOTION_COMPONENT_COUNT * Float32Array.BYTES_PER_ELEMENT;
+    if (sequenceInteger(descriptor.interval_byte_length, 'motion.interval_byte_length') !== expectedMotionBytes) failSequence('motion.interval_byte_length does not match the packed Float32 components.');
+    if (!Array.isArray(descriptor.interval_assets) || descriptor.interval_assets.length !== intervalCount) failSequence('motion.interval_assets must contain one asset per interval.');
+    for (const [index, asset] of descriptor.interval_assets.entries()) sequenceString(asset, `motion.interval_assets[${index}]`);
+    motion = Object.freeze({ width: motionWidth, height: motionHeight, spacing: motionSpacing, intervalCount, intervalByteLength: expectedMotionBytes, intervalAssets: Object.freeze([...descriptor.interval_assets]) });
+  }
   return {
     width, height, frameCount, frameNodeCount, expectedFrameByteCount, expectedSupportByteCount,
     longitudeStart, latitudeStart, longitudeSpacing, latitudeSpacing,
     weatherSupport: Object.freeze(supportBounds), timestamps: time.timestamps,
     rainFrameAssets: Object.freeze([...rain.frame_assets]), supportMaskAsset: supportMask.asset,
-    phenomenaAvailable: Boolean(phenomena?.available), generationId
+    phenomenaAvailable: Boolean(phenomena?.available), motion, generationId
   };
 }
 
@@ -1252,7 +1414,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, generationId, sou
   };
 }
 
-export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onResidencyChange = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, sourceFrameFetchConcurrency = 1 } = {}) {
+export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onResidencyChange = null, temporalMode = 'motion', sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, sourceFrameFetchConcurrency = 1 } = {}) {
   const timing = typeof onTiming === 'function' ? onTiming : () => {};
   const metadataReady = loadSequenceMetadata(metadataUrl, timing);
   const supportReady = metadataReady.then(async (validated) => {
@@ -1265,15 +1427,27 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
     timing('weather-support-validation-complete');
     return potentialWeatherMask;
   });
+  const motionReady = metadataReady.then(async (validated) => {
+    if (!validated.motion) return null;
+    timing('weather-motion-fetch-start');
+    const buffers = await Promise.all(validated.motion.intervalAssets.map(async (asset, interval) => {
+      const response = await fetchSequenceAsset(resolveSequenceAssetUrl(metadataUrl, asset));
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength !== validated.motion.intervalByteLength) failSequence(`motion interval ${interval} byte length is ${buffer.byteLength}, expected ${validated.motion.intervalByteLength}.`);
+      return new Float32Array(buffer);
+    }));
+    timing('weather-motion-validation-complete');
+    return { ...validated.motion, intervals: buffers };
+  });
   let scheduler = null;
   let sequenceForDiagnostics = null;
-  const sequenceReady = Promise.all([metadataReady, supportReady]).then(([validated, potentialWeatherMask]) => {
+  const sequenceReady = Promise.all([metadataReady, supportReady, motionReady]).then(([validated, potentialWeatherMask, motion]) => {
     const { longitudes, latitudes } = axesFromSequenceMetadata(validated);
     const sequence = new RealWeatherSequence({
       longitudes, latitudes, frameCount: validated.frameCount,
       longitudeSpacing: validated.longitudeSpacing, latitudeSpacing: validated.latitudeSpacing,
       weatherSupport: validated.weatherSupport,
-      timestamps: validated.timestamps, potentialWeatherMask, generationId: validated.generationId,
+      timestamps: validated.timestamps, potentialWeatherMask, motion, temporalMode, generationId: validated.generationId,
       sourceFrameCacheLimit, retainAllSourceFrames,
       onSourceFrameCacheEvent: (event) => scheduler?.recordCacheEvent(event)
     });

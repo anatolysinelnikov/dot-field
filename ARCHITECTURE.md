@@ -71,9 +71,11 @@ provider format -> validation -> temporal/spatial interpolation
 ```
 
 `real-weather.js` owns CSV and sequence validation, physical typed-array
-storage, and representation-independent geographic reconstruction. The active
-sequence samples physical `rainMmh` bilinearly from four geographic source nodes
-and linearly between its adjacent source frames; storm and hail are independent
+storage, and representation-independent geographic reconstruction. Motion-enabled
+generations reconstruct rain between adjacent exact frames with provider-owned
+bidirectional source-grid motion compensation; `?temporal=linear` is a
+development-only A/B override. Exact source timestamps and RAW continue to use
+the existing exact spatial reconstruction. Storm and hail are independent
 channels, but the current rain-only sequence explicitly declares both unavailable.
 Rain remains physical `mm/h` through interpolation, sampling, LOD reduction, and
 scalar-lattice reconstruction; renderer presentation mappings may use the named
@@ -403,6 +405,39 @@ scheduling, or source-loading policy. Non-sequence compatibility/test fields
 leave the track neutral. RAW continues to hold its currently selected exact frame
 for behavior-preserving geometry updates; source diagnostics expose that payload
 separately, including whether it is outside the sequence LRU after eviction.
+
+### Experimental rain motion reconstruction
+
+The offline sequence converter estimates a replaceable v1 displacement asset
+for every adjacent rain-frame pair. It samples a regular motion grid every 16
+source nodes and evaluates nine fixed 9×9 `log1p(rainMmh)` neighborhoods at
+offset centers around each node. Each uses the same bounded ±8-node
+mean-absolute-difference translation search and signal/variance/improvement
+gate. A vector is direct only when a dominant, displacement-consistent cluster
+of reliable offset matches agrees; a deterministic medoid resolves that cluster.
+Forward A→B and backward B→A searches are independent. Unreliable cells copy
+the nearest reliable motion cell within four motion-grid cells; otherwise they
+remain zero. The immutable asset packs Float32 forward-x, forward-y, backward-x,
+backward-y components in source-grid nodes per interval.
+Source x increases west→east and source y increases south→north, independently
+of Mercator, camera, DPR, LOD, and screen axes.
+
+Between exact frames, the provider samples A at the canonical source coordinate
+minus progress times forward motion and B at that coordinate minus remaining
+progress times backward motion, bilinearly samples physical rain, then blends.
+Out-of-domain traces are unavailable rather than dry; a valid other contribution
+is retained. Exact source times bypass motion. The support mask expands wet
+nodes by the maximum displacement plus one bilinear node, so moving rain cannot
+be discarded from the candidate topology.
+
+Prepared geometry preserves canonical identity and reuses six Float32 arrays
+per potential sample for an active interval: source-grid x/y and interpolated
+forward/backward x/y. A temporal evaluation does two scaled coordinate offsets,
+two four-tap source-frame bilinear reads, and one blend—no axis searches,
+per-sample objects, or intermediate frames. Dots/Squares only receive physical
+rain summaries. This v1 local matcher cannot reliably model deformation,
+rotation, occlusion, or newly formed rain. Use `?temporal=linear` for a
+development-only A/B comparison; RAW remains exact under either mode.
 
 ### Physical weather-summary profiles
 
