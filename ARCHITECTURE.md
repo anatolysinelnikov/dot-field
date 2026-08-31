@@ -534,8 +534,9 @@ C field. Arbitrary timeline jumps reconstruct only missing members of the
 two-field working set. The renderers do not read the fields back to the CPU,
 rebuild canonical geometry, or duplicate temporal reconstruction. L10–L13 and
 LOD transitions use the CPU reference path, with an explicit diagnostics
-fallback reason. A stable L14 viewport change invalidates both physical fields
-and rebuilds the bounded tile residency. The experiment has no GPU LOD pyramid
+fallback reason. A stable L14 viewport change creates a pending spatial state;
+the committed topology, physical fields, and tile residency remain active until
+the replacement is complete. The experiment has no GPU LOD pyramid
 yet and does not change the motion estimator or reconstruction mathematics. Its
 3D tile uploads use tightly packed pixel-store state only for the upload batch
 and restore all prior WebGL unpack state before returning control to MapLibre.
@@ -573,6 +574,38 @@ transition path, and returning to L14 establishes the new descriptor before
 publishing the next physical A/B pair. This lifecycle guard is intentionally
 temporary alongside the legacy L10–L13 CPU summaries and L13↔L14 transition
 state; it does not migrate those structures to GPU in v2 Task 1.
+
+Stable GPU L14 spatial residency has an explicit active/pending contract. The
+active state owns one canonical window/topology, its compatible provider-tile
+atlas, physical A/B fields, and the renderer source pair. Camera movement
+updates the latest pending window without clearing or retagging that active
+state. A pending window is constructed with deterministic growth slack: the
+committed (or already pending) window and the latest target are unioned, then
+the existing 25% overscan proportion is applied and snapped to the global L10
+interval. Targets contained by the pending window coalesce without another
+load. When the pending reconstructor has every required temporal tile and both
+physical keyframes, both renderers are synchronized to its topology and level
+descriptor and the new topology/source pair is published synchronously; the
+old atlas is released only after that publication. Superseded loads cannot be
+published and clean up after their asynchronous fetch completes. The existing
+two-sided spatial shrink rule still replaces a grossly oversized retained
+window after a strong zoom-in.
+
+Provider tile payloads are shared by generation and provider-tile identity
+across active and pending reconstructors. Overlapping spatial replacements
+reuse resident payloads and request only newly required tiles; the cache is
+trimmed to the committed bounded working set after replacement and stale-load
+cleanup. Metadata is likewise cached per immutable generation, so small
+window replacement does not refetch unchanged generation metadata.
+
+Timeline readiness is backend-aware. In stable GPU L14, the timeline is ready
+when the committed spatial working set has all required temporal provider
+tiles resident and a valid physical A/B/source pair is published. Since each
+rain tile contains all 19 rain frames and each motion tile contains all motion
+intervals, this is complete timeline availability for the current GPU view; it
+does not wait for the legacy 19-frame Float32 source cache. CPU L10–L13 keeps
+the existing bounded source-cache intervals and reports readiness only for the
+source frames required by the current CPU renderer pair.
 
 ### Physical weather-summary profiles
 
