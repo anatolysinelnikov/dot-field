@@ -538,11 +538,13 @@ two-field working set. The renderers do not read the fields back to the CPU,
 rebuild canonical geometry, or duplicate temporal reconstruction. LOD
 transitions use the CPU reference path, with an explicit diagnostics fallback
 reason. Production GPU Weather LOD transitions remain on this CPU fallback path
-pending the later GPU transition lifecycle task. A stable L10-L14 viewport
+pending the later GPU transition lifecycle task. Stable L10-L14 GPU state now
+retains a bounded adjacent-transition presentation working set, but only the
+stable endpoint is published to the renderers. A stable L10-L14 viewport
 change creates a pending spatial state;
 the committed topology, physical fields, and tile residency remain active until
-the replacement is complete. The experiment has no GPU LOD pyramid
-yet and does not change the motion estimator or reconstruction mathematics. Its
+the replacement is complete. The experiment has no generic GPU LOD pyramid;
+the bounded working set does not change the motion estimator or reconstruction mathematics. Its
 3D tile uploads use tightly packed pixel-store state only for the upload batch
 and restore all prior WebGL unpack state before returning control to MapLibre.
 Each physical pass establishes overwrite-only state (blending, tests, culling,
@@ -552,8 +554,12 @@ viewport, and VAO binding before presentation.
 
 With `?gpuWeather=1&raw=0`, stable GPU L10 through L14 have explicit GPU-first
 ownership. Stable L13/L14 retain two R16F direct physical fields; stable
-L10/L11/L12 retain the same direct L13 physical fields plus two summary
-keyframes per required summary level. Temporal rain/motion tiles, compact
+L10-L13 retain the same direct L13 A/B fields plus two summary keyframes per
+recursive level required by the bounded endpoint set. The transition-ready
+presentation levels are `[10,11]`, `[10,11,12]`, `[11,12,13]`, and `[12,13]`
+for stable L10, L11, L12, and L13 respectively. L10/L11 retain the L12
+summary as a recursive intermediate, while L12/L13 retain only the summary
+levels needed to reach their coarse endpoint. Temporal rain/motion tiles, compact
 canonical window metadata, and bounded summary relation textures remain
 resident, while Dots/Squares release CPU physical summaries, mapped arrays,
 instance-writer backing arrays, and legacy instance buffer capacity. The shared
@@ -578,24 +584,39 @@ requested through the existing HIGH-priority scheduler; only then is the
 minimal CPU transition state rebuilt.
 
 GPU physical presentation sources carry both the shared canonical topology
-identity and the active stable-level level-data identity. Independent renderer
-topology, level, transition, and GPU-mode changes still invalidate their source;
-the stable spatial replacement path instead preflights both renderers and uses
-their committed-state operation to install the complete topology, level
+identity and the active stable-level level-data identity. Each reconstructed
+renderer keyframe retains borrowed endpoint records for the direct physical L13
+pair and every summary texture produced by the same recursive backend; creating
+another endpoint source selects those records without temporal reconstruction,
+texture copies, CPU materialization, or network activity. Independent renderer
+topology, level, transition, and GPU-mode changes still invalidate the published
+source; the stable spatial replacement path instead preflights both renderers
+and uses their committed-state operation to install the complete topology, level
 descriptor, and source together. Thus a stable source is visible only after
 both renderers have the same synchronized topology/window and stable-level
-descriptor. For L10-L12 the source is the summary texture pair
-and its RG16F coverage pair; for L13-L14 it is the direct R16F pair. Leaving a
-stable GPU level first hands control back to the CPU transition path, and
-returning establishes the new descriptor before publishing the next physical or
-summary A/B pair. This lifecycle guard is intentionally temporary alongside
-the legacy transition state; L10-L12 aggregation remains CPU-owned only while
-a transition is active.
+descriptor. Only the stable endpoint is published in this task: L10-L12 use
+their summary texture and RG16F coverage pair, and L13-L14 use their direct
+R16F pair. The retained endpoint records borrow textures owned by the current
+physical reconstructor and summary backend; they are discarded before that
+owner is released. Leaving a stable GPU level first hands control back to the
+CPU transition path, and returning establishes the new descriptor before
+publishing the next physical or summary A/B pair. This lifecycle guard is
+intentionally temporary alongside the legacy transition state; L10-L12
+aggregation remains CPU-owned only while a transition is active.
+
+`?diagnostics=1` exposes this split under `gpuWeather.workingSet`: stable active
+LOD, renderer-published presentation LOD, transition-ready presentation levels,
+direct physical reconstruction level, retained summary levels, one temporal
+provider/reconstruction residency, and the two renderer keyframe slots. The
+keyframe diagnostics also list the retained endpoint levels, so an A/B rollover
+can be checked against the same pair rather than inferred from the published
+endpoint alone.
 
 Stable GPU L10-L14 spatial residency has one explicit active/pending contract. The
 active state owns one canonical window/topology, its compatible provider-tile
-atlas, direct L13 physical A/B fields, any required summary A/B fields, and the
-renderer source pair. Camera movement
+atlas, one direct L13 physical A/B reconstruction residency, the bounded
+summary A/B chain needed by its endpoint set, and the renderer-published source
+pair. Camera movement
 updates the latest pending window without clearing or retagging that active
 state. A pending window is constructed with deterministic growth slack: the
 committed (or already pending) window and the latest target are unioned, then
@@ -632,17 +653,18 @@ window replacement does not refetch unchanged generation metadata.
 
 Timeline readiness is backend-aware. In stable GPU L10-L14, the timeline is
 ready when the committed spatial working set has all required temporal provider
-tiles resident, required summary keyframes are valid for L10-L12, and a matching
-source pair is published. Since each rain tile contains all 19 rain frames and
+tiles resident, every bounded transition-ready endpoint has valid A/B texture
+records from the current renderer pair, and a matching stable source pair is
+published. Since each rain tile contains all 19 rain frames and
 each motion tile contains all motion intervals, this is complete timeline
 availability for the current GPU view; it does not wait for the legacy 19-frame
 Float32 source cache. During CPU LOD transitions, the existing bounded
 source-cache intervals remain the readiness basis.
 
-### Experimental GPU physical summaries for L10-L12
+### Experimental GPU physical summaries for L10-L13
 
 `src/engine/gpu-physical-summary.js` is the validated physical-summary backend
-used by stable GPU L10-L12. It is attached to the same transactional spatial
+used by stable GPU L10-L13. It is attached to the same transactional spatial
 state as the direct L13/L14 fields. The browser hook
 `window.__dotFieldGpuWeather.validatePhysicalSummary()` remains an explicit
 readback validation path; normal rendering uses the summary textures without
@@ -694,9 +716,10 @@ summary/readback framebuffer completeness. There are no CPU per-sample summary
 uploads, no permanent full-domain L13 scratch textures, and no temporal source
 fetches or motion changes. The backend retains two summary keyframes per
 requested coarse level and reuses its relation textures for the topology
-lifetime. Stable L10-L12 presentation attaches these resources to the same
-active/pending spatial publication contract as L13/L14; no second lifecycle
-exists.
+lifetime. Stable L10-L13 presentation attaches the bounded subset required by
+the endpoint working set to the same active/pending spatial publication
+contract as the direct L13 pair; no second temporal or spatial lifecycle
+exists. Stable L14 remains direct-only.
 
 ### Physical weather-summary profiles
 

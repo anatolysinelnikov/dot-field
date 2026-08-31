@@ -845,6 +845,7 @@ export class GeographicSquaresLayer {
       estimatedGpuBufferBytes: sumNumbers(this.instanceBufferCapacity) + CELL_VERTICES.byteLength,
       gpuWeather: {
         enabled: this.gpuWeatherMode,
+        presentationEnabled: this.gpuWeatherPresentationEnabled,
         source: Boolean(this.gpuWeatherSource),
         physicalField: this.gpuWeatherSource ? (this.gpuWeatherSource.kind === 'summary' ? 'gpu-physical-summary' : 'gpu-r16f') : null,
         level: this.gpuWeatherSource?.levelData?.level ?? null,

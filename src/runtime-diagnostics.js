@@ -236,7 +236,10 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     try {
       return getSnapshot?.() || {};
     } catch (error) {
-      return { snapshotError: clampText(error instanceof Error ? error.message : error) };
+      return {
+        snapshotError: clampText(error instanceof Error ? error.message : error),
+        snapshotErrorStack: clampText(error instanceof Error ? error.stack : null)
+      };
     }
   }
 
@@ -573,12 +576,14 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     document.addEventListener('visibilitychange', () => queueEvent('visibility-change', { visibilityState: document.visibilityState }));
     globalThis.addEventListener?.('error', (event) => queueEvent('javascript-error', {
       message: clampText(event.message || event.error?.message),
+      stack: clampText(event.error?.stack || null),
       filename: sanitizedUrl(event.filename),
       line: Number.isFinite(event.lineno) ? event.lineno : null,
       column: Number.isFinite(event.colno) ? event.colno : null
     }));
     globalThis.addEventListener?.('unhandledrejection', (event) => queueEvent('unhandled-rejection', {
-      reason: clampText(event.reason instanceof Error ? event.reason.message : event.reason)
+      reason: clampText(event.reason instanceof Error ? event.reason.message : event.reason),
+      stack: clampText(event.reason instanceof Error ? event.reason.stack : null)
     }));
     globalThis.addEventListener?.('pagehide', () => { void finish('pagehide').catch(() => {}); }, { once: true });
   }

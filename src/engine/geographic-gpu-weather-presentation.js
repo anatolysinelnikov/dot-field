@@ -10,6 +10,18 @@ import {
 // Stable GPU weather covers the direct physical levels and the validated
 // recursive physical-summary levels. LOD morphs still use the CPU path.
 export const GPU_WEATHER_LEVELS = Object.freeze([10, 11, 12, 13, 14]);
+// Bounded endpoint set for the future GPU-owned stationary LOD transition.
+// This is intentionally not a generic GPU LOD pyramid.
+export const GPU_WEATHER_TRANSITION_READY_PRESENTATION_LEVELS = Object.freeze({
+  10: Object.freeze([10, 11]),
+  11: Object.freeze([10, 11, 12]),
+  12: Object.freeze([11, 12, 13]),
+  13: Object.freeze([12, 13]),
+  14: Object.freeze([14])
+});
+export function gpuWeatherTransitionReadyPresentationLevels(level) {
+  return GPU_WEATHER_TRANSITION_READY_PRESENTATION_LEVELS[level] || [];
+}
 export function isGpuWeatherLevel(level) {
   return GPU_WEATHER_LEVELS.includes(level);
 }
@@ -76,7 +88,7 @@ export function createGpuWeatherProgram(gl, shaderData, vertexBody, fragmentBody
     '#version 300 es', shaderData.vertexShaderPrelude, shaderData.define, vertexBody
   ].join('\n'), label));
   gl.attachShader(program, compileGpuWeatherShader(gl, gl.FRAGMENT_SHADER, [
-    '#version 300 es', 'precision highp float;', fragmentBody
+    '#version 300 es', 'precision highp float;', 'precision highp int;', fragmentBody
   ].join('\n'), label));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {

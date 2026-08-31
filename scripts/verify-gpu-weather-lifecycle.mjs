@@ -1,11 +1,20 @@
 import fs from 'node:fs';
 import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
 import { setActiveWeatherField } from '../src/engine/geography.js';
-import { canonicalWindowFromMercatorBounds, GeographicLodTopology, lngLatToMercator } from '../src/engine/geographic-lod.js';
+import {
+  canonicalWindowContains,
+  canonicalWindowFromMercatorBounds,
+  canonicalWindowNeedsShrink,
+  GeographicLodTopology,
+  lngLatToMercator
+} from '../src/engine/geographic-lod.js';
 import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
-import { GPU_WEATHER_LEVELS } from '../src/engine/geographic-gpu-weather-presentation.js';
+import {
+  GPU_WEATHER_LEVELS,
+  gpuWeatherTransitionReadyPresentationLevels
+} from '../src/engine/geographic-gpu-weather-presentation.js';
 
 const GPU_LEVEL = 14;
 setActiveWeatherField(parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8')));
@@ -162,7 +171,248 @@ class StableGpuLifecycleScenario {
   }
 }
 
+class PendingOwnerTerminalScenario {
+  constructor() {
+    this.nextGeneration = 0;
+    this.active = { target: 'A', resource: this.resource('active-A') };
+    this.pending = null;
+  }
+
+  resource(label) {
+    return {
+      label,
+      disposed: false,
+      disposeCount: 0,
+      dispose() {
+        if (this.disposed) return;
+        this.disposed = true;
+        this.disposeCount++;
+      }
+    };
+  }
+
+  begin(target) {
+    const pending = this.createPending(target);
+    this.pending = pending;
+    return pending;
+  }
+
+  createPending(target) {
+    return {
+      target,
+      generation: ++this.nextGeneration,
+      status: 'preparing',
+      cancelled: false,
+      resourcesTransferred: false,
+      resourcesReleased: false,
+      resource: this.resource(`pending-${target}-${this.nextGeneration}`)
+    };
+  }
+
+  markReady(pending) {
+    if (this.pending === pending && !pending.cancelled) pending.status = 'ready';
+  }
+
+  terminalCleanup(pending, reason) {
+    pending.status = 'terminal';
+    pending.cancelled = true;
+    pending.terminalReason = reason;
+    if (!pending.resourcesTransferred && !pending.resourcesReleased) {
+      pending.resource.dispose();
+      pending.resourcesReleased = true;
+    }
+    if (this.pending === pending) this.pending = null;
+  }
+
+  supersede(nextPending) {
+    const previous = this.pending;
+    if (previous) this.terminalCleanup(previous, 'newer spatial target');
+    this.pending = nextPending;
+    return previous;
+  }
+
+  completeLate(pending) {
+    if (this.pending !== pending || pending.cancelled || pending.status === 'terminal') {
+      this.terminalCleanup(pending, pending.terminalReason || 'stale completion');
+      return false;
+    }
+    return true;
+  }
+
+  commit(pending) {
+    if (this.pending !== pending || pending.status !== 'ready') return false;
+    const previous = this.active;
+    this.active = { target: pending.target, resource: pending.resource };
+    pending.resourcesTransferred = true;
+    pending.status = 'committed';
+    this.pending = null;
+    previous.resource.dispose();
+    return true;
+  }
+}
+
+// Models the lifecycle boundary where a target can change while the normal
+// renderer owns an adjacent CPU transition. GPU reactivation must compare the
+// complete new active residency with that still-current target before any
+// further camera event occurs.
+class GpuReactivationScenario {
+  constructor() {
+    this.nextGeneration = 0;
+    this.active = { level: 13, window: firstWindow, source: { disposed: false } };
+    this.target = firstWindow;
+    this.pendingCanonicalWindow = null;
+    this.pending = null;
+    this.gpuActive = true;
+    this.inLodTransition = false;
+  }
+
+  updateTarget(window) {
+    this.target = window;
+    if (this.inLodTransition) this.pendingCanonicalWindow = window;
+  }
+
+  beginCpuTransition() {
+    this.gpuActive = false;
+    this.inLodTransition = true;
+    this.pending = null;
+  }
+
+  reactivateStable(level, window) {
+    this.inLodTransition = false;
+    this.active = { level, window, source: { disposed: false } };
+    this.gpuActive = true;
+    this.pendingCanonicalWindow = null;
+  }
+
+  reconcile() {
+    if (!this.gpuActive || this.inLodTransition || this.pending) return false;
+    const contained = canonicalWindowContains(this.active.window, this.target);
+    const needsShrink = contained && canonicalWindowNeedsShrink(this.active.window, this.target);
+    if (!contained || needsShrink) {
+      this.pending = {
+        generation: ++this.nextGeneration,
+        level: this.active.level,
+        window: this.target,
+        physicalLevel: this.active.level < 13 ? 13 : this.active.level,
+        keyframes: ['A', 'B'],
+        source: { disposed: false }
+      };
+      return true;
+    }
+    return false;
+  }
+
+  commitPending() {
+    const pending = this.pending;
+    if (!pending || pending.keyframes.length !== 2) return false;
+    const previous = this.active;
+    this.active = { level: pending.level, window: pending.window, source: pending.source };
+    this.pending = null;
+    previous.source.disposed = true;
+    return true;
+  }
+}
+
 check(GPU_WEATHER_LEVELS.join(',') === '10,11,12,13,14', 'GPU weather stable levels include L10-L14');
+for (const [stableLevel, expected] of [[10, [10, 11]], [11, [10, 11, 12]], [12, [11, 12, 13]], [13, [12, 13]], [14, [14]]]) {
+  check(
+    gpuWeatherTransitionReadyPresentationLevels(stableLevel).join(',') === expected.join(','),
+    `stable L${stableLevel} exposes the bounded GPU transition-ready presentation set`
+  );
+}
+
+// A target changed during CPU-owned LOD work must remain actionable after GPU
+// reactivation. The replacement is prepared and committed without a second
+// camera event, while the reactivated active source remains valid until commit.
+{
+  const scenario = new GpuReactivationScenario();
+  const targetBeforeTransition = scenario.target;
+  scenario.beginCpuTransition();
+  scenario.updateTarget(shiftedWindow);
+  check(scenario.pendingCanonicalWindow === shiftedWindow, 'LOD transition retains the changed canonical target for reactivation');
+  scenario.reactivateStable(14, firstWindow);
+  check(scenario.active.window === firstWindow && !scenario.active.source.disposed, 'stable L14 reactivation establishes a valid active source before spatial replacement');
+  check(scenario.target === shiftedWindow && scenario.target !== targetBeforeTransition, 'reactivation compares against the latest target rather than the pre-transition target');
+  check(scenario.reconcile(), 'reactivation creates one spatial replacement when active L14 does not cover the target');
+  check(scenario.pending?.physicalLevel === 14 && scenario.pending?.keyframes.join(',') === 'A,B', 'reactivation replacement prepares direct L14 A/B');
+  check(!scenario.active.source.disposed, 'reactivation leaves active source valid while replacement prepares');
+  check(scenario.commitPending(), 'reactivation replacement commits without another camera event');
+  check(scenario.pending === null && scenario.active.window === shiftedWindow, 'reactivation replacement covers the current target and clears pending ownership');
+  check(scenario.active.source.disposed === false, 'committed reactivation replacement owns its source');
+
+  const covered = new GpuReactivationScenario();
+  covered.reactivateStable(13, firstWindow);
+  check(!covered.reconcile(), 'reactivation does not create unnecessary replacement when active window covers target');
+  check(covered.pending === null, 'covered reactivation has no pending owner');
+
+  const lowerLevel = new GpuReactivationScenario();
+  lowerLevel.beginCpuTransition();
+  lowerLevel.updateTarget(shiftedWindow);
+  lowerLevel.reactivateStable(12, firstWindow);
+  check(lowerLevel.reconcile(), 'lower-level reactivation also reconciles an uncovered target');
+  check(lowerLevel.pending?.physicalLevel === 13, 'lower-level reactivation retains direct L13 physical support');
+}
+
+// Stable L14 spatial replacement must prepare both renderer keyframe slots
+// from the direct L14 physical owner. The active source stays visible until
+// that complete pair is ready and committed; no second camera input is part
+// of the transaction.
+{
+  const activeTopology = topologyFor(firstWindow);
+  const pendingTopology = topologyFor(shiftedWindow);
+  const activeLevelData = activeTopology.levelDataFor(14);
+  const pendingLevelData = pendingTopology.levelDataFor(14);
+  const pendingPhysicalLevelData = pendingTopology.levels.get(14);
+  const pendingKeyframes = [0, 1].map((slot) => ({
+    slot,
+    presentations: new Map([[14, { kind: 'physical', texture: {}, coverageTexture: {} }]])
+  }));
+  check(activeLevelData !== pendingLevelData, 'stable L14 spatial replacement has a new level-data identity');
+  check(pendingPhysicalLevelData === pendingLevelData, 'stable L14 pending physical owner is direct L14');
+  check(pendingKeyframes.every((keyframe) => keyframe.presentations.get(14)?.texture), 'stable L14 pending A/B both have direct physical presentation records');
+  const activeSource = source(activeTopology, activeLevelData);
+  const pendingSource = source(pendingTopology, pendingLevelData);
+  check(activeSource.resource.disposed === false, 'stable L14 active source remains valid before pending commit');
+  check(pendingSource.resource.disposed === false, 'stable L14 pending source owns its replacement resources');
+  pendingSource.resource.dispose();
+  check(activeSource.resource.disposed === false, 'stable L14 failed pending cleanup cannot dispose active source');
+}
+
+// A rejected prepared replacement must release its coalescing ownership, while
+// a late completion from that generation must remain harmless after a retry.
+{
+  const scenario = new PendingOwnerTerminalScenario();
+  const pendingB = scenario.begin('B');
+  scenario.markReady(pendingB);
+  check(scenario.active.target === 'A' && !scenario.active.resource.disposed, 'rejected pending B leaves active A valid');
+  scenario.terminalCleanup(pendingB, 'renderer preflight rejected source');
+  check(pendingB.resource.disposeCount === 1 && pendingB.resourcesReleased, 'rejected pending B resources are cleaned exactly once');
+  check(scenario.pending === null, 'rejected pending B no longer owns coalescing');
+  const pendingC = scenario.begin('B');
+  check(pendingC !== pendingB && pendingC.generation > pendingB.generation, 'same target creates fresh pending C generation after rejection');
+  check(!scenario.active.resource.disposed, 'active A remains valid while retry C prepares');
+  scenario.markReady(pendingC);
+  check(scenario.commit(pendingC), 'retry C commits successfully');
+  check(scenario.active.resource === pendingC.resource && !pendingC.resource.disposed, 'committed C owns transferred resources');
+  check(scenario.active.target === 'B' && pendingB.resource.disposed, 'A is released only after C ownership transfer');
+  check(!scenario.completeLate(pendingB), 'late rejected B completion cannot publish');
+  check(scenario.pending === null && !pendingC.resource.disposed, 'late B cleanup cannot clear or destroy committed C');
+}
+
+// Rapid supersession has the same generation boundary: B may clean itself up,
+// but it cannot clear or dispose the newer C owner.
+{
+  const scenario = new PendingOwnerTerminalScenario();
+  const pendingB = scenario.begin('B');
+  const pendingC = scenario.createPending('C');
+  scenario.supersede(pendingC);
+  check(pendingB.resource.disposeCount === 1 && pendingB.cancelled, 'superseded B is terminally cleaned');
+  check(scenario.pending === pendingC && !pendingC.resource.disposed, 'supersession leaves C as the live pending owner');
+  check(!scenario.completeLate(pendingB), 'late superseded B cannot publish over C');
+  check(scenario.pending === pendingC && !pendingC.resource.disposed, 'late B cannot clear or destroy C');
+  scenario.markReady(pendingC);
+  check(scenario.commit(pendingC), 'superseding C commits normally');
+}
 
 for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   const pyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(firstWindow, { minLevel: 13, maxLevel: 14 }));
@@ -230,6 +480,10 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
     threw = error instanceof Error && error.message.includes('GPU weather source must match the active stable GPU topology');
   }
   check(threw, `${Layer.name} rejects mismatched stable L13 source identity`);
+  const equivalentTopology = new GeographicLodTopology(firstWindow, { minLevel: 12, maxLevel: 14 });
+  const equivalentLevelData = equivalentTopology.levelDataFor(13);
+  check(!layer.isGpuWeatherSourceCompatible(source(equivalentTopology, equivalentLevelData)),
+    `${Layer.name} rejects structurally equivalent but foreign stable L13 ownership`);
 }
 
 for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
