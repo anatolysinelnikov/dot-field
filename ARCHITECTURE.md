@@ -537,7 +537,9 @@ C field. Arbitrary timeline jumps reconstruct only missing members of the
 two-field working set. The renderers do not read the fields back to the CPU,
 rebuild canonical geometry, or duplicate temporal reconstruction. LOD
 transitions use the CPU reference path, with an explicit diagnostics fallback
-reason. A stable L10-L14 viewport change creates a pending spatial state;
+reason. Production GPU Weather LOD transitions remain on this CPU fallback path
+pending the later GPU transition lifecycle task. A stable L10-L14 viewport
+change creates a pending spatial state;
 the committed topology, physical fields, and tile residency remain active until
 the replacement is complete. The experiment has no GPU LOD pyramid
 yet and does not change the motion estimator or reconstruction mathematics. Its
@@ -1070,9 +1072,15 @@ non-rectangular providers retain their appropriate dense fallback.
 
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
-transitions use deterministic parent/child topology below/equal to L13 and
-direct adjacent-relation refinement for the active L13↔L14 transition. The
-engine retains the direct L14↔L15 relation for explicit future configurations.
+transitions use the direct adjacent relation for every adjacent display
+transition from L10 through L14. Shared nested-grid samples remain at their
+canonical positions and finer-level-only samples grow or shrink in place; zoom
+changes visible density and presentation, not sample position. The former
+deterministic parent/child morph remains available only as the development
+reference mode via `?lodMorph=hierarchical` for transitions through L13;
+L13↔L14 continues to use the direct relation in that mode. The engine retains
+the direct L14↔L15 relation for explicit future configurations. Temporal weather
+interpolation remains independent of LOD progress.
 Dots retain the stable same-level temporal/mapped state for a source LOD while
 a transition builds the required pair representation; promoting a destination
 therefore only performs the unavoidable same-level instance pass. A subsequent
@@ -1090,6 +1098,7 @@ This fixed presentation setting does not affect other renderers.
 
 Squares use the same active globally anchored L10–L14 Mercator topology and
 shared physical summaries as Dots, but map them into square color and opacity.
+Squares LOD semantics are unchanged.
 The canonical topology and renderer algorithms remain capable of explicit L15
 evaluation, but the normal application path stops at L14.
 Mapped arrays retain canonical indexing, while sequence summaries pack only

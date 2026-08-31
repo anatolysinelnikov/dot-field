@@ -56,6 +56,7 @@ const zoomOut = document.querySelector('#zoomOut');
 const renderModeSelector = document.querySelector('#renderModeSelector');
 const queryParameters = new URLSearchParams(window.location.search);
 const rawRendererEnabled = queryParameters.get('raw') !== '0';
+const legacyHierarchicalDotsLodMorph = queryParameters.get('lodMorph') === 'hierarchical';
 if (!rawRendererEnabled) {
   renderModeSelector.querySelector('[data-render-mode="raw"]')?.remove();
   renderModeSelector.dataset.mode = 'dots';
@@ -1794,7 +1795,7 @@ function tryInitializeWeatherLayer() {
     Float32Array,
     new GeographicLodTopology(initialWindow, lodRangeForStableLevel(initialLevel))
   );
-  weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid);
+  weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid, { legacyHierarchicalLodMorph: legacyHierarchicalDotsLodMorph });
   squaresLayer = new GeographicSquaresLayer(geographicWeatherPyramid);
   weatherLayer.setGpuWeatherPresentationEnabled(gpuWeatherPresentationMode !== 'maplibre-only');
   squaresLayer.setGpuWeatherPresentationEnabled(gpuWeatherPresentationMode !== 'maplibre-only');

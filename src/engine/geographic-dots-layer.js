@@ -665,12 +665,14 @@ void main() {
   };
 }
 
-function isHierarchicalTransition(fromLevel, toLevel) {
-  return Math.abs(fromLevel - toLevel) === 1 && Math.max(fromLevel, toLevel) <= REFERENCE_GRID_LEVEL;
+function isHierarchicalTransition(fromLevel, toLevel, legacyHierarchicalLodMorph = false) {
+  return legacyHierarchicalLodMorph
+    && Math.abs(fromLevel - toLevel) === 1
+    && Math.max(fromLevel, toLevel) <= REFERENCE_GRID_LEVEL;
 }
 
 export class GeographicDotsLayer {
-  constructor(weatherPyramid = new GeographicWeatherPyramid()) {
+  constructor(weatherPyramid = new GeographicWeatherPyramid(), options = {}) {
     this.id = 'geographic-weather-dots';
     this.type = 'custom';
     this.renderingMode = '3d';
@@ -680,6 +682,7 @@ export class GeographicDotsLayer {
     this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.bufferCapacity = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.weatherPyramid = weatherPyramid;
+    this.legacyHierarchicalLodMorph = options.legacyHierarchicalLodMorph === true;
     this.topology = weatherPyramid.topology;
     this.levelData = null;
     this.transition = null;
@@ -1038,7 +1041,7 @@ export class GeographicDotsLayer {
       const toLevel = this.transition.toLevelData.level;
       const fromTemporal = this.temporal.levels.get(fromLevel);
       const toTemporal = this.temporal.levels.get(toLevel);
-      const hierarchical = isHierarchicalTransition(fromLevel, toLevel);
+      const hierarchical = isHierarchicalTransition(fromLevel, toLevel, this.legacyHierarchicalLodMorph);
       const refining = toLevel > fromLevel;
       const coarseLevel = refining ? fromLevel : toLevel;
       const fineLevel = refining ? toLevel : fromLevel;
