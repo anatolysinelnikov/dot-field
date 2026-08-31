@@ -59,6 +59,14 @@ if (!rawRendererEnabled) {
   renderModeSelector.dataset.mode = 'dots';
 }
 const renderModeButtons = [...renderModeSelector.querySelectorAll('[data-render-mode]')];
+renderModeSelector.style.setProperty('--render-mode-count', String(renderModeButtons.length));
+
+function updateRenderModeIndicator(mode) {
+  const modeIndex = renderModeButtons.findIndex((button) => button.dataset.renderMode === mode);
+  if (modeIndex >= 0) renderModeSelector.style.setProperty('--render-mode-indicator-index', String(modeIndex));
+}
+
+updateRenderModeIndicator(renderModeSelector.dataset.mode);
 const hazards = document.querySelector('#hazards');
 const weatherTimestampValue = document.querySelector('#weatherTimestampValue');
 const weatherTimezone = document.querySelector('#weatherTimezone');
@@ -1797,6 +1805,7 @@ function setRenderMode(mode) {
   state.renderMode = mode;
   runtimeDiagnostics?.recordEvent('render-mode-change', { mode });
   renderModeSelector.dataset.mode = mode;
+  updateRenderModeIndicator(mode);
   if (leavingRaw) timeSlider.value = String(clamp(state.time / LOOP_SECONDS, 0, 1));
   if (leavingRaw) dismissRawTooltip();
   for (const button of renderModeButtons) {
