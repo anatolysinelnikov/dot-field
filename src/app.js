@@ -20,7 +20,7 @@ import {
 } from './engine/geographic-lod.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from './engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from './engine/geographic-squares-layer.js';
-import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
+import { GeographicWeatherPyramid, WEATHER_REFERENCE_LEVEL } from './engine/geographic-weather-pyramid.js';
 import { GpuMotionReconstructor } from './engine/gpu-motion-reconstruction.js';
 import { GpuTemporalTileReconstructor } from './engine/gpu-temporal-tile-reconstruction.js';
 import { GPU_PHYSICAL_SUMMARY_LEVELS, GpuPhysicalSummaryBackend } from './engine/gpu-physical-summary.js';
