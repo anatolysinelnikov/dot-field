@@ -10,7 +10,7 @@ import {
 } from '../src/engine/geographic-lod.js';
 import { prepareGeographicSamplingGeometry } from '../src/engine/geography.js';
 import { RealWeatherSequence } from '../src/engine/real-weather.js';
-import { proceduralSourceCoordinateForIndex, sourceTileRangeForL14Window } from '../src/engine/gpu-weather-spatial.js';
+import { proceduralSourceCoordinateForIndex, sourceTileRangeForWindow } from '../src/engine/gpu-weather-spatial.js';
 
 const sourceWidth = 180;
 const sourceHeight = 120;
@@ -42,8 +42,8 @@ function expectedSourceCoordinate(geometry, index) {
   ];
 }
 
-function verifyWindow(window, name) {
-  const levelData = new GeographicLodTopology(window, { minLevel: 13, maxLevel: 14 }).levelDataFor(14);
+function verifyWindow(window, name, level) {
+  const levelData = new GeographicLodTopology(window, { minLevel: 12, maxLevel: 14 }).levelDataFor(level);
   const geometry = prepareGeographicSamplingGeometry(sequence.prepareFrame(0), levelData);
   const indices = [...new Set([
     0,
@@ -71,7 +71,7 @@ function verifyWindow(window, name) {
     const point = proceduralSourceCoordinateForIndex(levelData, sequence, index);
     if (point) expectedTiles.add(`${Math.floor(point.sourceX / 128)},${Math.floor(point.sourceY / 128)}`);
   }
-  const range = sourceTileRangeForL14Window(levelData, sequence);
+  const range = sourceTileRangeForWindow(levelData, sequence);
   const rangedTiles = new Set();
   for (let y = range.minTileY; y <= range.maxTileY; y++) for (let x = range.minTileX; x <= range.maxTileX; x++) rangedTiles.add(`${x},${y}`);
   check([...expectedTiles].every((id) => rangedTiles.has(id)), `${name} corner-derived tile range contains every canonical tile`);
@@ -84,7 +84,10 @@ const panned = canonicalWindowFromMercatorBounds({ minX: centerX - 0.0018, maxX:
 const zoomedOut = canonicalWindowFromMercatorBounds({ minX: centerX - 0.22, maxX: centerX + 0.22, minY: centerY - 0.20, maxY: centerY + 0.20 });
 const zoomedIn = canonicalWindowFromMercatorBounds({ minX: centerX - 0.0002, maxX: centerX + 0.0002, minY: centerY - 0.0002, maxY: centerY + 0.0002 });
 
-for (const [name, window] of [['compact', compact], ['panned', panned], ['zoomed-out', zoomedOut], ['zoomed-in', zoomedIn]]) verifyWindow(window, name);
+for (const [name, window] of [['compact', compact], ['panned', panned], ['zoomed-out', zoomedOut], ['zoomed-in', zoomedIn]]) {
+  verifyWindow(window, `${name}-L13`, 13);
+  verifyWindow(window, `${name}-L14`, 14);
+}
 
 const compactMetrics = canonicalWindowMetrics(compact, 14);
 const zoomedOutMetrics = canonicalWindowMetrics(zoomedOut, 14);
@@ -93,7 +96,7 @@ check(canonicalWindowChangeKind(zoomedOut, zoomedIn) === 'shrink', 'strong zoom-
 check(canonicalWindowNeedsShrink(zoomedOut, zoomedIn), 'strong zoom-in triggers the deterministic shrink rule');
 check(!canonicalWindowNeedsShrink(compact, panned), 'contained useful pan does not trigger shrink');
 const deferredTopology = new GeographicLodTopology(compact, { minLevel: 13, maxLevel: 14 }, null, { deferTransitionParents: true });
-check(!deferredTopology.transitionParents.has(14), 'stable GPU L14 replacement can defer legacy L13↔L14 transition parents');
+check(!deferredTopology.transitionParents.has(14), 'stable GPU direct-level replacement can defer legacy L13↔L14 transition parents');
 check(deferredTopology.transitionParentsFor(14).childIndices.length === deferredTopology.levelDataFor(14).count, 'deferred L13↔L14 transition parents rebuild deterministically on demand');
 console.log(JSON.stringify({
     zoomOutZoomIn: {

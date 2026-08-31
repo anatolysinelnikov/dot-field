@@ -11,7 +11,7 @@ function sourceAxisPosition(sequence, axis, value) {
 }
 // CPU reference for the stable-GPU procedural coordinate contract. This is
 // intentionally called only by setup/verification code; the draw path derives
-// the same value from its L14 instance or fragment coordinates in GLSL.
+// the same value from its canonical-level instance or fragment coordinates in GLSL.
 export function proceduralSourceCoordinateForIndex(levelData, sequence, index) {
   if (!Number.isInteger(index) || index < 0 || index >= levelData.count) {
     throw new Error('Procedural weather sample index is out of bounds.');
@@ -45,11 +45,12 @@ function sourceCoordinateForMercator(sequence, x, y) {
   ];
 }
 
-// Every L14 sample is a product of the monotone longitude/latitude mappings.
+// Every direct stable-GPU sample is a product of the monotone
+// longitude/latitude mappings.
 // Enumerating the four window corners therefore gives the exact source-node
 // tile rectangle without constructing a per-sample position or tile array.
-export function sourceTileRangeForL14Window(levelData, sequence, tileSize = 128) {
-  if (!levelData || levelData.level !== 14) throw new Error('Stable GPU weather tile ranges require L14 level data.');
+export function sourceTileRangeForWindow(levelData, sequence, tileSize = 128) {
+  if (!levelData || (levelData.level !== 13 && levelData.level !== 14)) throw new Error('Stable GPU weather tile ranges require L13 or L14 level data.');
   const points = [
     sourceCoordinateForMercator(sequence, mercatorXForIndex(levelData, 0), mercatorYForIndex(levelData, 0)),
     sourceCoordinateForMercator(sequence, mercatorXForIndex(levelData, levelData.width - 1), mercatorYForIndex(levelData, 0)),
@@ -66,3 +67,6 @@ export function sourceTileRangeForL14Window(levelData, sequence, tileSize = 128)
     maxTileY: Math.floor(Math.max(...sourceYs) / tileSize)
   });
 }
+
+// Source-compatible alias for the original spatial verifier.
+export const sourceTileRangeForL14Window = sourceTileRangeForWindow;

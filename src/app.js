@@ -23,6 +23,7 @@ import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
 import { GpuMotionReconstructor } from './engine/gpu-motion-reconstruction.js';
 import { GpuTemporalTileReconstructor } from './engine/gpu-temporal-tile-reconstruction.js';
+import { GPU_WEATHER_LEVELS, isGpuWeatherLevel } from './engine/geographic-gpu-weather-presentation.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
@@ -98,6 +99,7 @@ const gpuMotionTilesExperimentEnabled = gpuMotionExperimentEnabled && new URLSea
 const gpuWeatherExperimentEnabled = queryParameters.get('gpuWeather') === '1';
 const gpuFirstExperimentEnabled = gpuWeatherExperimentEnabled && !rawRendererEnabled;
 const GPU_WEATHER_LEVEL = 14;
+const GPU_WEATHER_MIN_LEVEL = GPU_WEATHER_LEVELS[0];
 let gpuMotionReconstructor = null;
 let gpuMotionTileReconstructor = null;
 let gpuWeatherTileReconstructor = null;
@@ -153,10 +155,10 @@ const gpuWeatherTimelineStats = {
 };
 
 function updateTimelineResidency(residentSourceFrameIndices = []) {
-  const gpuStableL14 = gpuWeatherExperimentEnabled && gpuWeatherUsingGpu
-    && state.lod?.level === GPU_WEATHER_LEVEL && !state.lodTransition
+  const gpuStableDirectLevel = gpuWeatherExperimentEnabled && gpuWeatherUsingGpu
+    && isGpuWeatherLevel(state.lod?.level) && !state.lodTransition
     && (state.renderMode === 'dots' || state.renderMode === 'squares');
-  if (gpuStableL14) {
+  if (gpuStableDirectLevel) {
     const tile = gpuWeatherTileReconstructor?.diagnostics() || null;
     const dotsSource = weatherLayer?.diagnostics()?.gpuWeather?.source;
     const squaresSource = squaresLayer?.diagnostics()?.gpuWeather?.source;
@@ -374,7 +376,7 @@ function diagnosticsEnvironment() {
 
 function gpuWeatherRequestedAtCurrentLevel() {
   return gpuWeatherExperimentEnabled
-    && state.lod.level === GPU_WEATHER_LEVEL
+    && isGpuWeatherLevel(state.lod.level)
     && !state.lodTransition
     && (state.renderMode === 'dots' || state.renderMode === 'squares')
     && Boolean(activeWeatherField?.motion)
@@ -414,7 +416,7 @@ function releaseGpuWeatherResidency() {
 }
 
 async function createGpuWeatherResidency(levelData) {
-  if (!gpuWeatherExperimentEnabled || !activeWeatherField || !levelData || levelData.level !== GPU_WEATHER_LEVEL) return null;
+  if (!gpuWeatherExperimentEnabled || !activeWeatherField || !levelData || !isGpuWeatherLevel(levelData.level)) return null;
   const gl = gpuWeatherGl();
   if (!gl) throw new Error('MapLibre WebGL2 context is unavailable.');
   if (gpuWeatherLevelData !== levelData) {
@@ -512,8 +514,8 @@ function gpuWeatherSpatialStateReady(pending) {
 
 function commitGpuWeatherSpatialState(pending, prepared) {
   if (gpuWeatherPendingSpatial !== pending || pending.cancelled || !prepared
-    || !gpuWeatherUsingGpu || state.lod?.level !== GPU_WEATHER_LEVEL || state.lodTransition
-    || !gpuWeatherSpatialStateReady(pending)
+    || !gpuWeatherUsingGpu || !isGpuWeatherLevel(state.lod?.level)
+    || pending.levelData?.level !== state.lod.level || state.lodTransition
     || !weatherLayer?.gpuWeatherMode || !squaresLayer?.gpuWeatherMode
     || weatherLayer.transition || squaresLayer.transition) return false;
   const started = performance.now();
@@ -522,6 +524,14 @@ function commitGpuWeatherSpatialState(pending, prepared) {
   const topology = pending.topology;
   const levelData = pending.levelData;
   const frame = geographicTemporalFrameAt(state.time / LOOP_SECONDS);
+  // A scrub or playback tick may have changed the desired pair while the
+  // spatial tiles were loading. Rebuild only the pending physical pair before
+  // publication so the new topology never receives an old timeline pair.
+  if (!pending.keyframes || pending.keyframes.a.index !== frame.index || pending.keyframes.b.index !== frame.nextIndex) {
+    pending.keyframes = gpuWeatherKeyframesFor(pending.reconstructor, state.time / LOOP_SECONDS);
+    prepared.keyframes = pending.keyframes;
+  }
+  if (!gpuWeatherSpatialStateReady(pending)) return false;
   // All state mutations are synchronous. No render callback can run between
   // the topology, level-data, and source publication below.
   geographicWeatherPyramid.setTopology(topology, { preserveCompatibleState: false });
@@ -530,7 +540,7 @@ function commitGpuWeatherSpatialState(pending, prepared) {
   state.pendingCanonicalWindow = null;
   state.canonicalWindowLastChange = canonicalWindowChangeKind(previousWindow, pending.window);
   state.canonicalWindowRebuilds += 1;
-  state.lod = { level: GPU_WEATHER_LEVEL };
+  state.lod = { level: pending.levelData.level };
   state.levelData = levelData;
   gpuWeatherLevelData = levelData;
   gpuWeatherTileReconstructor = prepared.reconstructor;
@@ -560,7 +570,7 @@ function commitGpuWeatherSpatialState(pending, prepared) {
     durationMs: state.canonicalWindowRebuildLastMs,
     pendingWaitMs: gpuWeatherSpatialStats.lastPendingWaitMs,
     change: state.canonicalWindowLastChange,
-    gpuStableL14: true,
+    gpuStableLevel: pending.levelData.level,
     reusedTileCount: prepared.reconstructor.diagnostics().uploads.reusedTileCount,
     newlyFetchedTileCount: prepared.reconstructor.diagnostics().uploads.newlyFetchedTileCount
   });
@@ -575,7 +585,7 @@ function commitGpuWeatherSpatialState(pending, prepared) {
 }
 
 function requestGpuWeatherSpatialReplacement(targetWindow) {
-  if (!gpuWeatherUsingGpu || state.lod?.level !== GPU_WEATHER_LEVEL || state.lodTransition) return false;
+  if (!gpuWeatherUsingGpu || !isGpuWeatherLevel(state.lod?.level) || state.lodTransition) return false;
   const existing = gpuWeatherPendingSpatial;
   const shrink = canonicalWindowContains(state.canonicalWindow, targetWindow)
     && canonicalWindowNeedsShrink(state.canonicalWindow, targetWindow);
@@ -598,7 +608,7 @@ function requestGpuWeatherSpatialReplacement(targetWindow) {
   }
   const topology = new GeographicLodTopology(
     window,
-    lodRangeForStableLevel(GPU_WEATHER_LEVEL),
+    lodRangeForStableLevel(state.lod.level),
     null,
     { deferTransitionParents: true }
   );
@@ -606,7 +616,7 @@ function requestGpuWeatherSpatialReplacement(targetWindow) {
     id: gpuWeatherPendingSpatialGeneration + 1,
     window,
     topology,
-    levelData: topology.levelDataFor(GPU_WEATHER_LEVEL),
+    levelData: topology.levelDataFor(state.lod.level),
     startedAt: performance.now(),
     reconstructor: null,
     keyframes: null,
@@ -647,8 +657,8 @@ async function initializeGpuWeatherPath() {
   if (initializationGeneration !== gpuWeatherInitializationGeneration
     || state.levelData !== levelData || !gpuWeatherRequestedAtCurrentLevel()) return null;
   if (gpuFirstExperimentEnabled) {
-    const releasedPyramidGeometry = geographicWeatherPyramid?.releaseSamplingGeometry(GPU_WEATHER_LEVEL) || false;
-    runtimeDiagnostics?.recordEvent('gpu-l14-pyramid-geometry-release', { releasedPyramidGeometry });
+    const releasedPyramidGeometry = geographicWeatherPyramid?.releaseSamplingGeometry(levelData.level) || false;
+    runtimeDiagnostics?.recordEvent('gpu-direct-level-pyramid-geometry-release', { level: levelData.level, releasedPyramidGeometry });
   }
   if (!gpuWeatherUsingGpu) {
     weatherLayer.setGpuWeatherMode(true, state.time / LOOP_SECONDS);
@@ -657,7 +667,8 @@ async function initializeGpuWeatherPath() {
     gpuWeatherFallbackReason = null;
     if (gpuFirstExperimentEnabled) {
       const source = weatherLoad.diagnostics();
-      runtimeDiagnostics?.recordEvent('gpu-l14-stable-ownership', {
+      runtimeDiagnostics?.recordEvent('gpu-direct-level-stable-ownership', {
+        level: levelData.level,
         residentSourceFrames: source?.residentSourceFrameCount || 0,
         residentSourceBytes: source?.residentSourceBytes || 0,
         dotsCpuBytes: weatherLayer.diagnostics().cpuBytes,
@@ -796,7 +807,7 @@ function gpuWeatherDiagnostics() {
   const pendingTile = gpuWeatherPendingSpatial?.reconstructor?.diagnostics() || null;
   const dotsDiagnostics = weatherLayer?.diagnostics() || null;
   const squaresDiagnostics = squaresLayer?.diagnostics() || null;
-  const stableCommittedGpu = gpuWeatherUsingGpu && state.lod?.level === GPU_WEATHER_LEVEL && !state.lodTransition;
+  const stableCommittedGpu = gpuWeatherUsingGpu && isGpuWeatherLevel(state.lod?.level) && !state.lodTransition;
   const hasBothSources = Boolean(dotsDiagnostics?.gpuWeather?.source && squaresDiagnostics?.gpuWeather?.source);
   if (stableCommittedGpu && tile?.active && !gpuWeatherPendingSpatial && !hasBothSources) {
     gpuWeatherSpatialStats.stableCommittedSourcelessSamples++;
@@ -808,10 +819,13 @@ function gpuWeatherDiagnostics() {
     active: gpuWeatherUsingGpu,
     path: gpuWeatherUsingGpu ? 'GPU weather experimental' : 'CPU reference',
     fallbackReason: gpuWeatherFallbackReason,
-    supportedLod: GPU_WEATHER_LEVEL,
+    supportedLod: [...GPU_WEATHER_LEVELS],
+    activeLevel: stableCommittedGpu ? state.lod.level : null,
     currentTarget: gpuWeatherTileReconstructor ? {
+      level: gpuWeatherTileReconstructor.levelData?.level ?? null,
       width: gpuWeatherTileReconstructor.width,
       height: gpuWeatherTileReconstructor.height,
+      sampleCount: gpuWeatherTileReconstructor.width * gpuWeatherTileReconstructor.height,
       format: 'R16F',
       byteEstimate: gpuWeatherTileReconstructor.width * gpuWeatherTileReconstructor.height * 2,
       workingSetByteEstimate: gpuWeatherTileReconstructor.width * gpuWeatherTileReconstructor.height * 4
@@ -842,6 +856,7 @@ function gpuWeatherDiagnostics() {
     timeline: { ...gpuWeatherTimelineStats },
     residency: tile,
     spatial: {
+      activeLevel: stableCommittedGpu ? state.lod.level : null,
       activeWindow: state.canonicalWindow,
       pendingWindow: gpuWeatherPendingSpatial?.window || null,
       targetWindow: state.canonicalWindowTarget,
@@ -856,7 +871,25 @@ function gpuWeatherDiagnostics() {
       pendingWaitMs: gpuWeatherSpatialStats.lastPendingWaitMs,
       pendingWaitTiming: numericSummary(gpuWeatherSpatialStats.pendingWaitSamples)
     },
-    stableL14CpuWeatherOwned: Boolean(gpuWeatherUsingGpu && (
+    stableGpuCpuWeatherOwned: Boolean(gpuWeatherUsingGpu && (
+      (dotsDiagnostics?.cpuBreakdown?.temporalPhysicalSummaryBytes || 0)
+      + (dotsDiagnostics?.cpuBreakdown?.mappedPresentationBytes || 0)
+      + (squaresDiagnostics?.gpuWeather?.mappedCpuBytes || 0)
+      + (tile?.retainedCpuGeometryBytes || 0)
+    )),
+    stableGpuCpuWeatherBytes: gpuWeatherUsingGpu ? (
+      (dotsDiagnostics?.cpuBreakdown?.temporalPhysicalSummaryBytes || 0)
+      + (dotsDiagnostics?.cpuBreakdown?.mappedPresentationBytes || 0)
+      + (squaresDiagnostics?.gpuWeather?.mappedCpuBytes || 0)
+      + (tile?.retainedCpuGeometryBytes || 0)
+    ) : 0,
+    stableL13CpuWeatherOwned: Boolean(stableCommittedGpu && state.lod.level === 13 && (
+      (dotsDiagnostics?.cpuBreakdown?.temporalPhysicalSummaryBytes || 0)
+      + (dotsDiagnostics?.cpuBreakdown?.mappedPresentationBytes || 0)
+      + (squaresDiagnostics?.gpuWeather?.mappedCpuBytes || 0)
+      + (tile?.retainedCpuGeometryBytes || 0)
+    )),
+    stableL14CpuWeatherOwned: Boolean(stableCommittedGpu && state.lod.level === 14 && (
       (dotsDiagnostics?.cpuBreakdown?.temporalPhysicalSummaryBytes || 0)
       + (dotsDiagnostics?.cpuBreakdown?.mappedPresentationBytes || 0)
       + (squaresDiagnostics?.gpuWeather?.mappedCpuBytes || 0)
@@ -873,9 +906,9 @@ function diagnosticsSnapshot() {
   const pyramid = geographicWeatherPyramid?.snapshot() || null;
   const sourceResidentBytes = source?.residentSourceBytes || 0;
   const targetWindowMetrics = state.canonicalWindowTarget
-    ? canonicalWindowMetrics(state.canonicalWindowTarget, GPU_WEATHER_LEVEL) : null;
+    ? canonicalWindowMetrics(state.canonicalWindowTarget, state.lod?.level || GPU_WEATHER_LEVEL) : null;
   const retainedWindowMetrics = state.canonicalWindow
-    ? canonicalWindowMetrics(state.canonicalWindow, GPU_WEATHER_LEVEL) : null;
+    ? canonicalWindowMetrics(state.canonicalWindow, state.lod?.level || GPU_WEATHER_LEVEL) : null;
   const trackedCpuBytes = (raw?.totalCpuGeometryBytes || 0)
     + (dots?.cpuBytes || 0)
     + (squares?.cpuBytes || 0)
@@ -1177,10 +1210,10 @@ function applyCanonicalWindow(canonicalWindow) {
     return false;
   }
   const previousWindow = state.canonicalWindow;
-  const gpuStableL14 = gpuWeatherUsingGpu && state.lod.level === GPU_WEATHER_LEVEL && !state.lodTransition;
-  if (gpuStableL14) return requestGpuWeatherSpatialReplacement(canonicalWindow);
+  const gpuStableDirectLevel = gpuWeatherUsingGpu && isGpuWeatherLevel(state.lod.level) && !state.lodTransition;
+  if (gpuStableDirectLevel) return requestGpuWeatherSpatialReplacement(canonicalWindow);
   const started = performance.now();
-  if (!geographicWeatherPyramid.setCanonicalWindow(canonicalWindow, { deferL14TransitionParents: gpuStableL14 })) {
+  if (!geographicWeatherPyramid.setCanonicalWindow(canonicalWindow, { deferL14TransitionParents: gpuStableDirectLevel })) {
     // The initial camera envelope may equal the fixed-support topology. Record
     // that resolved window even when no topology allocation was necessary.
     state.canonicalWindow = canonicalWindow;
@@ -1202,7 +1235,7 @@ function applyCanonicalWindow(canonicalWindow) {
     rebuildCount: state.canonicalWindowRebuilds,
     durationMs: state.canonicalWindowRebuildLastMs,
     change: state.canonicalWindowLastChange,
-    gpuStableL14
+    gpuStableDirectLevel
   });
   updateLodDiagnostics();
   return true;
@@ -1288,20 +1321,20 @@ function updateLogicalSamplingZoom() {
 }
 
 function commitLevelData(level, levelData) {
-  if (gpuWeatherUsingGpu && (level !== GPU_WEATHER_LEVEL || gpuWeatherLevelData !== levelData)) {
+  if (gpuWeatherUsingGpu && (!isGpuWeatherLevel(level) || gpuWeatherLevelData !== levelData)) {
     gpuWeatherKeyframes = null;
     weatherLayer?.setGpuWeatherSource(null, { requestRepaint: false });
     squaresLayer?.setGpuWeatherSource(null, { requestRepaint: false });
   }
-  if (level !== GPU_WEATHER_LEVEL && gpuWeatherUsingGpu) {
-    disableGpuWeatherPath(state.time / LOOP_SECONDS, `CPU reference fallback outside L${GPU_WEATHER_LEVEL}`);
+  if (!isGpuWeatherLevel(level) && gpuWeatherUsingGpu) {
+    disableGpuWeatherPath(state.time / LOOP_SECONDS, `CPU reference fallback outside stable direct levels L${GPU_WEATHER_MIN_LEVEL}–L${GPU_WEATHER_LEVEL}`);
   }
   state.lod = { level };
   state.levelData = levelData;
   weatherLayer.setLevelData(levelData, state.time / LOOP_SECONDS);
   squaresLayer.setLevelData(levelData, state.time / LOOP_SECONDS);
   updateLodDiagnostics();
-  if (level === GPU_WEATHER_LEVEL && gpuWeatherExperimentEnabled
+  if (isGpuWeatherLevel(level) && gpuWeatherExperimentEnabled
     && (state.renderMode === 'dots' || state.renderMode === 'squares')) {
     if (!gpuWeatherInitializationPromise) {
       gpuWeatherInitializationPromise = initializeGpuWeatherPath().finally(() => {
@@ -1317,12 +1350,19 @@ function installGpuWeatherExperiment() {
   window.__dotFieldGpuWeather = {
     diagnostics: gpuWeatherDiagnostics,
     async warmup(normalizedTime = state.time / LOOP_SECONDS) {
-      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error('GPU weather is supported only for active stable L14 Dots/Squares.');
+      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error('GPU weather is supported only for active stable L13/L14 Dots/Squares.');
       return initializeGpuWeatherPath().then(() => updateGpuWeatherTime(normalizedTime));
     },
     update(normalizedTime = state.time / LOOP_SECONDS) {
-      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error('GPU weather is supported only for active stable L14 Dots/Squares.');
+      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error('GPU weather is supported only for active stable L13/L14 Dots/Squares.');
       return updateGpuWeatherTime(normalizedTime);
+    },
+    async validate(normalizedTime = state.time / LOOP_SECONDS, maximumSamples = 32768) {
+      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error('GPU weather validation requires active stable GPU L13/L14.');
+      await initializeGpuWeatherPath();
+      const referenceFrame = activeWeatherField.prepareFrame(normalizedTime);
+      const referenceGeometry = prepareGeographicSamplingGeometry(referenceFrame, state.levelData);
+      return gpuWeatherTileReconstructor.validate(referenceFrame, { maximumSamples, referenceGeometry });
     },
     async rapidScrub() {
       const results = [];
@@ -1333,11 +1373,12 @@ function installGpuWeatherExperiment() {
       return results;
     }
   };
-  console.info('GPU weather Dots/Squares experiment available at ?gpuWeather=1 (stable L14 only; CPU fallback elsewhere). Diagnostics: add &gpuWeatherHz=60 to cap presentation, &gpuWeatherPresentation=none for MapLibre-only redraw measurement, or &gpuWeatherPresentationSync=render to sample presentation in the MapLibre render callback.');
+  console.info('GPU weather Dots/Squares experiment available at ?gpuWeather=1 (stable L13/L14; CPU fallback at lower levels). Diagnostics: add &gpuWeatherHz=60 to cap presentation, &gpuWeatherPresentation=none for MapLibre-only redraw measurement, or &gpuWeatherPresentationSync=render to sample presentation in the MapLibre render callback.');
 }
 
-// This is intentionally opt-in. It exercises the existing canonical L14
-// geometry without changing Dots/Squares evaluation or their CPU fallback.
+// This is intentionally opt-in. It exercises the existing canonical direct-level
+// geometry without changing Dots/Squares evaluation below stable GPU levels or
+// their CPU transition fallback.
 function installGpuMotionExperiment() {
   if (!gpuMotionExperimentEnabled || window.__dotFieldGpuMotion) return;
   if (gpuMotionTilesExperimentEnabled) {
@@ -1550,20 +1591,21 @@ function tryInitializeWeatherLayer() {
 }
 
 function startAdjacentTransition(level, now) {
-  // GPU L14 has no CPU temporal summary after ownership is detached. Before
-  // morphing back to L13, reacquire only the current renderer pair through
+  // Stable GPU direct levels have no CPU temporal summary after ownership is
+  // detached. Before morphing to a lower level, reacquire only the current
+  // renderer pair through
   // the existing HIGH-priority scheduler while continuing to present the last
   // valid GPU weather. This avoids both blank weather and full-sequence
   // fallback residency.
-  if (gpuWeatherUsingGpu && state.lod.level === GPU_WEATHER_LEVEL && level < GPU_WEATHER_LEVEL) {
+  if (gpuWeatherUsingGpu && isGpuWeatherLevel(state.lod.level) && level < state.lod.level) {
     if (!state.cpuFallbackTransitionPromise) {
       const requirements = rendererTemporalRequirements(state.time / LOOP_SECONDS);
-      runtimeDiagnostics?.recordEvent('gpu-l14-to-cpu-source-request', { sourceFrames: requirements.sourceFrames });
+      runtimeDiagnostics?.recordEvent('gpu-direct-level-to-cpu-source-request', { fromLevel: state.lod.level, toLevel: level, sourceFrames: requirements.sourceFrames });
       state.cpuFallbackTransitionPromise = weatherLoad.requestTimes(requirements.times, {
         priority: 'high', replaceKey: 'gpu-l14-to-cpu-transition'
       }).then(({ result } = {}) => {
-        if (result?.status === 'superseded' || state.desiredLevel >= GPU_WEATHER_LEVEL
-          || state.lod.level !== GPU_WEATHER_LEVEL || !gpuWeatherUsingGpu) return;
+        if (result?.status === 'superseded' || state.desiredLevel >= state.lod.level
+          || !isGpuWeatherLevel(state.lod.level) || !gpuWeatherUsingGpu) return;
         disableGpuWeatherPath(state.time / LOOP_SECONDS, `CPU reference fallback during LOD transition to L${level}`);
         releaseGpuWeatherResidency();
         startAdjacentTransition(level, performance.now());
@@ -1576,11 +1618,11 @@ function startAdjacentTransition(level, now) {
   const direction = Math.sign(level - state.lod.level);
   const toLevel = state.lod.level + direction;
   const toLevelData = geographicWeatherPyramid.levelDataFor(toLevel);
-  if (gpuFirstExperimentEnabled && toLevel === GPU_WEATHER_LEVEL
+  if (gpuFirstExperimentEnabled && isGpuWeatherLevel(toLevel)
     && (state.renderMode === 'dots' || state.renderMode === 'squares')) {
     // The CPU L14 endpoint still exists for this exact adjacent morph, but
     // tile I/O can overlap its fixed-duration presentation. Activation waits
-    // for the stable L14 commit above.
+    // for the stable direct-level commit above.
     void ensureGpuWeatherResidency(toLevelData).catch((error) => {
       gpuWeatherFallbackReason = `GPU weather initialization failed: ${error instanceof Error ? error.message : String(error)}`;
     });

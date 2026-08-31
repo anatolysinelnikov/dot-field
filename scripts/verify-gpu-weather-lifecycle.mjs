@@ -77,7 +77,7 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   try {
     layer.setGpuWeatherSource(source(shiftedTopology, layer.levelData), { requestRepaint: false });
   } catch (error) {
-    threw = error instanceof Error && error.message.includes('GPU weather source must match the active L14 topology');
+    threw = error instanceof Error && error.message.includes('GPU weather source must match the active direct-level topology');
   }
   check(threw, `${Layer.name} retains the topology compatibility invariant`);
 
@@ -87,6 +87,25 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
 
   layer.setGpuWeatherMode(false);
   check(layer.gpuWeatherSource === null, `${Layer.name} clears source on GPU deactivation`);
+}
+
+// Stable L13 uses the same source/topology identity contract as L14.
+for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
+  const pyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(firstWindow, { minLevel: 12, maxLevel: 14 }));
+  const layer = new Layer(pyramid);
+  const levelData = pyramid.levelDataFor(13);
+  layer.setGpuWeatherMode(true);
+  layer.setLevelData(levelData, 0);
+  const source13 = source(pyramid.topology, levelData);
+  check(layer.isGpuWeatherSourceCompatible(source13), `${Layer.name} accepts matching stable L13 identity`);
+  layer.setGpuWeatherSource(source13, { requestRepaint: false });
+  check(layer.gpuWeatherSource === source13, `${Layer.name} installs the stable L13 source`);
+  const mismatched = source(new GeographicLodTopology(shiftedWindow, { minLevel: 12, maxLevel: 14 }), levelData);
+  let threw = false;
+  try { layer.setGpuWeatherSource(mismatched, { requestRepaint: false }); } catch (error) {
+    threw = error instanceof Error && error.message.includes('GPU weather source must match the active direct-level topology');
+  }
+  check(threw, `${Layer.name} rejects mismatched stable L13 source identity`);
 }
 
 if (failures) process.exitCode = 1;

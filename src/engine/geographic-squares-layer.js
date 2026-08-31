@@ -7,11 +7,11 @@ import {
   createGpuWeatherProgram,
   gpuWeatherProjectionLocations,
   GPU_SQUARES_RAIN_MAPPING_SHADER,
-  GPU_WEATHER_COMMON_VERTEX
+  GPU_WEATHER_COMMON_VERTEX,
+  isGpuWeatherLevel
 } from './geographic-gpu-weather-presentation.js';
 import { createGpuPresentationTiming } from './gpu-presentation-timing.js';
 
-const GPU_WEATHER_LEVEL = 14;
 
 const FULL_INSTANCE_STRIDE = 18;
 const RAIN_ONLY_INSTANCE_STRIDE = 6;
@@ -447,7 +447,7 @@ export class GeographicSquaresLayer {
   setGpuWeatherSource(source, { requestRepaint = true } = {}) {
     if (!this.gpuWeatherMode) return;
     if (source && !this.isGpuWeatherSourceCompatible(source)) {
-      throw new Error(`GPU weather source must match the active L14 topology (expected topology=${this.topology?.canonicalWindow ? JSON.stringify(this.topology.canonicalWindow) : 'none'}, levelData=${this.levelData?.level ?? 'none'}; actual topology=${source.topology?.canonicalWindow ? JSON.stringify(source.topology.canonicalWindow) : 'none'}, levelData=${source.levelData?.level ?? 'none'}).`);
+      throw new Error(`GPU weather source must match the active direct-level topology (expected topology=${this.topology?.canonicalWindow ? JSON.stringify(this.topology.canonicalWindow) : 'none'}, levelData=${this.levelData?.level ?? 'none'}; actual topology=${source.topology?.canonicalWindow ? JSON.stringify(source.topology.canonicalWindow) : 'none'}, levelData=${source.levelData?.level ?? 'none'}).`);
     }
     this.gpuWeatherSource = source;
     if (requestRepaint) this.map?.triggerRepaint();
@@ -456,7 +456,7 @@ export class GeographicSquaresLayer {
   isGpuWeatherSourceCompatible(source) {
     return Boolean(this.gpuWeatherMode && source && source.topology === this.topology
       && source.levelData === this.levelData
-      && source.levelData?.level === GPU_WEATHER_LEVEL
+      && isGpuWeatherLevel(source.levelData?.level)
       && !this.transition);
   }
 
@@ -502,10 +502,10 @@ export class GeographicSquaresLayer {
 
   setLevelData(levelData, time) {
     const level = levelData?.level ?? null;
-    if (this.gpuWeatherSource && (this.gpuWeatherSource.levelData !== levelData || level !== GPU_WEATHER_LEVEL)) {
+    if (this.gpuWeatherSource && (this.gpuWeatherSource.levelData !== levelData || !isGpuWeatherLevel(level))) {
       this.gpuWeatherSource = null;
     }
-    if (this.gpuWeatherMode && level === GPU_WEATHER_LEVEL) {
+    if (this.gpuWeatherMode && isGpuWeatherLevel(level)) {
       this.levelData = levelData;
       this.transition = null;
       this.temporal = null;
@@ -708,7 +708,7 @@ export class GeographicSquaresLayer {
     this.gpuWeatherRenderSynchronizer?.();
     const source = this.gpuWeatherSource;
     const levelData = this.levelData;
-    if (!source || !levelData || levelData.level !== GPU_WEATHER_LEVEL) return;
+    if (!source || !levelData || !isGpuWeatherLevel(levelData.level)) return;
     this.lifecycleDiagnostics.gpuWeatherRenderCalls++;
     if (!this.gpuWeatherPresentationEnabled) return;
     const startedAt = performance.now();
@@ -834,7 +834,7 @@ export class GeographicSquaresLayer {
 
   render(gl, args) {
     if (!this.active) return;
-    if (this.gpuWeatherMode && !this.transition && this.levelData?.level === GPU_WEATHER_LEVEL && this.gpuWeatherSource) {
+    if (this.gpuWeatherMode && !this.transition && isGpuWeatherLevel(this.levelData?.level) && this.gpuWeatherSource) {
       this.renderGpuWeather(gl, args.shaderData, args.defaultProjectionData);
       return;
     }

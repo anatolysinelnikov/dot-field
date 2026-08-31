@@ -62,8 +62,9 @@ purpose is viewport-bounded spatial residency with complete temporal residency.
 The harness rebuilds a bounded atlas on spatial changes and uploads all source
 times/intervals per selected tile; resident timeline scrubs select layers and
 progress without temporal fetch/upload. The output remains the experimental
-canonical L14 field. With the separate opt-in `?gpuWeather=1` switch, that
-field is consumed directly by the real Dots/Squares layers at stable L14; the
+canonical direct-level field. With the separate opt-in `?gpuWeather=1` switch,
+that field is consumed directly by the real Dots/Squares layers at stable
+L13/L14; the
 default CPU/reference renderer remains unchanged.
 
 The spatial runtime separates provider/data bounds from the active render
@@ -305,7 +306,7 @@ sizes, capacities, lifecycle counters, and estimated Dot Field GPU buffer
 bytes. Dots additionally reports exact temporal physical-summary bytes, mapped
 presentation bytes, instance-writer allocation bytes, total tracked CPU bytes,
 the packed active count for each direct level, and whether each active level is
-`dense-summary` or `packed-direct`. Stable GPU L14 reports target/retained
+`dense-summary` or `packed-direct`. Stable GPU L13/L14 reports target/retained
 canonical counts and dimensions, change kind, retained/target area ratio, zero
 per-sample canonical presentation-position bytes, compact procedural metadata
 bytes, tile-grid metadata bytes, physical A/B bytes, stable draw count, and
@@ -523,7 +524,7 @@ layers are populated only when spatial residency changes. `?diagnostics=1`
 composes with both GPU experiments and reports tiled residency counters.
 
 `?gpuWeather=1` connects the same immutable all-time temporal tile residency
-to the real Dots/Squares path at stable L14. The tiled GPU pass materializes two
+to the real Dots/Squares path at stable L13 and L14. The tiled GPU pass materializes two
 persistent physical renderer-keyframe fields into R16F textures in MapLibre's
 WebGL2 context. Both Dots and Squares receive the same A/B physical mm/h
 textures and renderer temporal progress, then apply their independent existing
@@ -532,9 +533,9 @@ existing 100 ms renderer-keyframe pair changes, not on every playback RAF;
 sequential playback reuses the prior B field while reconstructing only the new
 C field. Arbitrary timeline jumps reconstruct only missing members of the
 two-field working set. The renderers do not read the fields back to the CPU,
-rebuild canonical geometry, or duplicate temporal reconstruction. L10–L13 and
+rebuild canonical geometry, or duplicate temporal reconstruction. L10–L12 and
 LOD transitions use the CPU reference path, with an explicit diagnostics
-fallback reason. A stable L14 viewport change creates a pending spatial state;
+fallback reason. A stable L13/L14 viewport change creates a pending spatial state;
 the committed topology, physical fields, and tile residency remain active until
 the replacement is complete. The experiment has no GPU LOD pyramid
 yet and does not change the motion estimator or reconstruction mathematics. Its
@@ -545,37 +546,41 @@ and partial writes disabled) before its full-target draw. When it runs inside a
 MapLibre custom-layer render, it restores the invocation's framebuffer,
 viewport, and VAO binding before presentation.
 
-With `?gpuWeather=1&raw=0`, stable GPU L14 has explicit GPU-first ownership:
+With `?gpuWeather=1&raw=0`, stable GPU L13 and L14 have explicit GPU-first ownership:
 temporal rain/motion tiles, two R16F physical fields, and compact canonical
 window metadata remain resident, while Dots/Squares release CPU physical
 summaries, mapped arrays, instance-writer backing arrays, and legacy instance
-buffer capacity. The stable L14 reconstructor derives each sample's
-source-grid coordinate from `gl_FragCoord`, the retained L14 origin, and the
+buffer capacity. The shared direct-level reconstructor derives each sample's
+source-grid coordinate from `gl_FragCoord`, the retained canonical origin, and the
 existing regular source-axis descriptor; a small source-tile slot grid is the
 only spatial lookup texture. No per-sample canonical position or tile-index
-buffer is allocated. The CPU L14 packed state remains only for the
-mathematically adjacent L13↔L14 morph. When a stable GPU L14 window changes,
+buffer is allocated. L13 is not derived from L14: both direct levels sample the
+same reconstructed provider field at their own canonical resolution. Stable-L13
+CPU weather summaries, mapped arrays, and instance state are released after GPU
+activation; topology, relations, and temporary transition state remain for the
+legacy morphs. When a stable GPU window changes,
 the CPU pyramid still builds the requested topology descriptors and may defer
 its L14 transition-parent relation; that legacy relation is built lazily if a
-later L13↔L14 morph needs it. The L14 provider sampling geometry and temporal
-CPU geometry are not created for stable GPU ownership. For L14→L13, the last
-valid GPU field stays visible while the current renderer source pair is
+later L13↔L14 morph needs it. Stable direct-level provider sampling geometry and
+temporal CPU geometry are not retained for stable GPU ownership. For a
+direct-level→CPU transition, the last valid GPU field stays visible while the
+current renderer source pair is
 requested through the existing HIGH-priority scheduler; only then is the
 minimal CPU transition state rebuilt.
 
 GPU physical presentation sources carry both the shared canonical topology
-identity and the active L14 level-data identity. A renderer drops its source
+identity and the active L13/L14 level-data identity. A renderer drops its source
 before accepting a changed topology, level descriptor, transition, or GPU-mode
 deactivation; the application also preflights both Dots and Squares before
 publishing a new source, including to the inactive renderer. Thus a source is
 visible only after both renderers have the same synchronized topology/window
-and stable L14 descriptor. Leaving L14 first hands control back to the CPU
-transition path, and returning to L14 establishes the new descriptor before
+and stable direct-level descriptor. Leaving either direct level first hands
+control back to the CPU transition path, and returning establishes the new descriptor before
 publishing the next physical A/B pair. This lifecycle guard is intentionally
-temporary alongside the legacy L10–L13 CPU summaries and L13↔L14 transition
-state; it does not migrate those structures to GPU in v2 Task 1.
+temporary alongside the legacy L10–L12 CPU summaries and L12↔L13/L13↔L14
+transition state; those transitions remain CPU-owned until a later v2 task.
 
-Stable GPU L14 spatial residency has an explicit active/pending contract. The
+Stable GPU L13/L14 spatial residency has one explicit active/pending contract. The
 active state owns one canonical window/topology, its compatible provider-tile
 atlas, physical A/B fields, and the renderer source pair. Camera movement
 updates the latest pending window without clearing or retagging that active
@@ -598,12 +603,12 @@ trimmed to the committed bounded working set after replacement and stale-load
 cleanup. Metadata is likewise cached per immutable generation, so small
 window replacement does not refetch unchanged generation metadata.
 
-Timeline readiness is backend-aware. In stable GPU L14, the timeline is ready
+Timeline readiness is backend-aware. In stable GPU L13 or L14, the timeline is ready
 when the committed spatial working set has all required temporal provider
 tiles resident and a valid physical A/B/source pair is published. Since each
 rain tile contains all 19 rain frames and each motion tile contains all motion
 intervals, this is complete timeline availability for the current GPU view; it
-does not wait for the legacy 19-frame Float32 source cache. CPU L10–L13 keeps
+does not wait for the legacy 19-frame Float32 source cache. CPU L10–L12 keeps
 the existing bounded source-cache intervals and reports readiness only for the
 source frames required by the current CPU renderer pair.
 
@@ -741,7 +746,8 @@ opacity/color, glyph geometry, WebGL, UI state, presentation mappings, or
 hazard-renderer functions. The parsed provider grid is anisotropic geographic
 data. `WEATHER_REFERENCE_LEVEL = 13` is the explicit direct/aggregate boundary in the engine; it is not inferred from one dataset’s spacing. L13, L14, and L15 independently evaluate
 their own canonical geographic coordinates through the bilinearly reconstructed
-physical field. The active application evaluates through L14; explicit engine
+physical field. The active application uses the shared GPU backend at stable L13
+and L14; explicit engine
 verifiers retain L15 coverage. The pyramid lazily owns one reusable provider sampling geometry
 for each direct canonical level, so source-cell lookup is not repeated for each
 weather frame. For sequence data, that geometry also owns the lazy sparse
@@ -857,8 +863,9 @@ payload set is a separate memory domain from bounded derived renderer/LOD
 state: it does not multiply summaries, temporal keyframes, packed instances,
 or renderer-specific copies by frame count. The current LOD materialization
 ranges remain `L10..L13` for stable L10/L11, `L11..L13` for stable L12,
-`L12..L14` for stable L13, and `L13..L14` for stable L14; the packed L14
-representation, L14 ceiling, and visual semantics are unchanged.
+`L12..L14` for stable L13, and `L13..L14` for stable L14; stable direct levels
+remain procedural in presentation and the visual semantics are unchanged; L10–L12 aggregation and
+all LOD transitions remain temporary CPU paths.
 Immutable-generation cleanup/GC remains unrelated to this browser
 source-residency policy.
 

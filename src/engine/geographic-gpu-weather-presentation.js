@@ -7,6 +7,13 @@ import {
   DOTS_STRONG_RAIN_SHAPE_ANCHORS
 } from './precipitation-mapping.js';
 
+// Stable GPU weather is intentionally limited to the two direct canonical
+// levels. Lower levels remain on the legacy CPU aggregation/transition path.
+export const GPU_WEATHER_LEVELS = Object.freeze([13, 14]);
+export function isGpuWeatherLevel(level) {
+  return GPU_WEATHER_LEVELS.includes(level);
+}
+
 function number(value) {
   return Number(value).toFixed(6);
 }
