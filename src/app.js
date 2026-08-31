@@ -6,6 +6,9 @@ import {
   MAX_LOGICAL_SAMPLING_ZOOM,
   canonicalWindowFromMercatorBounds,
   canonicalWindowContains,
+  canonicalWindowChangeKind,
+  canonicalWindowMetrics,
+  canonicalWindowNeedsShrink,
   canonicalWindowsEqual,
   GeographicLodTopology,
   lngLatToMercator,
@@ -89,7 +92,6 @@ const GPU_WEATHER_LEVEL = 14;
 let gpuMotionReconstructor = null;
 let gpuMotionTileReconstructor = null;
 let gpuWeatherTileReconstructor = null;
-let gpuWeatherGeometry = null;
 let gpuWeatherLevelData = null;
 let gpuWeatherUsingGpu = false;
 let gpuWeatherFallbackReason = gpuWeatherExperimentEnabled ? 'not initialized' : null;
@@ -226,6 +228,8 @@ const state = {
   logicalSamplingZoom: WEATHER_REGION.initialZoom,
   camera: null,
   canonicalWindow: null,
+  canonicalWindowTarget: null,
+  canonicalWindowLastChange: null,
   pendingCanonicalWindow: null,
   canonicalWindowRebuilds: 0,
   canonicalWindowRebuildLastMs: 0,
@@ -337,7 +341,6 @@ function disableGpuWeatherPath(time = state.time / LOOP_SECONDS, reason = null) 
 function releaseGpuWeatherResidency() {
   gpuWeatherTileReconstructor?.destroy();
   gpuWeatherTileReconstructor = null;
-  gpuWeatherGeometry = null;
   gpuWeatherLevelData = null;
   gpuWeatherKeyframes = null;
 }
@@ -346,34 +349,22 @@ async function createGpuWeatherResidency(levelData) {
   if (!gpuWeatherExperimentEnabled || !activeWeatherField || !levelData || levelData.level !== GPU_WEATHER_LEVEL) return null;
   const gl = gpuWeatherGl();
   if (!gl) throw new Error('MapLibre WebGL2 context is unavailable.');
-  const frame = activeWeatherField.prepareFrame(state.time / LOOP_SECONDS);
   if (gpuWeatherLevelData !== levelData) {
     gpuWeatherTileReconstructor?.destroy();
     gpuWeatherTileReconstructor = null;
-    gpuWeatherGeometry = prepareGeographicSamplingGeometry(frame, levelData, null);
     gpuWeatherLevelData = levelData;
   }
   if (!gpuWeatherTileReconstructor) {
     gpuWeatherTileReconstructor = await GpuTemporalTileReconstructor.create({
       metadataUrl: ACTIVE_REAL_WEATHER_METADATA_URL,
       generationId: activeWeatherField.generationId,
-      geometry: gpuWeatherGeometry,
+      levelData,
       sequence: activeWeatherField,
+      procedural: true,
       gl
     });
   }
   await gpuWeatherTileReconstructor.ensureResident();
-  // Tile residency has uploaded both the deterministic canonical source
-  // positions and tile index. Stable GPU L14 must not also retain the CPU
-  // provider sampling geometry that was only needed to build those textures.
-  if (gpuFirstExperimentEnabled) {
-    const releasedGpuGeometryBytes = gpuWeatherTileReconstructor.releaseCpuGeometry();
-    gpuWeatherGeometry = null;
-    runtimeDiagnostics?.recordEvent('gpu-l14-cpu-geometry-release', {
-      releasedGpuGeometryBytes,
-      releasedPyramidGeometry: false
-    });
-  }
   return gpuWeatherTileReconstructor;
 }
 
@@ -575,6 +566,10 @@ function diagnosticsSnapshot() {
   const squares = squaresLayer?.diagnostics() || null;
   const pyramid = geographicWeatherPyramid?.snapshot() || null;
   const sourceResidentBytes = source?.residentSourceBytes || 0;
+  const targetWindowMetrics = state.canonicalWindowTarget
+    ? canonicalWindowMetrics(state.canonicalWindowTarget, GPU_WEATHER_LEVEL) : null;
+  const retainedWindowMetrics = state.canonicalWindow
+    ? canonicalWindowMetrics(state.canonicalWindow, GPU_WEATHER_LEVEL) : null;
   const trackedCpuBytes = (raw?.totalCpuGeometryBytes || 0)
     + (dots?.cpuBytes || 0)
     + (squares?.cpuBytes || 0)
@@ -633,7 +628,14 @@ function diagnosticsSnapshot() {
     canonicalWindow: {
       rebuilds: state.canonicalWindowRebuilds,
       lastMs: state.canonicalWindowRebuildLastMs,
-      timings: numericSummary(state.canonicalWindowRebuildSamples)
+      timings: numericSummary(state.canonicalWindowRebuildSamples),
+      targetSampleCount: targetWindowMetrics?.count || 0,
+      retainedSampleCount: retainedWindowMetrics?.count || 0,
+      targetDimensions: targetWindowMetrics ? { width: targetWindowMetrics.width, height: targetWindowMetrics.height } : null,
+      retainedDimensions: retainedWindowMetrics ? { width: retainedWindowMetrics.width, height: retainedWindowMetrics.height } : null,
+      retainedTargetAreaRatio: targetWindowMetrics?.area ? (retainedWindowMetrics?.area || 0) / targetWindowMetrics.area : 0,
+      lastChange: state.canonicalWindowLastChange,
+      pending: Boolean(state.pendingCanonicalWindow)
     },
     source,
     renderers: { raw, dots, squares },
@@ -650,6 +652,8 @@ function diagnosticsSnapshot() {
       experimentalTemporalSourceGpuBytes: gpuWeatherDiagnostics().residency?.temporalSourceGpuByteEstimate || 0,
       experimentalCurrentFieldGpuBytes: gpuWeatherDiagnostics().currentTarget?.byteEstimate || 0,
       experimentalCanonicalPresentationGeometryGpuBytes: gpuWeatherDiagnostics().residency?.canonicalPresentationGeometryGpuByteEstimate || 0,
+      experimentalProceduralGeometryMetadataBytes: gpuWeatherDiagnostics().residency?.proceduralGeometryMetadataByteEstimate || 0,
+      experimentalTileGridMetadataGpuBytes: gpuWeatherDiagnostics().residency?.tileGridMetadataGpuByteEstimate || 0,
       stableGpuL14RetainedCpuGeometryBytes: gpuWeatherDiagnostics().residency?.retainedCpuGeometryBytes || 0,
       representationGpuBytes: (dots?.estimatedGpuBufferBytes || 0) + (squares?.estimatedGpuBufferBytes || 0)
     }
@@ -866,9 +870,10 @@ function applyCanonicalWindow(canonicalWindow) {
     state.pendingCanonicalWindow = canonicalWindow;
     return false;
   }
-  if (gpuWeatherUsingGpu) disableGpuWeatherPath(state.time / LOOP_SECONDS, 'viewport changed; rebuilding L14 GPU residency');
+  const previousWindow = state.canonicalWindow;
+  const gpuStableL14 = gpuWeatherUsingGpu && state.lod.level === GPU_WEATHER_LEVEL && !state.lodTransition;
   const started = performance.now();
-  if (!geographicWeatherPyramid.setCanonicalWindow(canonicalWindow)) {
+  if (!geographicWeatherPyramid.setCanonicalWindow(canonicalWindow, { deferL14TransitionParents: gpuStableL14 })) {
     // The initial camera envelope may equal the fixed-support topology. Record
     // that resolved window even when no topology allocation was necessary.
     state.canonicalWindow = canonicalWindow;
@@ -876,6 +881,7 @@ function applyCanonicalWindow(canonicalWindow) {
     return false;
   }
   state.canonicalWindow = canonicalWindow;
+  state.canonicalWindowLastChange = canonicalWindowChangeKind(previousWindow, canonicalWindow);
   state.pendingCanonicalWindow = null;
   state.canonicalWindowRebuilds += 1;
   weatherLayer.setTopology(geographicWeatherPyramid.topology);
@@ -887,7 +893,9 @@ function applyCanonicalWindow(canonicalWindow) {
   if (state.canonicalWindowRebuildSamples.length > 120) state.canonicalWindowRebuildSamples.shift();
   runtimeDiagnostics?.recordEvent('canonical-window-replacement', {
     rebuildCount: state.canonicalWindowRebuilds,
-    durationMs: state.canonicalWindowRebuildLastMs
+    durationMs: state.canonicalWindowRebuildLastMs,
+    change: state.canonicalWindowLastChange,
+    gpuStableL14
   });
   updateLodDiagnostics();
   return true;
@@ -907,11 +915,13 @@ function updateCanonicalWindow() {
   const bounds = visibleMercatorBounds();
   if (!bounds) return;
   const candidate = canonicalWindowFromMercatorBounds(bounds);
+  state.canonicalWindowTarget = candidate;
   if (canonicalWindowsEqual(candidate, state.canonicalWindow)) {
     state.pendingCanonicalWindow = null;
     return;
   }
-  if (canonicalWindowContains(state.canonicalWindow, candidate)) {
+  const contained = canonicalWindowContains(state.canonicalWindow, candidate);
+  if (contained && !canonicalWindowNeedsShrink(state.canonicalWindow, candidate)) {
     state.pendingCanonicalWindow = null;
     return;
   }
@@ -1109,6 +1119,8 @@ function tryInitializeWeatherLayer() {
   }
   geographicLayers = [rawLayer, squaresLayer, weatherLayer].filter(Boolean);
   state.canonicalWindow = initialWindow;
+  state.canonicalWindowTarget = initialWindow;
+  state.canonicalWindowLastChange = 'grow';
   const styleLayers = map.getStyle().layers || [];
   const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');
   for (const layer of geographicLayers) {

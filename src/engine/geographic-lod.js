@@ -148,6 +148,38 @@ export function canonicalWindowContains(container, candidate) {
     && container.minY <= candidate.minY && container.maxY >= candidate.maxY;
 }
 
+export function canonicalWindowMetrics(window, level = MAX_DISPLAY_GRID_LEVEL) {
+  const levelData = selectMercatorGridLevel(level, window);
+  return Object.freeze({
+    width: levelData.width,
+    height: levelData.height,
+    count: levelData.count,
+    area: levelData.width * levelData.height
+  });
+}
+
+// A contained target normally benefits from hysteresis. Shrink only after the
+// retained footprint has grown beyond one additional target-sized footprint in
+// either dimension or four target footprints in area. The rule is spatial and
+// dimensionless, so it applies equally to compact and wide viewports.
+export function canonicalWindowNeedsShrink(retained, target, level = MAX_DISPLAY_GRID_LEVEL) {
+  if (!retained || !target || !canonicalWindowContains(retained, target)) return false;
+  const retainedMetrics = canonicalWindowMetrics(retained, level);
+  const targetMetrics = canonicalWindowMetrics(target, level);
+  return retainedMetrics.width > targetMetrics.width * 2
+    || retainedMetrics.height > targetMetrics.height * 2
+    || retainedMetrics.area > targetMetrics.area * 4;
+}
+
+export function canonicalWindowChangeKind(previous, next, level = MAX_DISPLAY_GRID_LEVEL) {
+  if (!previous) return 'grow';
+  const previousArea = canonicalWindowMetrics(previous, level).area;
+  const nextArea = canonicalWindowMetrics(next, level).area;
+  if (nextArea > previousArea) return 'grow';
+  if (nextArea < previousArea) return 'shrink';
+  return 'shift';
+}
+
 export function normalizeLodRange(range = { minLevel: DEFAULT_TOPOLOGY_MIN_LEVEL, maxLevel: DEFAULT_TOPOLOGY_MAX_LEVEL }) {
   const minLevel = Number(range.minLevel);
   const maxLevel = Number(range.maxLevel);
@@ -400,10 +432,11 @@ export function forEachDirectTransitionPair(relation, visit) {
 // Canonical positions and one-parent ownership for visual LOD morphs. This is
 // deliberately independent from centered weather-summary contributions.
 export class GeographicLodTopology {
-  constructor(canonicalWindow = null, levelRange, reuseFrom = null) {
+  constructor(canonicalWindow = null, levelRange, reuseFrom = null, options = {}) {
     const topologyStarted = now();
     this.canonicalWindow = normalizeCanonicalWindow(canonicalWindow);
     this.levelRange = normalizeLodRange(levelRange);
+    this.deferTransitionParents = Boolean(options.deferTransitionParents);
     this.levels = new Map();
     const sameWindow = reuseFrom && canonicalWindowsEqual(reuseFrom.canonicalWindow, this.canonicalWindow);
     this.constructionTimings = {
@@ -427,6 +460,7 @@ export class GeographicLodTopology {
     this.transitionParents = new Map();
     const transitionStarted = now();
     for (let level = this.levelRange.minLevel + 1; level <= this.levelRange.maxLevel; level++) {
+      if (this.deferTransitionParents && level === MAX_DISPLAY_GRID_LEVEL) continue;
       const reusable = sameWindow && reuseFrom.transitionParents.get(level);
       if (reusable && reuseFrom.levels.get(level) === this.levels.get(level)
         && reuseFrom.levels.get(level - 1) === this.levels.get(level - 1)) {
@@ -462,7 +496,14 @@ export class GeographicLodTopology {
   }
 
   transitionParentsFor(fineLevel) {
-    const parents = this.transitionParents.get(fineLevel);
+    let parents = this.transitionParents.get(fineLevel);
+    if (!parents && fineLevel === MAX_DISPLAY_GRID_LEVEL && this.levels.has(fineLevel) && this.levels.has(fineLevel - 1)) {
+      const started = now();
+      parents = buildTransitionParents(this.levels.get(fineLevel), this.levels.get(fineLevel - 1));
+      this.transitionParents.set(fineLevel, parents);
+      this.constructionTimings.transitionParentsCreated++;
+      this.constructionTimings.transitionParentsMs += now() - started;
+    }
     if (!parents) throw new Error(`LOD transition parent data for L${fineLevel} is not materialized.`);
     return parents;
   }

@@ -257,13 +257,17 @@ Mercator envelope using the map bounds plus a deterministic 5 × 5 screen
 unprojection lattice. The envelope expands by 25% of its span on every side,
 adds at least one L10 interval of topology/aggregation safety margin, and is
 snapped outward to L10-compatible boundaries in the global L15 integer
-coordinate system. A move computes a new snapped target on every camera
-update, but retains the current overscanned topology while it contains that
-target. This deterministic window hysteresis keeps the visible viewport and
-centered-aggregation margin covered; a target that exits the retained window
-triggers the existing replacement. A pending window update is applied after an
-active 0.2 s LOD morph completes, so a window shift is never represented as an
-LOD morph.
+coordinate system. A move computes a new snapped target on every camera update,
+but retains the current overscanned topology while it contains that target and
+remains useful. The two-sided hysteresis keeps the visible viewport and
+centered-aggregation margin covered while preventing history-dependent
+retention: a contained target replaces the retained window when either retained
+L14 dimension exceeds twice the target dimension or retained L14 area exceeds
+four target areas. Targets outside the retained window still replace it
+immediately. Runtime diagnostics expose target/retained L14 counts and
+dimensions, their area ratio, and the last `grow`/`shift`/`shrink` change kind.
+A pending window update is applied after an active 0.2 s LOD morph completes,
+so a window shift is never represented as an LOD morph.
 
 The application-owned RAF runs only while playback advances or a 0.2 s LOD
 transition is active. Paused map navigation and static updates use MapLibre's
@@ -301,11 +305,15 @@ sizes, capacities, lifecycle counters, and estimated Dot Field GPU buffer
 bytes. Dots additionally reports exact temporal physical-summary bytes, mapped
 presentation bytes, instance-writer allocation bytes, total tracked CPU bytes,
 the packed active count for each direct level, and whether each active level is
-`dense-summary` or `packed-direct`. The pyramid reports the exact known typed
-array floor split between sampling geometry, centered contribution relations,
-transition parents, and direct-transition relations. Weather Resource Timing
-records retain sanitized same-origin relative paths and expose transfer,
-encoded, and decoded sizes for gzip comparison.
+`dense-summary` or `packed-direct`. Stable GPU L14 reports target/retained
+canonical counts and dimensions, change kind, retained/target area ratio, zero
+per-sample canonical presentation-position bytes, compact procedural metadata
+bytes, tile-grid metadata bytes, physical A/B bytes, stable draw count, and
+tile source residency. The pyramid reports the exact known typed array floor
+split between sampling geometry, centered contribution relations, transition
+parents, and direct-transition relations. Weather Resource Timing records
+retain sanitized same-origin relative paths and expose transfer, encoded, and
+decoded sizes for gzip comparison.
 
 The weather-loader diagnostics also expose generation identity, source frame
 count and sorted resident indices, exact resident source bytes, the active
@@ -537,15 +545,22 @@ MapLibre custom-layer render, it restores the invocation's framebuffer,
 viewport, and VAO binding before presentation.
 
 With `?gpuWeather=1&raw=0`, stable GPU L14 has explicit GPU-first ownership:
-temporal rain/motion tiles, two R16F physical fields, and uploaded canonical
-position/tile-index textures remain resident, while Dots/Squares release CPU
-physical summaries, mapped arrays, instance-writer backing arrays, and legacy
-instance buffer capacity. The CPU L14 packed state remains only for the
-mathematically adjacent L13→L14 morph. Once tile residency is ready, the
-pyramid's L14 provider sampling geometry and the reconstructor's CPU canonical
-geometry are detached. For L14→L13, the last valid GPU field stays visible
-while the current renderer source pair is requested through the existing
-HIGH-priority scheduler; only then is the minimal CPU transition state rebuilt.
+temporal rain/motion tiles, two R16F physical fields, and compact canonical
+window metadata remain resident, while Dots/Squares release CPU physical
+summaries, mapped arrays, instance-writer backing arrays, and legacy instance
+buffer capacity. The stable L14 reconstructor derives each sample's
+source-grid coordinate from `gl_FragCoord`, the retained L14 origin, and the
+existing regular source-axis descriptor; a small source-tile slot grid is the
+only spatial lookup texture. No per-sample canonical position or tile-index
+buffer is allocated. The CPU L14 packed state remains only for the
+mathematically adjacent L13↔L14 morph. When a stable GPU L14 window changes,
+the CPU pyramid still builds the requested topology descriptors and may defer
+its L14 transition-parent relation; that legacy relation is built lazily if a
+later L13↔L14 morph needs it. The L14 provider sampling geometry and temporal
+CPU geometry are not created for stable GPU ownership. For L14→L13, the last
+valid GPU field stays visible while the current renderer source pair is
+requested through the existing HIGH-priority scheduler; only then is the
+minimal CPU transition state rebuilt.
 
 ### Physical weather-summary profiles
 
@@ -663,7 +678,9 @@ active window is represented by inclusive L15 integer bounds, snapped outward
 to the coarsest L10 interval. A topology also has an explicit contiguous LOD
 range; it builds only the requested levels and only the transition parents,
 compact direct adjacent-transition relations, and compact centered aggregate
-relations whose endpoints exist.
+relations whose endpoints exist. Stable GPU L14 window replacement may defer
+the legacy L13→L14 transition-parent array; `transitionParentsFor(14)` builds
+that same deterministic relation on demand for the later CPU transition.
 When lower levels are requested, the complete L13→L12→L11→L10 dependency chain
 is required; missing levels fail clearly. Thus panning and rotating do not
 alter displayed weather density or sample identity, while low display LODs do

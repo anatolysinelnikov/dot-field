@@ -841,20 +841,22 @@ export class GeographicWeatherPyramid {
     }
   }
 
-  setCanonicalWindow(canonicalWindow) {
-    return this.setConfiguration(canonicalWindow, this.topology.levelRange);
+  setCanonicalWindow(canonicalWindow, options = {}) {
+    return this.setConfiguration(canonicalWindow, this.topology.levelRange, options);
   }
 
   setLevelRange(levelRange) {
     return this.setConfiguration(this.topology.canonicalWindow, levelRange);
   }
 
-  setConfiguration(canonicalWindow, levelRange) {
+  setConfiguration(canonicalWindow, levelRange, options = {}) {
     const nextWindow = normalizeCanonicalWindow(canonicalWindow);
     const nextRange = normalizeLodRange(levelRange);
     if (canonicalWindowsEqual(this.topology.canonicalWindow, nextWindow) && lodRangesEqual(this.topology.levelRange, nextRange)) return false;
     const sameWindow = canonicalWindowsEqual(this.topology.canonicalWindow, nextWindow);
-    this.setTopology(new GeographicLodTopology(nextWindow, nextRange, sameWindow ? this.topology : null), {
+    this.setTopology(new GeographicLodTopology(nextWindow, nextRange, sameWindow ? this.topology : null, {
+      deferTransitionParents: options.deferL14TransitionParents
+    }), {
       preserveCompatibleState: sameWindow
     });
     return true;
@@ -887,10 +889,11 @@ export class GeographicWeatherPyramid {
     return geometry;
   }
 
-  // Stable GPU L14 presentation owns an uploaded canonical geometry texture,
-  // not this CPU-side provider sampling geometry. Keep the descriptor/topology
-  // for an adjacent CPU fallback transition, but discard per-sample temporal
-  // reconstruction state as soon as GPU residency takes ownership.
+  // Stable GPU L14 presentation owns compact window metadata and derives its
+  // canonical/source coordinates procedurally, not from this CPU-side provider
+  // sampling geometry. Keep the descriptor/topology for an adjacent CPU
+  // fallback transition, but discard per-sample temporal reconstruction state
+  // as soon as GPU residency takes ownership.
   releaseSamplingGeometry(level) {
     const geometry = this.samplingGeometries.get(level);
     if (!geometry) return false;
