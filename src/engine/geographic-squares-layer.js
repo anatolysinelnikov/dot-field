@@ -364,6 +364,7 @@ export class GeographicSquaresLayer {
   setTopology(topology, options = {}) {
     if (this.weatherPyramid.topology !== topology) throw new Error('Squares topology must be the shared weather-pyramid topology.');
     const previousTopology = this.topology;
+    if (this.gpuWeatherSource && previousTopology !== topology) this.gpuWeatherSource = null;
     const canPreserve = options.preserveCompatibleState !== false
       && previousTopology
       && canonicalWindowsEqual(previousTopology.canonicalWindow, topology.canonicalWindow);
@@ -445,11 +446,18 @@ export class GeographicSquaresLayer {
 
   setGpuWeatherSource(source, { requestRepaint = true } = {}) {
     if (!this.gpuWeatherMode) return;
-    if (source && (source.levelData !== this.levelData || source.levelData?.level !== GPU_WEATHER_LEVEL)) {
-      throw new Error('GPU weather source must match the active L14 topology.');
+    if (source && !this.isGpuWeatherSourceCompatible(source)) {
+      throw new Error(`GPU weather source must match the active L14 topology (expected topology=${this.topology?.canonicalWindow ? JSON.stringify(this.topology.canonicalWindow) : 'none'}, levelData=${this.levelData?.level ?? 'none'}; actual topology=${source.topology?.canonicalWindow ? JSON.stringify(source.topology.canonicalWindow) : 'none'}, levelData=${source.levelData?.level ?? 'none'}).`);
     }
     this.gpuWeatherSource = source;
     if (requestRepaint) this.map?.triggerRepaint();
+  }
+
+  isGpuWeatherSourceCompatible(source) {
+    return Boolean(this.gpuWeatherMode && source && source.topology === this.topology
+      && source.levelData === this.levelData
+      && source.levelData?.level === GPU_WEATHER_LEVEL
+      && !this.transition);
   }
 
   setGpuWeatherPresentationEnabled(enabled) {
@@ -494,6 +502,9 @@ export class GeographicSquaresLayer {
 
   setLevelData(levelData, time) {
     const level = levelData?.level ?? null;
+    if (this.gpuWeatherSource && (this.gpuWeatherSource.levelData !== levelData || level !== GPU_WEATHER_LEVEL)) {
+      this.gpuWeatherSource = null;
+    }
     if (this.gpuWeatherMode && level === GPU_WEATHER_LEVEL) {
       this.levelData = levelData;
       this.transition = null;
@@ -532,6 +543,7 @@ export class GeographicSquaresLayer {
   }
 
   setTransition(fromLevelData, toLevelData, time, progress = 0) {
+    this.gpuWeatherSource = null;
     const fromLevel = fromLevelData.level;
     const toLevel = toLevelData.level;
     const previousTransition = this.transition;

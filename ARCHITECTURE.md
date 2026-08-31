@@ -562,6 +562,18 @@ valid GPU field stays visible while the current renderer source pair is
 requested through the existing HIGH-priority scheduler; only then is the
 minimal CPU transition state rebuilt.
 
+GPU physical presentation sources carry both the shared canonical topology
+identity and the active L14 level-data identity. A renderer drops its source
+before accepting a changed topology, level descriptor, transition, or GPU-mode
+deactivation; the application also preflights both Dots and Squares before
+publishing a new source, including to the inactive renderer. Thus a source is
+visible only after both renderers have the same synchronized topology/window
+and stable L14 descriptor. Leaving L14 first hands control back to the CPU
+transition path, and returning to L14 establishes the new descriptor before
+publishing the next physical A/B pair. This lifecycle guard is intentionally
+temporary alongside the legacy L10–L13 CPU summaries and L13↔L14 transition
+state; it does not migrate those structures to GPU in v2 Task 1.
+
 ### Physical weather-summary profiles
 
 `geographic-weather-pyramid.js` retains the generic hazard-capable physical
