@@ -612,6 +612,51 @@ does not wait for the legacy 19-frame Float32 source cache. CPU L10–L12 keeps
 the existing bounded source-cache intervals and reports readiness only for the
 source frames required by the current CPU renderer pair.
 
+### Experimental GPU physical summaries for L10-L12
+
+`src/engine/gpu-physical-summary.js` is the Task 3A mathematical backend for
+future GPU L10-L12 presentation. It is diagnostic-only in this task: stable
+L10, L11, and L12 still use the CPU pyramid and CPU Dots/Squares path. The
+browser hook `window.__dotFieldGpuWeather.validatePhysicalSummary()` is the
+explicit opt-in readback path; normal rendering does not allocate or execute
+these summary textures.
+
+The rain-only physical summary contract is exactly the compact profile already
+used by the GPU-first temporal provider: `totalWeight`, weighted rain amount in
+mm/h, maximum rain in mm/h, and coverage weights at 0.05 and 2.5 mm/h. Coverage
+is a weighted fraction of contributing canonical samples, not a thresholded
+average. Total weight retains the edge normalization denominator. The summary
+contains no colors, radii, opacity, or symbol state. Storm/hail channels remain
+in the generic CPU summary and hazard path; the current GPU temporal asset is
+explicitly rain-only and does not fabricate those phenomena.
+
+The verified CPU order is direct temporal physical reconstruction at L13,
+Float32 summary storage, centered weighted aggregation to L12, then recursively
+to L11 and L10. Each discrete renderer keyframe applies its Dots/Squares
+presentation mapping after that spatial aggregation; the renderer then
+interpolates the mapped keyframe attributes over time. The centered relation is
+not an ordinary mipmap: edge clipping, candidate normalization, total weight,
+coverage, and maxima follow `geographic-weather-pyramid.js`. For this contract,
+L13→L12→L11→L10 recursion is exactly the existing CPU hierarchy; it is not
+equivalent to averaging a lower-resolution rain texture.
+
+The GPU backend uses one reusable three-pass fragment program. Its input is a
+physical-source record carrying the R16F texture, canonical window/topology,
+and L13 level identity; an unlabelled or wrong-level texture is rejected. The
+first pass reads the direct R16F L13 physical field; later passes read the preceding
+summary texture. Each output fetches the reverse centered contributions in the
+same child-major order as the CPU implementation and accumulates weighted sum,
+coverage, total weight, and conditional maximum. It writes `RGBA16F` values
+(`sum`, `max`, `totalWeight`, reserved) and `RG16F` coverage (`0.05`, `2.5`),
+for 12 bytes per sample per keyframe. Relation metadata is compact bounded
+working-set metadata (up to nine reverse contributions per coarse sample), not
+a CPU or GPU weather-summary array. There are no CPU per-sample summary uploads,
+no permanent full-domain L13 scratch textures, and no temporal source fetches or
+motion changes. The backend retains two summary keyframes per requested coarse
+level and reuses its relation textures for the topology lifetime. It is designed
+to attach to the existing active/pending spatial publication contract in the
+next presentation task; this task does not publish it to stable L10-L12.
+
 ### Physical weather-summary profiles
 
 `geographic-weather-pyramid.js` retains the generic hazard-capable physical

@@ -18,11 +18,12 @@ import {
   rawZoomForLogicalSamplingZoom,
   zoomToMercatorGridLevel
 } from './engine/geographic-lod.js';
-import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
-import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
+import { GeographicDotsLayer, mapDotsWeatherSummary } from './engine/geographic-dots-layer.js';
+import { GeographicSquaresLayer, mapSquaresWeatherSummary } from './engine/geographic-squares-layer.js';
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
 import { GpuMotionReconstructor } from './engine/gpu-motion-reconstruction.js';
 import { GpuTemporalTileReconstructor } from './engine/gpu-temporal-tile-reconstruction.js';
+import { GpuPhysicalSummaryBackend } from './engine/gpu-physical-summary.js';
 import { GPU_WEATHER_LEVELS, isGpuWeatherLevel } from './engine/geographic-gpu-weather-presentation.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
@@ -110,6 +111,7 @@ let gpuWeatherInitializationPromise = null;
 let gpuWeatherResidencyPromise = null;
 let gpuWeatherInitializationGeneration = 0;
 let gpuWeatherKeyframes = null;
+let gpuPhysicalSummaryBackend = null;
 let gpuWeatherPendingSpatial = null;
 let gpuWeatherPendingSpatialGeneration = 0;
 const gpuWeatherSharedTileCache = { entries: new Map(), pending: new Map() };
@@ -401,6 +403,8 @@ function disableGpuWeatherPath(time = state.time / LOOP_SECONDS, reason = null) 
   cancelGpuWeatherPendingSpatial();
   gpuWeatherUsingGpu = false;
   gpuWeatherKeyframes = null;
+  gpuPhysicalSummaryBackend?.destroy();
+  gpuPhysicalSummaryBackend = null;
   gpuWeatherInitializationGeneration += 1;
   if (reason) gpuWeatherFallbackReason = reason;
   updateTimelineResidency();
@@ -410,6 +414,8 @@ function releaseGpuWeatherResidency() {
   cancelGpuWeatherPendingSpatial();
   gpuWeatherTileReconstructor?.destroy();
   gpuWeatherTileReconstructor = null;
+  gpuPhysicalSummaryBackend?.destroy();
+  gpuPhysicalSummaryBackend = null;
   gpuWeatherLevelData = null;
   gpuWeatherKeyframes = null;
   updateTimelineResidency();
@@ -422,6 +428,8 @@ async function createGpuWeatherResidency(levelData) {
   if (gpuWeatherLevelData !== levelData) {
     gpuWeatherTileReconstructor?.destroy();
     gpuWeatherTileReconstructor = null;
+    gpuPhysicalSummaryBackend?.destroy();
+    gpuPhysicalSummaryBackend = null;
     gpuWeatherLevelData = levelData;
   }
   if (!gpuWeatherTileReconstructor) {
@@ -521,6 +529,8 @@ function commitGpuWeatherSpatialState(pending, prepared) {
   const started = performance.now();
   const previousWindow = state.canonicalWindow;
   const previousReconstructor = gpuWeatherTileReconstructor;
+  gpuPhysicalSummaryBackend?.destroy();
+  gpuPhysicalSummaryBackend = null;
   const topology = pending.topology;
   const levelData = pending.levelData;
   const frame = geographicTemporalFrameAt(state.time / LOOP_SECONDS);
@@ -855,6 +865,7 @@ function gpuWeatherDiagnostics() {
     },
     timeline: { ...gpuWeatherTimelineStats },
     residency: tile,
+    physicalSummary: gpuPhysicalSummaryBackend?.diagnostics() || { active: false },
     spatial: {
       activeLevel: stableCommittedGpu ? state.lod.level : null,
       activeWindow: state.canonicalWindow,
@@ -1363,6 +1374,62 @@ function installGpuWeatherExperiment() {
       const referenceFrame = activeWeatherField.prepareFrame(normalizedTime);
       const referenceGeometry = prepareGeographicSamplingGeometry(referenceFrame, state.levelData);
       return gpuWeatherTileReconstructor.validate(referenceFrame, { maximumSamples, referenceGeometry });
+    },
+    validatePhysicalSummary(maximumSamples = 32768) {
+      if (!gpuWeatherRequestedAtCurrentLevel() || state.levelData?.level !== 13) {
+        throw new Error('GPU physical-summary validation requires stable GPU L13.');
+      }
+      const topology = new GeographicLodTopology(state.canonicalWindow, lodRangeForStableLevel(10));
+      if (!gpuPhysicalSummaryBackend || !canonicalWindowsEqual(gpuPhysicalSummaryBackend.topology.canonicalWindow, topology.canonicalWindow)) {
+        gpuPhysicalSummaryBackend?.destroy();
+        gpuPhysicalSummaryBackend = new GpuPhysicalSummaryBackend(gpuWeatherGl(), topology);
+      }
+      const keyframe = gpuWeatherKeyframes?.a;
+      if (!keyframe?.texture) throw new Error('GPU physical-summary validation requires a committed L13 physical keyframe.');
+      gpuPhysicalSummaryBackend.reconstruct({
+        texture: keyframe.texture,
+        topology: geographicWeatherPyramid.topology,
+        levelData: state.levelData
+      }, { targetSlot: 0, measureGpu: diagnosticsEnabled });
+      const referenceFrame = activeWeatherField.prepareFrame(keyframe.index / TEMPORAL_FRAME_COUNT);
+      const referencePyramid = new GeographicWeatherPyramid(Float32Array, topology);
+      const referenceSummaries = referencePyramid.evaluate([10, 11, 12], referenceFrame);
+      const validation = {};
+      for (const level of [10, 11, 12]) {
+        validation[level] = gpuPhysicalSummaryBackend.validate(level, referenceSummaries[level], { maximumSamples });
+        const readback = gpuPhysicalSummaryBackend.readback(level);
+        const levelData = topology.levels.get(level);
+        const actualSummary = {
+          representation: 'dense-summary',
+          profile: 'rain-only-display',
+          level,
+          levelData,
+          totalWeight: new Float32Array(levelData.count),
+          rainWeightedSumMmh: new Float32Array(levelData.count),
+          rainMaxMmh: new Float32Array(levelData.count),
+          rainCoverageWeight: [new Float32Array(levelData.count), new Float32Array(levelData.count)]
+        };
+        for (let index = 0; index < levelData.count; index++) {
+          actualSummary.rainWeightedSumMmh[index] = readback.values[index * 4];
+          actualSummary.rainMaxMmh[index] = readback.values[index * 4 + 1];
+          actualSummary.totalWeight[index] = readback.values[index * 4 + 2];
+          actualSummary.rainCoverageWeight[0][index] = readback.coverage[index * 4];
+          actualSummary.rainCoverageWeight[1][index] = readback.coverage[index * 4 + 1];
+        }
+        const cpuDots = mapDotsWeatherSummary(referenceSummaries[level]);
+        const gpuDots = mapDotsWeatherSummary(actualSummary);
+        const cpuSquares = mapSquaresWeatherSummary(referenceSummaries[level]);
+        const gpuSquares = mapSquaresWeatherSummary(actualSummary);
+        const maxError = (left, right, fields) => fields.reduce((maximum, field) => {
+          for (let index = 0; index < left[field].length; index++) maximum = Math.max(maximum, Math.abs(left[field][index] - right[field][index]));
+          return maximum;
+        }, 0);
+        validation[level].presentation = {
+          dotsMaximumAbsoluteError: maxError(cpuDots, gpuDots, ['rainRadius', 'strongRadius']),
+          squaresMaximumAbsoluteError: maxError(cpuSquares, gpuSquares, ['rainWetMeanMmh', 'rainCoverage'])
+        };
+      }
+      return { backend: gpuPhysicalSummaryBackend.diagnostics(), validation };
     },
     async rapidScrub() {
       const results = [];
