@@ -279,20 +279,21 @@ void main() {
 
 function makeGpuWeatherProgram(gl, shaderData) {
   const vertexSource = `${GPU_WEATHER_COMMON_VERTEX}
-out float v_rain;
+out vec4 v_weather;
 void main() {
   int sampleIndex;
-  v_rain = gpuRainAt(sampleIndex);
+  v_weather = gpuWeatherAt(sampleIndex);
   gl_Position = projectTile(gpuWeatherCenter(sampleIndex) + a_vertex * u_spacing);
 }`;
   const fragmentSource = `${GPU_SQUARES_RAIN_MAPPING_SHADER}
 ${STRONG_RAIN_SHADER}
-in float v_rain;
+in vec4 v_weather;
 uniform float u_opacity;
+uniform int u_weather_kind;
 out vec4 fragColor;
 void main() {
-  float rain = rainVisibility(v_rain) * step(0.05, v_rain);
-  float strong = strongRain(v_rain);
+  float rain = rainVisibility(v_weather.x) * (u_weather_kind == 0 ? step(0.05, v_weather.x) : clamp(v_weather.y, 0.0, 1.0));
+  float strong = strongRain(v_weather.x);
   vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), strong);
   fragColor = vec4(color, rain * u_opacity);
 }`;
@@ -303,7 +304,10 @@ void main() {
       vertex: gl.getAttribLocation(program, 'a_vertex'),
       weatherA: gl.getUniformLocation(program, 'u_weather_a'),
       weatherB: gl.getUniformLocation(program, 'u_weather_b'),
+      coverageA: gl.getUniformLocation(program, 'u_weather_coverage_a'),
+      coverageB: gl.getUniformLocation(program, 'u_weather_coverage_b'),
       weatherProgress: gl.getUniformLocation(program, 'u_weather_progress'),
+      weatherKind: gl.getUniformLocation(program, 'u_weather_kind'),
       width: gl.getUniformLocation(program, 'u_width'),
       minI: gl.getUniformLocation(program, 'u_minI'),
       minJ: gl.getUniformLocation(program, 'u_minJ'),
@@ -447,16 +451,20 @@ export class GeographicSquaresLayer {
   setGpuWeatherSource(source, { requestRepaint = true } = {}) {
     if (!this.gpuWeatherMode) return;
     if (source && !this.isGpuWeatherSourceCompatible(source)) {
-      throw new Error(`GPU weather source must match the active direct-level topology (expected topology=${this.topology?.canonicalWindow ? JSON.stringify(this.topology.canonicalWindow) : 'none'}, levelData=${this.levelData?.level ?? 'none'}; actual topology=${source.topology?.canonicalWindow ? JSON.stringify(source.topology.canonicalWindow) : 'none'}, levelData=${source.levelData?.level ?? 'none'}).`);
+      throw new Error(`GPU weather source must match the active stable GPU topology (expected topology=${this.topology?.canonicalWindow ? JSON.stringify(this.topology.canonicalWindow) : 'none'}, levelData=${this.levelData?.level ?? 'none'}; actual topology=${source.topology?.canonicalWindow ? JSON.stringify(source.topology.canonicalWindow) : 'none'}, levelData=${source.levelData?.level ?? 'none'}).`);
     }
     this.gpuWeatherSource = source;
     if (requestRepaint) this.map?.triggerRepaint();
   }
 
   isGpuWeatherSourceCompatible(source) {
+    const expectedKind = source?.levelData?.level < WEATHER_REFERENCE_LEVEL ? 'summary' : 'physical';
     return Boolean(this.gpuWeatherMode && source && source.topology === this.topology
       && source.levelData === this.levelData
       && isGpuWeatherLevel(source.levelData?.level)
+      && source.kind === expectedKind
+      && source.textureA && source.textureB
+      && (expectedKind === 'physical' || (source.coverageTextureA && source.coverageTextureB))
       && !this.transition);
   }
 
@@ -725,7 +733,10 @@ export class GeographicSquaresLayer {
     setGeographicProjection(gl, locations, projection);
     gl.uniform1i(locations.weatherA, 0);
     gl.uniform1i(locations.weatherB, 1);
+    gl.uniform1i(locations.coverageA, 2);
+    gl.uniform1i(locations.coverageB, 3);
     gl.uniform1f(locations.weatherProgress, source.progress ?? 0);
+    gl.uniform1i(locations.weatherKind, source.kind === 'summary' ? 1 : 0);
     gl.uniform1i(locations.width, levelData.width);
     gl.uniform1i(locations.minI, levelData.minI);
     gl.uniform1i(locations.minJ, levelData.minJ);
@@ -735,6 +746,10 @@ export class GeographicSquaresLayer {
     gl.bindTexture(gl.TEXTURE_2D, source.textureA || source.texture);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, source.textureB || source.textureA || source.texture);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, source.coverageTextureA || source.textureA || source.texture);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, source.coverageTextureB || source.textureB || source.textureA || source.texture);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
     gl.enableVertexAttribArray(locations.vertex);
     gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
@@ -818,12 +833,14 @@ export class GeographicSquaresLayer {
       gpuWeather: {
         enabled: this.gpuWeatherMode,
         source: Boolean(this.gpuWeatherSource),
-        physicalField: this.gpuWeatherSource ? 'gpu-r16f' : null,
+        physicalField: this.gpuWeatherSource ? (this.gpuWeatherSource.kind === 'summary' ? 'gpu-physical-summary' : 'gpu-r16f') : null,
         level: this.gpuWeatherSource?.levelData?.level ?? null,
         sampleCount: this.gpuWeatherSource?.levelData?.count || 0,
         drawCallCount: this.gpuWeatherMode && this.gpuWeatherSource ? 1 : 0,
         vertexCountPerDraw: 6,
-        currentFieldBytes: this.gpuWeatherSource?.width * this.gpuWeatherSource?.height * 2 || 0,
+        currentFieldBytes: this.gpuWeatherSource
+          ? this.gpuWeatherSource.width * this.gpuWeatherSource.height * (this.gpuWeatherSource.kind === 'summary' ? 12 : 2)
+          : 0,
         mappedCpuBytes: this.gpuWeatherSource ? 0 : temporalStateBytes(this.temporal),
         mappedBufferUploads: this.gpuWeatherSource ? 0 : null
       },

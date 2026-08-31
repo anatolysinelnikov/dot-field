@@ -23,7 +23,7 @@ import { GeographicSquaresLayer, mapSquaresWeatherSummary } from './engine/geogr
 import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js';
 import { GpuMotionReconstructor } from './engine/gpu-motion-reconstruction.js';
 import { GpuTemporalTileReconstructor } from './engine/gpu-temporal-tile-reconstruction.js';
-import { GpuPhysicalSummaryBackend } from './engine/gpu-physical-summary.js';
+import { GPU_PHYSICAL_SUMMARY_LEVELS, GpuPhysicalSummaryBackend } from './engine/gpu-physical-summary.js';
 import { GPU_WEATHER_LEVELS, isGpuWeatherLevel } from './engine/geographic-gpu-weather-presentation.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
@@ -164,8 +164,12 @@ function updateTimelineResidency(residentSourceFrameIndices = []) {
     const tile = gpuWeatherTileReconstructor?.diagnostics() || null;
     const dotsSource = weatherLayer?.diagnostics()?.gpuWeather?.source;
     const squaresSource = squaresLayer?.diagnostics()?.gpuWeather?.source;
+    const summaryReady = state.lod.level >= WEATHER_REFERENCE_LEVEL
+      || Boolean(gpuPhysicalSummaryBackend?.levels?.includes(state.lod.level)
+        && gpuWeatherKeyframes?.a?.summary?.texture
+        && gpuWeatherKeyframes?.b?.summary?.texture);
     const ready = Boolean(tile?.active && tile.requiredGeometricTileCount >= tile.residentTileCount
-      && gpuWeatherKeyframes && dotsSource && squaresSource && !gpuWeatherPendingSpatial);
+      && gpuWeatherKeyframes && summaryReady && dotsSource && squaresSource && !gpuWeatherPendingSpatial);
     timelineResidency.dataset.backend = 'gpu-spatial';
     timelineResidency.dataset.readiness = ready ? 'ready' : 'loading';
     timelineResidency.replaceChildren();
@@ -432,11 +436,14 @@ async function createGpuWeatherResidency(levelData) {
     gpuPhysicalSummaryBackend = null;
     gpuWeatherLevelData = levelData;
   }
+  const physicalLevelData = levelData.level < WEATHER_REFERENCE_LEVEL
+    ? geographicWeatherPyramid.levelDataFor(WEATHER_REFERENCE_LEVEL)
+    : levelData;
   if (!gpuWeatherTileReconstructor) {
     gpuWeatherTileReconstructor = await GpuTemporalTileReconstructor.create({
       metadataUrl: ACTIVE_REAL_WEATHER_METADATA_URL,
       generationId: activeWeatherField.generationId,
-      levelData,
+      levelData: physicalLevelData,
       sequence: activeWeatherField,
       procedural: true,
       gl,
@@ -454,13 +461,44 @@ function ensureGpuWeatherResidency(levelData) {
   return gpuWeatherResidencyPromise;
 }
 
-function gpuWeatherKeyframesFor(reconstructor, normalizedTime) {
+function gpuSummaryLevelsForStableLevel(level) {
+  return GPU_PHYSICAL_SUMMARY_LEVELS.filter((summaryLevel) => summaryLevel >= level);
+}
+
+function createGpuPhysicalSummaryForStableLevel(topology, level) {
+  const levels = gpuSummaryLevelsForStableLevel(level);
+  if (!levels.length) return null;
+  return new GpuPhysicalSummaryBackend(gpuWeatherGl(), topology, { maximumLevels: levels });
+}
+
+function reconstructGpuWeatherKeyframe(reconstructor, summaryBackend, level, topology, index, slot) {
+  const physicalFrame = activeWeatherField.prepareFrame(index / TEMPORAL_FRAME_COUNT);
+  reconstructor.update(physicalFrame, { measureGpu: diagnosticsEnabled, targetSlot: slot });
+  const result = { index, slot, texture: reconstructor.outputs[slot] };
+  // L13 is the direct physical reference. A diagnostic summary backend can
+  // temporarily exist while validating L13, but it must never participate in
+  // the direct L13/L14 playback path.
+  if (summaryBackend && level < WEATHER_REFERENCE_LEVEL) {
+    summaryBackend.reconstruct({
+      texture: reconstructor.outputs[slot],
+      topology,
+      levelData: reconstructor.levelData
+    }, { targetSlot: slot, measureGpu: diagnosticsEnabled });
+    const summaryOutput = summaryBackend.outputs.get(level)?.slots[slot];
+    if (!summaryOutput) throw new Error(`GPU physical summary output L${level} is unavailable.`);
+    result.summary = {
+      texture: summaryOutput.values,
+      coverageTexture: summaryOutput.coverage
+    };
+  }
+  return result;
+}
+
+function gpuWeatherKeyframesFor(reconstructor, normalizedTime, { topology, level, summaryBackend } = {}) {
   const frame = geographicTemporalFrameAt(normalizedTime);
   const next = [null, null];
   for (const [position, index] of [frame.index, frame.nextIndex].entries()) {
-    const physicalFrame = activeWeatherField.prepareFrame(index / TEMPORAL_FRAME_COUNT);
-    reconstructor.update(physicalFrame, { measureGpu: diagnosticsEnabled, targetSlot: position });
-    next[position] = { index, slot: position, texture: reconstructor.outputs[position] };
+    next[position] = reconstructGpuWeatherKeyframe(reconstructor, summaryBackend, level, topology, index, position);
   }
   return { a: next[0], b: next[1], progress: frame.progress };
 }
@@ -492,10 +530,12 @@ function trimGpuWeatherTileCache(keepTileIds = []) {
 }
 
 function prepareGpuWeatherSpatialState(pending) {
+  const summaryBackend = createGpuPhysicalSummaryForStableLevel(pending.topology, pending.levelData.level);
+  pending.summaryBackend = summaryBackend;
   return GpuTemporalTileReconstructor.create({
     metadataUrl: ACTIVE_REAL_WEATHER_METADATA_URL,
     generationId: activeWeatherField.generationId,
-    levelData: pending.levelData,
+    levelData: pending.physicalLevelData,
     sequence: activeWeatherField,
     procedural: true,
     gl: gpuWeatherGl(),
@@ -505,19 +545,29 @@ function prepareGpuWeatherSpatialState(pending) {
     await reconstructor.ensureResident();
     if (gpuWeatherPendingSpatial !== pending || pending.cancelled) {
       reconstructor.destroy();
+      pending.summaryBackend?.destroy();
+      pending.summaryBackend = null;
       trimGpuWeatherTileCache(gpuWeatherTileReconstructor?.diagnostics().residentTileIds || []);
       return null;
     }
-    pending.keyframes = gpuWeatherKeyframesFor(reconstructor, state.time / LOOP_SECONDS);
-    return { reconstructor, keyframes: pending.keyframes };
+    pending.keyframes = gpuWeatherKeyframesFor(reconstructor, state.time / LOOP_SECONDS, {
+      topology: pending.topology,
+      level: pending.levelData.level,
+      summaryBackend
+    });
+    return { reconstructor, summaryBackend, keyframes: pending.keyframes };
   });
 }
 
 function gpuWeatherSpatialStateReady(pending) {
   const residency = pending.reconstructor?.diagnostics() || null;
+  const keyframesReady = Boolean(pending.keyframes?.a?.texture && pending.keyframes?.b?.texture
+    && (pending.levelData.level > WEATHER_REFERENCE_LEVEL
+      || (pending.keyframes.a.summary?.texture && pending.keyframes.a.summary?.coverageTexture
+        && pending.keyframes.b.summary?.texture && pending.keyframes.b.summary?.coverageTexture)));
   return Boolean(residency?.active
     && residency.requiredGeometricTileCount >= residency.residentTileCount
-    && pending.keyframes?.a?.texture && pending.keyframes?.b?.texture);
+    && keyframesReady);
 }
 
 function commitGpuWeatherSpatialState(pending, prepared) {
@@ -529,8 +579,7 @@ function commitGpuWeatherSpatialState(pending, prepared) {
   const started = performance.now();
   const previousWindow = state.canonicalWindow;
   const previousReconstructor = gpuWeatherTileReconstructor;
-  gpuPhysicalSummaryBackend?.destroy();
-  gpuPhysicalSummaryBackend = null;
+  const previousSummaryBackend = gpuPhysicalSummaryBackend;
   const topology = pending.topology;
   const levelData = pending.levelData;
   const frame = geographicTemporalFrameAt(state.time / LOOP_SECONDS);
@@ -538,7 +587,11 @@ function commitGpuWeatherSpatialState(pending, prepared) {
   // spatial tiles were loading. Rebuild only the pending physical pair before
   // publication so the new topology never receives an old timeline pair.
   if (!pending.keyframes || pending.keyframes.a.index !== frame.index || pending.keyframes.b.index !== frame.nextIndex) {
-    pending.keyframes = gpuWeatherKeyframesFor(pending.reconstructor, state.time / LOOP_SECONDS);
+    pending.keyframes = gpuWeatherKeyframesFor(pending.reconstructor, state.time / LOOP_SECONDS, {
+      topology: pending.topology,
+      level: pending.levelData.level,
+      summaryBackend: prepared.summaryBackend
+    });
     prepared.keyframes = pending.keyframes;
   }
   if (!gpuWeatherSpatialStateReady(pending)) return false;
@@ -554,6 +607,7 @@ function commitGpuWeatherSpatialState(pending, prepared) {
   state.levelData = levelData;
   gpuWeatherLevelData = levelData;
   gpuWeatherTileReconstructor = prepared.reconstructor;
+  gpuPhysicalSummaryBackend = prepared.summaryBackend || null;
   weatherLayer.setTopology(topology);
   squaresLayer.setTopology(topology);
   weatherLayer.setLevelData(levelData, state.time / LOOP_SECONDS);
@@ -565,6 +619,7 @@ function commitGpuWeatherSpatialState(pending, prepared) {
   });
   if (!published) throw new Error('GPU weather spatial commit failed renderer preflight.');
   pending.reconstructor = null;
+  pending.summaryBackend = null;
   gpuWeatherPendingSpatial = null;
   gpuWeatherPendingSpatialGeneration += 1;
   state.canonicalWindowRebuildLastMs = performance.now() - started;
@@ -591,6 +646,7 @@ function commitGpuWeatherSpatialState(pending, prepared) {
   gpuWeatherTimelineStats.repaintRequests++;
   gpuWeatherTimelineStats.weatherRepaintRequestCount++;
   previousReconstructor?.destroy();
+  previousSummaryBackend?.destroy();
   return true;
 }
 
@@ -627,6 +683,7 @@ function requestGpuWeatherSpatialReplacement(targetWindow) {
     window,
     topology,
     levelData: topology.levelDataFor(state.lod.level),
+    physicalLevelData: topology.levels.get(WEATHER_REFERENCE_LEVEL),
     startedAt: performance.now(),
     reconstructor: null,
     keyframes: null,
@@ -640,6 +697,7 @@ function requestGpuWeatherSpatialReplacement(targetWindow) {
     if (!prepared) return null;
     if (!commitGpuWeatherSpatialState(pending, prepared)) {
       prepared.reconstructor.destroy();
+      prepared.summaryBackend?.destroy();
       return null;
     }
     return prepared;
@@ -651,6 +709,8 @@ function requestGpuWeatherSpatialReplacement(targetWindow) {
       });
     }
     pending.reconstructor?.destroy();
+    pending.summaryBackend?.destroy();
+    pending.summaryBackend = null;
     if (gpuWeatherPendingSpatial !== pending) {
       trimGpuWeatherTileCache(gpuWeatherTileReconstructor?.diagnostics().residentTileIds || []);
     }
@@ -666,6 +726,17 @@ async function initializeGpuWeatherPath() {
   await ensureGpuWeatherResidency(levelData);
   if (initializationGeneration !== gpuWeatherInitializationGeneration
     || state.levelData !== levelData || !gpuWeatherRequestedAtCurrentLevel()) return null;
+  if (levelData.level < WEATHER_REFERENCE_LEVEL) {
+    if (!gpuPhysicalSummaryBackend
+      || !canonicalWindowsEqual(gpuPhysicalSummaryBackend.topology.canonicalWindow, geographicWeatherPyramid.topology.canonicalWindow)
+      || gpuPhysicalSummaryBackend.levels.join(',') !== gpuSummaryLevelsForStableLevel(levelData.level).join(',')) {
+      gpuPhysicalSummaryBackend?.destroy();
+      gpuPhysicalSummaryBackend = createGpuPhysicalSummaryForStableLevel(geographicWeatherPyramid.topology, levelData.level);
+    }
+  } else if (gpuPhysicalSummaryBackend) {
+    gpuPhysicalSummaryBackend.destroy();
+    gpuPhysicalSummaryBackend = null;
+  }
   if (gpuFirstExperimentEnabled) {
     const releasedPyramidGeometry = geographicWeatherPyramid?.releaseSamplingGeometry(levelData.level) || false;
     runtimeDiagnostics?.recordEvent('gpu-direct-level-pyramid-geometry-release', { level: levelData.level, releasedPyramidGeometry });
@@ -693,13 +764,21 @@ async function initializeGpuWeatherPath() {
 
 function setGpuWeatherPresentation(frame, physicalA, physicalB, presentationTimestamp = null, { requestRepaint = true, origin = 'playback' } = {}) {
   const topology = geographicWeatherPyramid?.topology;
+  const summary = state.levelData?.level < WEATHER_REFERENCE_LEVEL;
+  if (summary && (!physicalA?.summary?.texture || !physicalA.summary.coverageTexture
+    || !physicalB?.summary?.texture || !physicalB.summary.coverageTexture)) return null;
   const source = {
-    textureA: physicalA.texture,
-    textureB: physicalB.texture,
+    kind: summary ? 'summary' : 'physical',
+    textureA: summary ? physicalA.summary.texture : physicalA.texture,
+    textureB: summary ? physicalB.summary.texture : physicalB.texture,
+    coverageTextureA: summary ? physicalA.summary.coverageTexture : physicalA.texture,
+    coverageTextureB: summary ? physicalB.summary.coverageTexture : physicalB.texture,
+    physicalTextureA: physicalA.texture,
+    physicalTextureB: physicalB.texture,
     progress: frame.progress,
     width: state.levelData.width,
     height: state.levelData.height,
-    format: 'R16F',
+    format: summary ? 'RGBA16F+RG16F' : 'R16F',
     topology,
     levelData: state.levelData,
     reconstructor: gpuWeatherTileReconstructor
@@ -790,9 +869,14 @@ function updateGpuWeatherTime(normalizedTime, { presentationTimestamp = null, re
     }
     if (next[position]) continue;
     const slot = usedSlots.has(0) ? 1 : 0;
-    const physicalFrame = activeWeatherField.prepareFrame(desired[position] / TEMPORAL_FRAME_COUNT);
-    gpuWeatherTileReconstructor.update(physicalFrame, { measureGpu: diagnosticsEnabled, targetSlot: slot });
-    next[position] = { index: desired[position], slot, texture: gpuWeatherTileReconstructor.outputs[slot] };
+    next[position] = reconstructGpuWeatherKeyframe(
+      gpuWeatherTileReconstructor,
+      gpuPhysicalSummaryBackend,
+      state.lod.level,
+      geographicWeatherPyramid.topology,
+      desired[position],
+      slot
+    );
     usedSlots.add(slot);
     gpuWeatherTimelineStats.physicalKeyframeReconstructionDraws++;
   }
@@ -832,7 +916,8 @@ function gpuWeatherDiagnostics() {
     supportedLod: [...GPU_WEATHER_LEVELS],
     activeLevel: stableCommittedGpu ? state.lod.level : null,
     currentTarget: gpuWeatherTileReconstructor ? {
-      level: gpuWeatherTileReconstructor.levelData?.level ?? null,
+      level: state.lod?.level ?? null,
+      physicalSupportLevel: gpuWeatherTileReconstructor.levelData?.level ?? null,
       width: gpuWeatherTileReconstructor.width,
       height: gpuWeatherTileReconstructor.height,
       sampleCount: gpuWeatherTileReconstructor.width * gpuWeatherTileReconstructor.height,
@@ -868,13 +953,17 @@ function gpuWeatherDiagnostics() {
     physicalSummary: gpuPhysicalSummaryBackend?.diagnostics() || { active: false },
     spatial: {
       activeLevel: stableCommittedGpu ? state.lod.level : null,
+      activeSummaryLevel: stableCommittedGpu && state.lod.level < WEATHER_REFERENCE_LEVEL ? state.lod.level : null,
       activeWindow: state.canonicalWindow,
       pendingWindow: gpuWeatherPendingSpatial?.window || null,
+      pendingSummaryLevel: gpuWeatherPendingSpatial && gpuWeatherPendingSpatial.levelData.level < WEATHER_REFERENCE_LEVEL
+        ? gpuWeatherPendingSpatial.levelData.level : null,
       targetWindow: state.canonicalWindowTarget,
       activeRequiredTileCount: tile?.requiredGeometricTileCount || 0,
       activeResidentTileCount: tile?.residentTileCount || 0,
       pendingRequiredTileCount: pendingTile?.requiredGeometricTileCount || 0,
       pendingResidentTileCount: pendingTile?.residentTileCount || 0,
+      pendingPhysicalSummary: gpuWeatherPendingSpatial?.summaryBackend?.diagnostics() || { active: false },
       activeSource: hasBothSources,
       pendingReady: Boolean(gpuWeatherPendingSpatial && gpuWeatherSpatialStateReady(gpuWeatherPendingSpatial)),
       pendingReplacement: Boolean(gpuWeatherPendingSpatial),
@@ -1361,15 +1450,15 @@ function installGpuWeatherExperiment() {
   window.__dotFieldGpuWeather = {
     diagnostics: gpuWeatherDiagnostics,
     async warmup(normalizedTime = state.time / LOOP_SECONDS) {
-      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error('GPU weather is supported only for active stable L13/L14 Dots/Squares.');
+      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error(`GPU weather is supported only for active stable L${GPU_WEATHER_MIN_LEVEL}–L${GPU_WEATHER_LEVEL} Dots/Squares.`);
       return initializeGpuWeatherPath().then(() => updateGpuWeatherTime(normalizedTime));
     },
     update(normalizedTime = state.time / LOOP_SECONDS) {
-      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error('GPU weather is supported only for active stable L13/L14 Dots/Squares.');
+      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error(`GPU weather is supported only for active stable L${GPU_WEATHER_MIN_LEVEL}–L${GPU_WEATHER_LEVEL} Dots/Squares.`);
       return updateGpuWeatherTime(normalizedTime);
     },
     async validate(normalizedTime = state.time / LOOP_SECONDS, maximumSamples = 32768) {
-      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error('GPU weather validation requires active stable GPU L13/L14.');
+      if (!gpuWeatherRequestedAtCurrentLevel()) throw new Error(`GPU weather validation requires active stable GPU L${GPU_WEATHER_MIN_LEVEL}–L${GPU_WEATHER_LEVEL}.`);
       await initializeGpuWeatherPath();
       const referenceFrame = activeWeatherField.prepareFrame(normalizedTime);
       const referenceGeometry = prepareGeographicSamplingGeometry(referenceFrame, state.levelData);
@@ -1460,7 +1549,7 @@ function installGpuWeatherExperiment() {
       return results;
     }
   };
-  console.info('GPU weather Dots/Squares experiment available at ?gpuWeather=1 (stable L13/L14; CPU fallback at lower levels). Diagnostics: add &gpuWeatherHz=60 to cap presentation, &gpuWeatherPresentation=none for MapLibre-only redraw measurement, or &gpuWeatherPresentationSync=render to sample presentation in the MapLibre render callback.');
+  console.info(`GPU weather Dots/Squares experiment available at ?gpuWeather=1 (stable L${GPU_WEATHER_MIN_LEVEL}–L${GPU_WEATHER_LEVEL}; CPU fallback during LOD transitions). Diagnostics: add &gpuWeatherHz=60 to cap presentation, &gpuWeatherPresentation=none for MapLibre-only redraw measurement, or &gpuWeatherPresentationSync=render to sample presentation in the MapLibre render callback.`);
 }
 
 // This is intentionally opt-in. It exercises the existing canonical direct-level

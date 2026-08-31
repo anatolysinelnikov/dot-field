@@ -5,6 +5,7 @@ import { canonicalWindowFromMercatorBounds, GeographicLodTopology, lngLatToMerca
 import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicDotsLayer } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer } from '../src/engine/geographic-squares-layer.js';
+import { GPU_WEATHER_LEVELS } from '../src/engine/geographic-gpu-weather-presentation.js';
 
 const GPU_LEVEL = 14;
 setActiveWeatherField(parseRealWeatherCsv(fs.readFileSync(new URL('../data/mrl_z3_t+40min_376x239.csv', import.meta.url), 'utf8')));
@@ -29,16 +30,23 @@ function check(condition, message) {
 }
 
 function source(topology, levelData) {
+  const textureA = {};
+  const textureB = {};
   return {
     topology,
     levelData,
-    textureA: {},
-    textureB: {},
+    kind: levelData.level <= 12 ? 'summary' : 'physical',
+    textureA,
+    textureB,
+    coverageTextureA: levelData.level <= 12 ? {} : textureA,
+    coverageTextureB: levelData.level <= 12 ? {} : textureB,
     width: levelData.width,
     height: levelData.height,
     format: 'R16F'
   };
 }
+
+check(GPU_WEATHER_LEVELS.join(',') === '10,11,12,13,14', 'GPU weather stable levels include L10-L14');
 
 for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   const pyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(firstWindow, { minLevel: 13, maxLevel: 14 }));
@@ -77,7 +85,7 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   try {
     layer.setGpuWeatherSource(source(shiftedTopology, layer.levelData), { requestRepaint: false });
   } catch (error) {
-    threw = error instanceof Error && error.message.includes('GPU weather source must match the active direct-level topology');
+    threw = error instanceof Error && error.message.includes('GPU weather source must match the active stable GPU topology');
   }
   check(threw, `${Layer.name} retains the topology compatibility invariant`);
 
@@ -103,9 +111,24 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   const mismatched = source(new GeographicLodTopology(shiftedWindow, { minLevel: 12, maxLevel: 14 }), levelData);
   let threw = false;
   try { layer.setGpuWeatherSource(mismatched, { requestRepaint: false }); } catch (error) {
-    threw = error instanceof Error && error.message.includes('GPU weather source must match the active direct-level topology');
+    threw = error instanceof Error && error.message.includes('GPU weather source must match the active stable GPU topology');
   }
   check(threw, `${Layer.name} rejects mismatched stable L13 source identity`);
+}
+
+for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
+  const pyramid = new GeographicWeatherPyramid(Float32Array, new GeographicLodTopology(firstWindow, { minLevel: 10, maxLevel: 13 }));
+  const layer = new Layer(pyramid);
+  for (const level of [10, 11, 12]) {
+    const levelData = pyramid.levelDataFor(level);
+    layer.setGpuWeatherMode(true);
+    layer.setLevelData(levelData, 0);
+    const summarySource = source(pyramid.topology, levelData);
+    check(layer.isGpuWeatherSourceCompatible(summarySource), `${Layer.name} accepts matching GPU summary L${level} identity`);
+    layer.setGpuWeatherSource(summarySource, { requestRepaint: false });
+    check(layer.gpuWeatherSource === summarySource, `${Layer.name} installs GPU summary L${level} source`);
+    layer.setLevelData(levelData, 0);
+  }
 }
 
 if (failures) process.exitCode = 1;

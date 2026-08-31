@@ -1,6 +1,7 @@
 // Opt-in temporal-tile source residency for the motion GPU proof and the
-// stable GPU L13/L14 presentation path. Temporal tile assets and motion math
-// are unchanged; stable direct-level spatial lookup is procedural.
+// stable GPU L10-L14 presentation path. Temporal tile assets and motion math
+// are unchanged; stable spatial lookup is procedural, with coarse levels
+// reconstructing their direct L13 support field before summary reduction.
 
 import { sourceTileRangeForL14Window, sourceTileRangeForWindow } from './gpu-weather-spatial.js';
 
@@ -72,7 +73,7 @@ export class GpuTemporalTileReconstructor {
   }
 
   constructor(gl, metadataUrl, metadata, geometry, levelData, sequence, procedural = false, sharedTileCache = null) {
-    this.gl = gl; this.metadataUrl = metadataUrl; this.metadata = metadata; this.sequence = sequence; this.geometry = geometry; this.levelData = levelData; this.procedural = Boolean(procedural); fail(!this.procedural || levelData?.level === 13 || levelData?.level === 14, 'procedural temporal reconstruction requires stable L13 or L14 level data.'); fail(this.procedural || geometry, 'CPU canonical geometry is required for the legacy tiled path.'); this.width = this.procedural ? levelData.width : geometry.width; this.height = this.procedural ? levelData.height : geometry.height;
+    this.gl = gl; this.metadataUrl = metadataUrl; this.metadata = metadata; this.sequence = sequence; this.geometry = geometry; this.levelData = levelData; this.procedural = Boolean(procedural); fail(!this.procedural || levelData?.level === 13 || levelData?.level === 14, 'procedural temporal reconstruction requires direct stable L13 or L14 support data.'); fail(this.procedural || geometry, 'CPU canonical geometry is required for the legacy tiled path.'); this.width = this.procedural ? levelData.width : geometry.width; this.height = this.procedural ? levelData.height : geometry.height;
     this.tiles = new Map(metadata.temporal_tiles.tiles.map((tile) => [tile.id, tile])); this.sharedTileCache = sharedTileCacheState(sharedTileCache); this.requestGeneration = 0; this.requiredTileIds = null; this.stats = { tileNetworkRequestCount: 0, reusedTileCount: 0, newlyFetchedTileCount: 0, fetchedRainBytes: 0, fetchedMotionBytes: 0, staleLoads: 0, rainUploads: 0, rainUploadedBytes: 0, motionUploads: 0, motionUploadedBytes: 0, latestTemporalRainUploads: 0, latestTemporalMotionUploads: 0, drawCount: 0, latestGpuError: 0, latestMainThreadSubmissionMs: 0 };
     this.program = program(gl); this.copyProgram = program(gl, COPY_FRAGMENT_SOURCE); this.timerExtension = gl.getExtension('EXT_disjoint_timer_query_webgl2'); this.pendingQueries = []; this.vao = gl.createVertexArray(); gl.bindVertexArray(this.vao); const quad = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quad); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     this.pos = this.procedural ? null : tex2(gl, gl.RG32F, this.width, this.height, gl.RG, gl.FLOAT, positions(geometry)); this.tileIndex = null; this.tileGrid = null; this.outputs = [tex2(gl, gl.R16F, this.width, this.height, gl.RED, gl.HALF_FLOAT), tex2(gl, gl.R16F, this.width, this.height, gl.RED, gl.HALF_FLOAT)]; this.output = this.outputs[0]; this.fbos = [gl.createFramebuffer(), gl.createFramebuffer()]; for (let index = 0; index < 2; index++) { gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbos[index]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.outputs[index], 0); fail(gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE, 'R16F framebuffer is incomplete.'); }

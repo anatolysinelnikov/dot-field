@@ -7,9 +7,9 @@ import {
   DOTS_STRONG_RAIN_SHAPE_ANCHORS
 } from './precipitation-mapping.js';
 
-// Stable GPU weather is intentionally limited to the two direct canonical
-// levels. Lower levels remain on the legacy CPU aggregation/transition path.
-export const GPU_WEATHER_LEVELS = Object.freeze([13, 14]);
+// Stable GPU weather covers the direct physical levels and the validated
+// recursive physical-summary levels. LOD morphs still use the CPU path.
+export const GPU_WEATHER_LEVELS = Object.freeze([10, 11, 12, 13, 14]);
 export function isGpuWeatherLevel(level) {
   return GPU_WEATHER_LEVELS.includes(level);
 }
@@ -100,18 +100,43 @@ export const GPU_WEATHER_COMMON_VERTEX = `
 in vec2 a_vertex;
 uniform sampler2D u_weather_a;
 uniform sampler2D u_weather_b;
+uniform sampler2D u_weather_coverage_a;
+uniform sampler2D u_weather_coverage_b;
 uniform float u_weather_progress;
+uniform int u_weather_kind;
 uniform int u_width;
 uniform int u_minI;
 uniform int u_minJ;
 uniform float u_spacing;
-float gpuRainAt(out int sampleIndex) {
+vec4 gpuWeatherRecord(ivec2 coordinate, bool second) {
+  vec4 values;
+  vec2 coverageWeights = vec2(0.0);
+  if (second) {
+    values = texelFetch(u_weather_b, coordinate, 0);
+    if (u_weather_kind != 0) coverageWeights = texelFetch(u_weather_coverage_b, coordinate, 0).rg;
+  } else {
+    values = texelFetch(u_weather_a, coordinate, 0);
+    if (u_weather_kind != 0) coverageWeights = texelFetch(u_weather_coverage_a, coordinate, 0).rg;
+  }
+  if (u_weather_kind == 0) return vec4(values.r, 1.0, values.r, step(2.5, values.r));
+  float totalWeight = values.b;
+  float wetMean = coverageWeights.x > 0.0 ? values.r / coverageWeights.x : 0.0;
+  float wetCoverage = totalWeight > 0.0 ? coverageWeights.x / totalWeight : 0.0;
+  float strongCoverage = totalWeight > 0.0 ? coverageWeights.y / totalWeight : 0.0;
+  return vec4(wetMean, wetCoverage, values.g, strongCoverage);
+}
+vec4 gpuWeatherAt(out int sampleIndex) {
   sampleIndex = gl_InstanceID;
   int column = sampleIndex % u_width;
   int row = sampleIndex / u_width;
   ivec2 coordinate = ivec2(column, row);
-  return mix(texelFetch(u_weather_a, coordinate, 0).r, texelFetch(u_weather_b, coordinate, 0).r, u_weather_progress);
+  return mix(
+    gpuWeatherRecord(coordinate, false),
+    gpuWeatherRecord(coordinate, true),
+    u_weather_progress
+  );
 }
+float gpuRainAt(out int sampleIndex) { return gpuWeatherAt(sampleIndex).x; }
 vec2 gpuWeatherCenter(int sampleIndex) {
   int column = sampleIndex % u_width;
   int row = sampleIndex / u_width;

@@ -626,8 +626,10 @@ ${GPU_DOTS_RAIN_MAPPING_SHADER}
 out vec2 v_local;
 void main() {
   int sampleIndex;
-  float rain = gpuRainAt(sampleIndex);
-  float radius = u_spacing * ${strong ? 'dotsStrongRadiusFraction(rain)' : 'rainRadiusFraction(rain)'};
+  vec4 weather = gpuWeatherAt(sampleIndex);
+  float radius = u_spacing * ${strong
+    ? '(u_weather_kind == 0 ? dotsStrongRadiusFraction(weather.z) : sqrt(max(weather.w, 0.0)) * dotsStrongRadiusFraction(weather.z))'
+    : 'sqrt(max(weather.y, 0.0)) * rainRadiusFraction(weather.x)'};
   v_local = a_vertex;
   gl_Position = projectTile(gpuWeatherCenter(sampleIndex) + a_vertex * radius);
 }`;
@@ -648,7 +650,10 @@ void main() {
       vertex: gl.getAttribLocation(program, 'a_vertex'),
       weatherA: gl.getUniformLocation(program, 'u_weather_a'),
       weatherB: gl.getUniformLocation(program, 'u_weather_b'),
+      coverageA: gl.getUniformLocation(program, 'u_weather_coverage_a'),
+      coverageB: gl.getUniformLocation(program, 'u_weather_coverage_b'),
       weatherProgress: gl.getUniformLocation(program, 'u_weather_progress'),
+      weatherKind: gl.getUniformLocation(program, 'u_weather_kind'),
       width: gl.getUniformLocation(program, 'u_width'),
       minI: gl.getUniformLocation(program, 'u_minI'),
       minJ: gl.getUniformLocation(program, 'u_minJ'),
@@ -793,16 +798,20 @@ export class GeographicDotsLayer {
   setGpuWeatherSource(source, { requestRepaint = true } = {}) {
     if (!this.gpuWeatherMode) return;
     if (source && !this.isGpuWeatherSourceCompatible(source)) {
-      throw new Error(`GPU weather source must match the active direct-level topology (expected topology=${this.topology?.canonicalWindow ? JSON.stringify(this.topology.canonicalWindow) : 'none'}, levelData=${this.levelData?.level ?? 'none'}; actual topology=${source.topology?.canonicalWindow ? JSON.stringify(source.topology.canonicalWindow) : 'none'}, levelData=${source.levelData?.level ?? 'none'}).`);
+      throw new Error(`GPU weather source must match the active stable GPU topology (expected topology=${this.topology?.canonicalWindow ? JSON.stringify(this.topology.canonicalWindow) : 'none'}, levelData=${this.levelData?.level ?? 'none'}; actual topology=${source.topology?.canonicalWindow ? JSON.stringify(source.topology.canonicalWindow) : 'none'}, levelData=${source.levelData?.level ?? 'none'}).`);
     }
     this.gpuWeatherSource = source;
     if (requestRepaint) this.map?.triggerRepaint();
   }
 
   isGpuWeatherSourceCompatible(source) {
+    const expectedKind = source?.levelData?.level < REFERENCE_GRID_LEVEL ? 'summary' : 'physical';
     return Boolean(this.gpuWeatherMode && source && source.topology === this.topology
       && source.levelData === this.levelData
       && isGpuWeatherLevel(source.levelData?.level)
+      && source.kind === expectedKind
+      && source.textureA && source.textureB
+      && (expectedKind === 'physical' || (source.coverageTextureA && source.coverageTextureB))
       && !this.transition);
   }
 
@@ -1120,12 +1129,14 @@ export class GeographicDotsLayer {
       gpuWeather: {
         enabled: this.gpuWeatherMode,
         source: Boolean(this.gpuWeatherSource),
-        physicalField: this.gpuWeatherSource ? 'gpu-r16f' : null,
+        physicalField: this.gpuWeatherSource ? (this.gpuWeatherSource.kind === 'summary' ? 'gpu-physical-summary' : 'gpu-r16f') : null,
         level: this.gpuWeatherSource?.levelData?.level ?? null,
         sampleCount: this.gpuWeatherSource?.levelData?.count || 0,
         drawCallCount: this.gpuWeatherMode && this.gpuWeatherSource ? 2 : 0,
         vertexCountPerDraw: 6,
-        currentFieldBytes: this.gpuWeatherSource?.width * this.gpuWeatherSource?.height * 2 || 0,
+        currentFieldBytes: this.gpuWeatherSource
+          ? this.gpuWeatherSource.width * this.gpuWeatherSource.height * (this.gpuWeatherSource.kind === 'summary' ? 12 : 2)
+          : 0,
         mappedCpuBytes: this.gpuWeatherSource ? 0 : temporalBreakdown.mappedPresentationBytes,
         mappedBufferUploads: this.gpuWeatherSource ? 0 : null
       },
@@ -1179,7 +1190,10 @@ export class GeographicDotsLayer {
       setGeographicProjection(gl, locations, projection);
       gl.uniform1i(locations.weatherA, 0);
       gl.uniform1i(locations.weatherB, 1);
+      gl.uniform1i(locations.coverageA, 2);
+      gl.uniform1i(locations.coverageB, 3);
       gl.uniform1f(locations.weatherProgress, source.progress ?? 0);
+      gl.uniform1i(locations.weatherKind, source.kind === 'summary' ? 1 : 0);
       gl.uniform1i(locations.width, levelData.width);
       gl.uniform1i(locations.minI, levelData.minI);
       gl.uniform1i(locations.minJ, levelData.minJ);
@@ -1190,6 +1204,10 @@ export class GeographicDotsLayer {
       gl.bindTexture(gl.TEXTURE_2D, source.textureA || source.texture);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, source.textureB || source.textureA || source.texture);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, source.coverageTextureA || source.textureA || source.texture);
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, source.coverageTextureB || source.textureB || source.textureA || source.texture);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffers[type]);
       gl.enableVertexAttribArray(locations.vertex);
       gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);

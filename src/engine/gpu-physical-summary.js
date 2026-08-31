@@ -1,10 +1,10 @@
-// Diagnostic GPU physical-summary backend for the future L10-L12 path.
+// GPU physical-summary backend for stable GPU L10-L12.
 //
 // This module deliberately does not select a renderer or replace the CPU
-// pyramid.  It consumes a direct physical L13 R16F field and produces the
-// rain-only summary profile used by the GPU-first temporal experiment.  The
-// same pass is reused for L12, L11, and L10; lower levels consume the summary
-// textures from the preceding pass.
+// pyramid's transition/hazard state. It consumes a direct physical L13 R16F
+// field and produces the rain-only summary profile used by the GPU-first
+// temporal experiment. The same pass is reused for L12, L11, and L10; lower
+// levels consume the summary textures from the preceding pass.
 
 import {
   buildCenteredContributionRelation,
@@ -394,7 +394,8 @@ export class GpuPhysicalSummaryBackend {
     this.gl = gl;
     this.topology = topology;
     this.levels = [...maximumLevels].filter((level) => topology.levels.has(level));
-    fail(this.levels.length === GPU_PHYSICAL_SUMMARY_LEVELS.length, 'L10, L11, and L12 level data are required.');
+    fail(this.levels.length > 0 && this.levels.every((level) => GPU_PHYSICAL_SUMMARY_LEVELS.includes(level)), 'requested GPU summary levels are unavailable.');
+    fail(this.levels.every((level, index) => level === GPU_PHYSICAL_SUMMARY_LEVELS[index]), 'GPU summary levels must be ordered from coarse to fine.');
     fail(gl.getExtension('EXT_color_buffer_float'), 'floating-point render targets are unavailable.');
     const constructionState = capturePassState(gl, [0, 1, 2, 3, 4]);
     this.relations = new Map();
@@ -406,6 +407,10 @@ export class GpuPhysicalSummaryBackend {
     this.lastGpuError = gl.NO_ERROR;
     this.lastValidation = null;
     this.lastPassOwnership = [];
+    this.relationBuildCount = this.levels.length;
+    this.relationUploadCount = this.levels.length * 2;
+    this.summaryKeyframeReconstructionCount = 0;
+    this.summaryKeyframeReuseCount = 0;
     try {
       this.program = createProgram(gl, GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE);
       this.copyProgram = createProgram(gl, COPY_FRAGMENT_SOURCE);
@@ -476,6 +481,7 @@ export class GpuPhysicalSummaryBackend {
       gl.bindTexture(gl.TEXTURE_2D, physicalTexture);
       gl.uniform1i(this.locations.u_physical, 0);
       this.lastPassOwnership = [];
+      this.summaryKeyframeReconstructionCount++;
       let inputKind = 0;
       let inputValues = null;
       let inputCoverage = null;
@@ -690,6 +696,10 @@ export class GpuPhysicalSummaryBackend {
       },
       transientScratchGpuBytes: 0,
       summaryReconstructionPassCount: this.reconstructionPassCount,
+      summaryKeyframeReconstructionCount: this.summaryKeyframeReconstructionCount,
+      summaryKeyframeReuseCount: this.summaryKeyframeReuseCount,
+      relationBuildCount: this.relationBuildCount,
+      relationUploadCount: this.relationUploadCount,
       cpuSummaryBytesAvoidedByGpuCalculation: cpuSummaryBytesPerKeyframe * 2,
       lastUpdateMs: this.lastUpdateMs,
       lastGpuPassMs: this.lastGpuPassMs,
