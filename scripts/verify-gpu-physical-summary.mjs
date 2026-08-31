@@ -22,6 +22,8 @@ import {
   GPU_PHYSICAL_SUMMARY_LEVELS,
   GPU_PHYSICAL_SUMMARY_MAX_CONTRIBUTIONS,
   GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE,
+  GPU_PHYSICAL_SUMMARY_PASS_PLAN,
+  relationTextureLayout,
   validateReverseCenteredRelation
 } from '../src/engine/gpu-physical-summary.js';
 
@@ -65,6 +67,7 @@ const times = [0, 1 / (metadata.time.count - 1), .123, .347, .5, .777, .91, 1];
 let summaryChecks = 0;
 let mappedChecks = 0;
 let relationChecks = 0;
+let relationLayoutChecks = 0;
 let maximumCpuChainError = 0;
 let firstWindowCost = null;
 
@@ -82,16 +85,34 @@ for (const window of windows) {
         const output = topology.levels.get(outputLevel);
         const fine = topology.levels.get(outputLevel + 1);
         const relationInfo = validateReverseCenteredRelation(fine, output);
+        const relationLayout = relationTextureLayout(output.count, 4096);
         firstWindowCost[outputLevel] = {
           outputSamples: output.count,
           finerSamplesProcessed: fine.count,
           passes: 1,
           persistentABBytes: output.count * 24,
-          relationMetadataGpuBytes: output.count * 72,
+          relationMetadataGpuBytes: relationLayout.paddedTexelCount * 24,
+          relationTexture: {
+            target: relationLayout.target,
+            width: relationLayout.width,
+            height: relationLayout.height,
+            depth: relationLayout.depth,
+            semanticTexelCount: relationLayout.semanticTexelCount,
+            paddedTexelCount: relationLayout.paddedTexelCount
+          },
           peakTransientScratchBytes: 0,
           maximumReverseContributions: relationInfo.maximumContributions
         };
       }
+    }
+    for (const outputLevel of GPU_PHYSICAL_SUMMARY_LEVELS) {
+      const output = topology.levels.get(outputLevel);
+      const layout = relationTextureLayout(output.count, 4096);
+      fail(layout.target === 'TEXTURE_2D' && layout.depth === 1, `L${outputLevel} relation layout is not packed 2D metadata.`);
+      fail(layout.width <= 4096 && layout.height <= 4096, `L${outputLevel} relation layout exceeds the configured WebGL limit.`);
+      fail(layout.semanticTexelCount === output.count * Math.ceil(GPU_PHYSICAL_SUMMARY_MAX_CONTRIBUTIONS / 4), `L${outputLevel} relation layout changed its semantic texel count.`);
+      fail(layout.paddedTexelCount >= layout.semanticTexelCount, `L${outputLevel} relation layout truncated metadata.`);
+      relationLayoutChecks++;
     }
     relationChecks++;
   }
@@ -150,8 +171,13 @@ for (const window of windows) {
 fail(GPU_PHYSICAL_SUMMARY_CHANNELS.length === 5, 'GPU summary channel contract changed unexpectedly.');
 fail(GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE.includes('u_inputKind'), 'GPU summary shader does not distinguish direct and recursive inputs.');
 fail(GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE.includes('rain>=0.05') && GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE.includes('rain>=2.5'), 'GPU summary shader lost threshold coverage semantics.');
+fail(GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE.includes('u_relationTextureSize') && GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE.includes('u_relationParentCount'), 'GPU summary shader does not use packed relation dimensions.');
+fail(!GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE.includes('sampler2DArray'), 'GPU summary shader still requires array relation textures.');
+fail(GPU_PHYSICAL_SUMMARY_PASS_PLAN.length === 3, 'GPU summary pass plan changed unexpectedly.');
+fail(GPU_PHYSICAL_SUMMARY_PASS_PLAN.every(({ source, destination }) => source !== destination), 'GPU summary pass has an attached source/destination collision.');
+fail(GPU_PHYSICAL_SUMMARY_PASS_PLAN.map(({ level }) => level).join(',') === '12,11,10', 'GPU summary pass ordering changed unexpectedly.');
 
-console.log(`GPU physical-summary contract verification passed: windows=${windows.length}, times=${times.length}, summaries=${summaryChecks}, mappings=${mappedChecks}, relations=${relationChecks}, maxCpuOrderingError=${maximumCpuChainError}`);
+console.log(`GPU physical-summary contract verification passed: windows=${windows.length}, times=${times.length}, summaries=${summaryChecks}, mappings=${mappedChecks}, relations=${relationChecks}, layouts=${relationLayoutChecks}, maxCpuOrderingError=${maximumCpuChainError}`);
 console.log(`GPU summary cost for first window: ${JSON.stringify(firstWindowCost)}`);
 console.log('CPU reference contract: direct reconstructed L13 -> recursive centered physical summaries L12/L11/L10 -> per-keyframe Dots/Squares mapping -> renderer temporal interpolation.');
 console.log('GPU readback metrics: not run in Node; browser-only window.__dotFieldGpuWeather.validatePhysicalSummary() provides explicit diagnostic readback and presentation comparison.');

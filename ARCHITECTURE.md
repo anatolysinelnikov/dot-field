@@ -650,12 +650,26 @@ coverage, total weight, and conditional maximum. It writes `RGBA16F` values
 (`sum`, `max`, `totalWeight`, reserved) and `RG16F` coverage (`0.05`, `2.5`),
 for 12 bytes per sample per keyframe. Relation metadata is compact bounded
 working-set metadata (up to nine reverse contributions per coarse sample), not
-a CPU or GPU weather-summary array. There are no CPU per-sample summary uploads,
-no permanent full-domain L13 scratch textures, and no temporal source fetches or
-motion changes. The backend retains two summary keyframes per requested coarse
-level and reuses its relation textures for the topology lifetime. It is designed
-to attach to the existing active/pending spatial publication contract in the
-next presentation task; this task does not publish it to stable L10-L12.
+a CPU or GPU weather-summary array. Each relation’s three RGBA contribution
+layers are packed into a bounded `TEXTURE_2D` (`width * height` texels), with
+`width` and `height` derived from the coarse sample count and the context’s
+`MAX_TEXTURE_SIZE`; the semantic texel count is always exactly
+`coarseCount * ceil(9 / 4)` and padding is initialized as empty contributions.
+This avoids encoding a potentially oversized canonical sample count in one
+texture dimension or in a 3D texture layer count. Every reduction pass reads a
+distinct source (`physical-L13`, then `summary-L12`, then `summary-L11`) and
+writes its own destination summary textures. The direct pass binds inert 1×1
+recursive-input textures rather than its attached destinations, so no
+framebuffer attachment is simultaneously sampled. Diagnostic construction and
+readback explicitly save/restore the touched framebuffer, texture-unit,
+viewport, program, raster, color-mask, blend, and pixel-pack state, and verify
+summary/readback framebuffer completeness. There are no CPU per-sample summary
+uploads, no permanent full-domain L13 scratch textures, and no temporal source
+fetches or motion changes. The backend retains two summary keyframes per
+requested coarse level and reuses its relation textures for the topology
+lifetime. It is designed to attach to the existing active/pending spatial
+publication contract in the next presentation task; this task does not publish
+it to stable L10-L12.
 
 ### Physical weather-summary profiles
 

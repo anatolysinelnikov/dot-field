@@ -15,6 +15,11 @@ import {
 import { canonicalWindowsEqual } from './geographic-lod.js';
 
 export const GPU_PHYSICAL_SUMMARY_LEVELS = Object.freeze([12, 11, 10]);
+export const GPU_PHYSICAL_SUMMARY_PASS_PLAN = Object.freeze([
+  Object.freeze({ level: 12, source: 'physical-L13', destination: 'summary-L12' }),
+  Object.freeze({ level: 11, source: 'summary-L12', destination: 'summary-L11' }),
+  Object.freeze({ level: 10, source: 'summary-L11', destination: 'summary-L10' })
+]);
 export const GPU_PHYSICAL_SUMMARY_CHANNELS = Object.freeze([
   'totalWeight',
   'rainWeightedSumMmh',
@@ -36,22 +41,28 @@ void main(){gl_Position=vec4(a,0,1);}`;
 export const GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE = `#version 300 es
 precision highp float;
 precision highp sampler2D;
-precision highp sampler2DArray;
-precision highp usampler2DArray;
+precision highp usampler2D;
 uniform sampler2D u_physical;
 uniform sampler2D u_values;
 uniform sampler2D u_coverage;
-uniform usampler2DArray u_relationIndices;
-uniform sampler2DArray u_relationWeights;
+uniform usampler2D u_relationIndices;
+uniform sampler2D u_relationWeights;
 uniform ivec2 u_inputSize;
 uniform ivec2 u_outputSize;
 uniform int u_inputKind;
 uniform int u_relationLayers;
+uniform ivec2 u_relationTextureSize;
+uniform int u_relationParentCount;
 layout(location=0) out vec4 outValues;
 layout(location=1) out vec2 outCoverage;
 
 float component(vec4 value, int index){return value[index];}
 uint component(uvec4 value, int index){return value[index];}
+
+ivec2 relationAt(int layer,int parentIndex){
+  int linearIndex=layer*u_relationParentCount+parentIndex;
+  return ivec2(linearIndex%u_relationTextureSize.x,linearIndex/u_relationTextureSize.x);
+}
 
 void main(){
   ivec2 outputAt=ivec2(gl_FragCoord.xy);
@@ -63,8 +74,9 @@ void main(){
   float strongCoverage=0.0;
   for(int layer=0;layer<3;layer++){
     if(layer>=u_relationLayers) continue;
-    uvec4 childIndices=texelFetch(u_relationIndices,ivec3(parentIndex,0,layer),0);
-    vec4 weights=texelFetch(u_relationWeights,ivec3(parentIndex,0,layer),0);
+    ivec2 relationCoordinate=relationAt(layer,parentIndex);
+    uvec4 childIndices=texelFetch(u_relationIndices,relationCoordinate,0);
+    vec4 weights=texelFetch(u_relationWeights,relationCoordinate,0);
     for(int componentIndex=0;componentIndex<4;componentIndex++){
       uint childIndex=component(childIndices,componentIndex);
       if(childIndex==0xffffffffu) continue;
@@ -137,22 +149,34 @@ function createProgram(gl, fragmentSource) {
   return value;
 }
 
-function createTexture2D(gl, internalFormat, width, height, format, type) {
+function createTexture2D(gl, internalFormat, width, height, format, type, data = null) {
   const value = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, value);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, width, height, 0, format, type, null);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, width, height, 0, format, type, data);
   return value;
 }
 
-function createTexture2DArray(gl, internalFormat, width, height, layers, format, type, data) {
-  const value = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D_ARRAY, value);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, internalFormat, width, height, layers, 0, format, type, data);
-  return value;
+export function relationTextureLayout(parentCount, maximumTextureSize) {
+  fail(Number.isInteger(parentCount) && parentCount > 0, 'relation parent count must be a positive integer.');
+  fail(Number.isInteger(maximumTextureSize) && maximumTextureSize > 0, 'maximum 2D texture size must be a positive integer.');
+  const layers = Math.max(1, Math.ceil(GPU_PHYSICAL_SUMMARY_MAX_CONTRIBUTIONS / 4));
+  const semanticTexelCount = parentCount * layers;
+  const width = Math.min(maximumTextureSize, semanticTexelCount);
+  const height = Math.ceil(semanticTexelCount / width);
+  fail(height <= maximumTextureSize,
+    `bounded relation requires ${semanticTexelCount} texels, exceeding the ${maximumTextureSize}x${maximumTextureSize} 2D texture limit.`);
+  return {
+    target: 'TEXTURE_2D',
+    width,
+    height,
+    depth: 1,
+    layers,
+    semanticTexelCount,
+    paddedTexelCount: width * height,
+    maximumTextureSize
+  };
 }
 
 function createQuad(gl) {
@@ -194,33 +218,44 @@ function reverseRelation(fineLevel, coarseLevel, relation) {
 function relationTextures(gl, fineLevel, coarseLevel) {
   const relation = buildCenteredContributionRelation(fineLevel, coarseLevel);
   const reverse = reverseRelation(fineLevel, coarseLevel, relation);
-  const layers = Math.max(1, Math.ceil(GPU_PHYSICAL_SUMMARY_MAX_CONTRIBUTIONS / 4));
-  const indices = new Uint32Array(coarseLevel.count * layers * 4);
+  const maximumTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  const layout = relationTextureLayout(coarseLevel.count, maximumTextureSize);
+  const indices = new Uint32Array(layout.paddedTexelCount * 4);
   indices.fill(0xffffffff);
-  const weights = new Float32Array(coarseLevel.count * layers * 4);
+  const weights = new Float32Array(layout.paddedTexelCount * 4);
   for (let parentIndex = 0; parentIndex < coarseLevel.count; parentIndex++) {
     for (let sourceOffset = reverse.offsets[parentIndex]; sourceOffset < reverse.offsets[parentIndex + 1]; sourceOffset++) {
       const contributionIndex = sourceOffset - reverse.offsets[parentIndex];
       const childIndex = reverse.childIndices[sourceOffset];
       const weight = reverse.weights[sourceOffset];
-      const textureOffset = (contributionIndex >> 2) * coarseLevel.count * 4 + parentIndex * 4 + (contributionIndex & 3);
+      const layer = contributionIndex >> 2;
+      const textureTexel = layer * coarseLevel.count + parentIndex;
+      const textureOffset = textureTexel * 4 + (contributionIndex & 3);
       indices[textureOffset] = childIndex;
       weights[textureOffset] = weight;
     }
   }
-  const indexTexture = createTexture2DArray(
-    gl, gl.RGBA32UI, coarseLevel.count, 1, layers, gl.RGBA_INTEGER, gl.UNSIGNED_INT, indices
-  );
-  const weightTexture = createTexture2DArray(
-    gl, gl.RGBA16F, coarseLevel.count, 1, layers, gl.RGBA, gl.FLOAT, weights
-  );
+  const previousUnpackAlignment = gl.getParameter(gl.UNPACK_ALIGNMENT);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  let indexTexture;
+  let weightTexture;
+  try {
+    indexTexture = createTexture2D(
+      gl, gl.RGBA32UI, layout.width, layout.height, gl.RGBA_INTEGER, gl.UNSIGNED_INT, indices
+    );
+    weightTexture = createTexture2D(
+      gl, gl.RGBA16F, layout.width, layout.height, gl.RGBA, gl.FLOAT, weights
+    );
+  } finally {
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, previousUnpackAlignment);
+  }
   return {
     relation,
     indexTexture,
     weightTexture,
-    layers,
+    ...layout,
     maximumContributions: reverse.maximum,
-    gpuBytes: indices.byteLength + coarseLevel.count * layers * 4 * 2,
+    gpuBytes: layout.paddedTexelCount * (4 * Uint32Array.BYTES_PER_ELEMENT + 4 * 2),
     cpuStagingBytes: indices.byteLength + weights.byteLength
   };
 }
@@ -250,6 +285,77 @@ function channelMetrics(reference, actual, count, maximumSamples) {
     meanAbsoluteError: samples ? total / samples : 0,
     p95AbsoluteError: percentile(errors, 0.95)
   };
+}
+
+function capturePassState(gl, textureUnits = []) {
+  const activeTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+  const textureBindings = textureUnits.map((unit) => {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    return {
+      unit,
+      texture2D: gl.getParameter(gl.TEXTURE_BINDING_2D),
+      texture2DArray: gl.getParameter(gl.TEXTURE_BINDING_2D_ARRAY)
+    };
+  });
+  gl.activeTexture(activeTexture);
+  return {
+    drawFramebuffer: gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING),
+    readFramebuffer: gl.getParameter(gl.READ_FRAMEBUFFER_BINDING),
+    viewport: [...gl.getParameter(gl.VIEWPORT)],
+    program: gl.getParameter(gl.CURRENT_PROGRAM),
+    vao: gl.getParameter(gl.VERTEX_ARRAY_BINDING),
+    activeTexture,
+    textureBindings,
+    blend: gl.isEnabled(gl.BLEND),
+    scissor: gl.isEnabled(gl.SCISSOR_TEST),
+    depth: gl.isEnabled(gl.DEPTH_TEST),
+    stencil: gl.isEnabled(gl.STENCIL_TEST),
+    cull: gl.isEnabled(gl.CULL_FACE),
+    depthMask: gl.getParameter(gl.DEPTH_WRITEMASK),
+    colorMask: [...gl.getParameter(gl.COLOR_WRITEMASK)],
+    blendSrcRgb: gl.getParameter(gl.BLEND_SRC_RGB),
+    blendDstRgb: gl.getParameter(gl.BLEND_DST_RGB),
+    blendSrcAlpha: gl.getParameter(gl.BLEND_SRC_ALPHA),
+    blendDstAlpha: gl.getParameter(gl.BLEND_DST_ALPHA),
+    blendEquationRgb: gl.getParameter(gl.BLEND_EQUATION_RGB),
+    blendEquationAlpha: gl.getParameter(gl.BLEND_EQUATION_ALPHA),
+    packAlignment: gl.getParameter(gl.PACK_ALIGNMENT),
+    packRowLength: gl.getParameter(gl.PACK_ROW_LENGTH),
+    packSkipPixels: gl.getParameter(gl.PACK_SKIP_PIXELS),
+    packSkipRows: gl.getParameter(gl.PACK_SKIP_ROWS)
+  };
+}
+
+function restorePassState(gl, state) {
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, state.drawFramebuffer);
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, state.readFramebuffer);
+  gl.viewport(...state.viewport);
+  gl.useProgram(state.program);
+  gl.bindVertexArray(state.vao);
+  for (const binding of state.textureBindings) {
+    gl.activeTexture(gl.TEXTURE0 + binding.unit);
+    gl.bindTexture(gl.TEXTURE_2D, binding.texture2D);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, binding.texture2DArray);
+  }
+  gl.activeTexture(state.activeTexture);
+  for (const [capability, enabled] of [
+    [gl.BLEND, state.blend],
+    [gl.SCISSOR_TEST, state.scissor],
+    [gl.DEPTH_TEST, state.depth],
+    [gl.STENCIL_TEST, state.stencil],
+    [gl.CULL_FACE, state.cull]
+  ]) {
+    if (enabled) gl.enable(capability);
+    else gl.disable(capability);
+  }
+  gl.depthMask(state.depthMask);
+  gl.colorMask(...state.colorMask);
+  gl.blendFuncSeparate(state.blendSrcRgb, state.blendDstRgb, state.blendSrcAlpha, state.blendDstAlpha);
+  gl.blendEquationSeparate(state.blendEquationRgb, state.blendEquationAlpha);
+  gl.pixelStorei(gl.PACK_ALIGNMENT, state.packAlignment);
+  gl.pixelStorei(gl.PACK_ROW_LENGTH, state.packRowLength);
+  gl.pixelStorei(gl.PACK_SKIP_PIXELS, state.packSkipPixels);
+  gl.pixelStorei(gl.PACK_SKIP_ROWS, state.packSkipRows);
 }
 
 export function validateReverseCenteredRelation(fineLevel, coarseLevel) {
@@ -290,17 +396,7 @@ export class GpuPhysicalSummaryBackend {
     this.levels = [...maximumLevels].filter((level) => topology.levels.has(level));
     fail(this.levels.length === GPU_PHYSICAL_SUMMARY_LEVELS.length, 'L10, L11, and L12 level data are required.');
     fail(gl.getExtension('EXT_color_buffer_float'), 'floating-point render targets are unavailable.');
-    this.program = createProgram(gl, GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE);
-    this.copyProgram = createProgram(gl, COPY_FRAGMENT_SOURCE);
-    this.quad = createQuad(gl);
-    this.locations = Object.fromEntries([
-      'u_physical', 'u_values', 'u_coverage', 'u_relationIndices', 'u_relationWeights',
-      'u_inputSize', 'u_outputSize', 'u_inputKind', 'u_relationLayers'
-    ].map((name) => [name, gl.getUniformLocation(this.program, name)]));
-    this.copyLocation = {
-      source: gl.getUniformLocation(this.copyProgram, 'u_source'),
-      kind: gl.getUniformLocation(this.copyProgram, 'u_kind')
-    };
+    const constructionState = capturePassState(gl, [0, 1, 2, 3, 4]);
     this.relations = new Map();
     this.outputs = new Map();
     this.reconstructionPassCount = 0;
@@ -309,24 +405,43 @@ export class GpuPhysicalSummaryBackend {
     this.pendingTimerQueries = [];
     this.lastGpuError = gl.NO_ERROR;
     this.lastValidation = null;
-    for (const level of this.levels) {
-      const parent = topology.levels.get(level);
-      const child = topology.levels.get(level + 1);
-      const relation = relationTextures(gl, child, parent);
-      this.relations.set(level, relation);
-      const slots = [0, 1].map(() => ({
-        values: createTexture2D(gl, gl.RGBA16F, parent.width, parent.height, gl.RGBA, gl.HALF_FLOAT),
-        coverage: createTexture2D(gl, gl.RG16F, parent.width, parent.height, gl.RG, gl.HALF_FLOAT),
-        framebuffer: gl.createFramebuffer()
-      }));
-      for (const slot of slots) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER, slot.framebuffer);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, slot.values, 0);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, slot.coverage, 0);
-        gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
-        fail(gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE, `L${level} summary framebuffer is incomplete.`);
+    this.lastPassOwnership = [];
+    try {
+      this.program = createProgram(gl, GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE);
+      this.copyProgram = createProgram(gl, COPY_FRAGMENT_SOURCE);
+      this.quad = createQuad(gl);
+      this.locations = Object.fromEntries([
+        'u_physical', 'u_values', 'u_coverage', 'u_relationIndices', 'u_relationWeights',
+        'u_inputSize', 'u_outputSize', 'u_inputKind', 'u_relationLayers',
+        'u_relationTextureSize', 'u_relationParentCount'
+      ].map((name) => [name, gl.getUniformLocation(this.program, name)]));
+      this.copyLocation = {
+        source: gl.getUniformLocation(this.copyProgram, 'u_source'),
+        kind: gl.getUniformLocation(this.copyProgram, 'u_kind')
+      };
+      this.dummyValues = createTexture2D(gl, gl.RGBA16F, 1, 1, gl.RGBA, gl.HALF_FLOAT);
+      this.dummyCoverage = createTexture2D(gl, gl.RG16F, 1, 1, gl.RG, gl.HALF_FLOAT);
+      for (const level of this.levels) {
+        const parent = topology.levels.get(level);
+        const child = topology.levels.get(level + 1);
+        const relation = relationTextures(gl, child, parent);
+        this.relations.set(level, relation);
+        const slots = [0, 1].map(() => ({
+          values: createTexture2D(gl, gl.RGBA16F, parent.width, parent.height, gl.RGBA, gl.HALF_FLOAT),
+          coverage: createTexture2D(gl, gl.RG16F, parent.width, parent.height, gl.RG, gl.HALF_FLOAT),
+          framebuffer: gl.createFramebuffer()
+        }));
+        for (const slot of slots) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, slot.framebuffer);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, slot.values, 0);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, slot.coverage, 0);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+          fail(gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE, `L${level} summary framebuffer is incomplete.`);
+        }
+        this.outputs.set(level, { levelData: parent, slots, framebufferComplete: true });
       }
-      this.outputs.set(level, { levelData: parent, slots });
+    } finally {
+      restorePassState(gl, constructionState);
     }
     this.readbackTexture = null;
     this.readbackFramebuffer = null;
@@ -343,11 +458,7 @@ export class GpuPhysicalSummaryBackend {
       'physical summary source window does not match the summary topology.');
     fail(targetSlot === 0 || targetSlot === 1, 'summary target slot must be 0 or 1.');
     const gl = this.gl;
-    const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
-    const previousViewport = gl.getParameter(gl.VIEWPORT);
-    const previousVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
-    const previousProgram = gl.getParameter(gl.CURRENT_PROGRAM);
-    const previousActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+    const passState = capturePassState(gl, [0, 1, 2, 3, 4]);
     const started = globalThis.performance?.now?.() ?? Date.now();
     let query = null;
     const timerExtension = gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -364,6 +475,7 @@ export class GpuPhysicalSummaryBackend {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, physicalTexture);
       gl.uniform1i(this.locations.u_physical, 0);
+      this.lastPassOwnership = [];
       let inputKind = 0;
       let inputValues = null;
       let inputCoverage = null;
@@ -381,14 +493,26 @@ export class GpuPhysicalSummaryBackend {
           gl.uniform1i(location, unit);
         };
         bind(0, gl.TEXTURE_2D, physicalTexture, this.locations.u_physical);
-        bind(1, gl.TEXTURE_2D, inputValues || slot.values, this.locations.u_values);
-        bind(2, gl.TEXTURE_2D, inputCoverage || slot.coverage, this.locations.u_coverage);
-        bind(3, gl.TEXTURE_2D_ARRAY, relation.indexTexture, this.locations.u_relationIndices);
-        bind(4, gl.TEXTURE_2D_ARRAY, relation.weightTexture, this.locations.u_relationWeights);
+        // The direct L13 pass does not read recursive inputs, but WebGL still
+        // rejects an attached destination that is bound to any sampler.
+        bind(1, gl.TEXTURE_2D, inputValues || this.dummyValues, this.locations.u_values);
+        bind(2, gl.TEXTURE_2D, inputCoverage || this.dummyCoverage, this.locations.u_coverage);
+        bind(3, gl.TEXTURE_2D, relation.indexTexture, this.locations.u_relationIndices);
+        bind(4, gl.TEXTURE_2D, relation.weightTexture, this.locations.u_relationWeights);
         gl.uniform2i(this.locations.u_inputSize, inputSize.width, inputSize.height);
         gl.uniform2i(this.locations.u_outputSize, output.levelData.width, output.levelData.height);
         gl.uniform1i(this.locations.u_inputKind, inputKind);
         gl.uniform1i(this.locations.u_relationLayers, relation.layers);
+        gl.uniform2i(this.locations.u_relationTextureSize, relation.width, relation.height);
+        gl.uniform1i(this.locations.u_relationParentCount, output.levelData.count);
+        const passPlan = GPU_PHYSICAL_SUMMARY_PASS_PLAN.find((entry) => entry.level === level);
+        this.lastPassOwnership.push({
+          level,
+          source: passPlan.source,
+          destination: passPlan.destination,
+          sourceTextureDistinctFromDestination: true,
+          framebufferComplete: output.framebufferComplete
+        });
         if (measureGpu && timerExtension && !query) {
           query = gl.createQuery();
           gl.beginQuery(timerExtension.TIME_ELAPSED_EXT, query);
@@ -408,11 +532,7 @@ export class GpuPhysicalSummaryBackend {
       if (query) this.pendingTimerQueries.push({ query, extension: timerExtension });
       return this.diagnostics();
     } finally {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer);
-      gl.viewport(...previousViewport);
-      gl.bindVertexArray(previousVao);
-      gl.activeTexture(previousActiveTexture);
-      gl.useProgram(previousProgram);
+      restorePassState(gl, passState);
     }
   }
 
@@ -433,7 +553,12 @@ export class GpuPhysicalSummaryBackend {
     if (this.readbackTexture && this.readbackWidth === width && this.readbackHeight === height) return;
     if (this.readbackTexture) gl.deleteTexture(this.readbackTexture);
     if (this.readbackFramebuffer) gl.deleteFramebuffer(this.readbackFramebuffer);
-    this.readbackTexture = createTexture2D(gl, gl.RGBA32F, width, height, gl.RGBA, gl.FLOAT);
+    const state = capturePassState(gl, [0]);
+    try {
+      this.readbackTexture = createTexture2D(gl, gl.RGBA32F, width, height, gl.RGBA, gl.FLOAT);
+    } finally {
+      restorePassState(gl, state);
+    }
     this.readbackFramebuffer = gl.createFramebuffer();
     this.readbackWidth = width;
     this.readbackHeight = height;
@@ -447,18 +572,27 @@ export class GpuPhysicalSummaryBackend {
     fail(targetSlot === 0 || targetSlot === 1, 'summary readback slot must be 0 or 1.');
     const gl = this.gl;
     const output = this.outputs.get(level);
-    this.ensureReadbackTarget(output.levelData.width, output.levelData.height);
-    const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
-    const previousViewport = gl.getParameter(gl.VIEWPORT);
-    const previousVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
-    const previousProgram = gl.getParameter(gl.CURRENT_PROGRAM);
+    const passState = capturePassState(gl, [0]);
     const values = new Float32Array(output.levelData.count * 4);
     const coverage = new Float32Array(output.levelData.count * 4);
     try {
+      this.ensureReadbackTarget(output.levelData.width, output.levelData.height);
       gl.useProgram(this.copyProgram);
       gl.bindVertexArray(this.quad.vao);
+      gl.disable(gl.BLEND);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.STENCIL_TEST);
+      gl.disable(gl.CULL_FACE);
+      gl.depthMask(false);
+      gl.colorMask(true, true, true, true);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.readbackFramebuffer);
       gl.viewport(0, 0, output.levelData.width, output.levelData.height);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+      gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+      gl.pixelStorei(gl.PACK_ROW_LENGTH, 0);
+      gl.pixelStorei(gl.PACK_SKIP_PIXELS, 0);
+      gl.pixelStorei(gl.PACK_SKIP_ROWS, 0);
       gl.activeTexture(gl.TEXTURE0);
       gl.uniform1i(this.copyLocation.source, 0);
       gl.bindTexture(gl.TEXTURE_2D, output.slots[targetSlot].values);
@@ -472,10 +606,7 @@ export class GpuPhysicalSummaryBackend {
       fail(gl.getError() === gl.NO_ERROR, 'summary readback failed.');
       return { values, coverage };
     } finally {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer);
-      gl.viewport(...previousViewport);
-      gl.bindVertexArray(previousVao);
-      gl.useProgram(previousProgram);
+      restorePassState(gl, passState);
     }
   }
 
@@ -511,6 +642,7 @@ export class GpuPhysicalSummaryBackend {
   diagnostics() {
     const summaryLevels = Object.fromEntries(this.levels.map((level) => {
       const output = this.outputs.get(level);
+      const relation = this.relations.get(level);
       const count = output.levelData.count;
       return [level, {
         width: output.levelData.width,
@@ -520,12 +652,25 @@ export class GpuPhysicalSummaryBackend {
         bytesPerSample: 12,
         bytesPerKeyframe: count * 12,
         persistentABBytes: count * 24,
-        relationMaximumContributions: this.relations.get(level).maximumContributions,
-        relationMetadataGpuBytes: this.relations.get(level).gpuBytes
+        framebufferComplete: output.framebufferComplete,
+        relationMaximumContributions: relation.maximumContributions,
+        relationMetadataGpuBytes: relation.gpuBytes,
+        relationMetadataCpuUploadBytes: relation.cpuStagingBytes,
+        relationTexture: {
+          target: relation.target,
+          width: relation.width,
+          height: relation.height,
+          depth: relation.depth,
+          layers: relation.layers,
+          semanticTexelCount: relation.semanticTexelCount,
+          paddedTexelCount: relation.paddedTexelCount,
+          maximumTextureSize: relation.maximumTextureSize
+        }
       }];
     }));
     const persistentGpuSummaryBytes = this.levels.reduce((total, level) => total + summaryLevels[level].persistentABBytes, 0);
     const relationMetadataGpuBytes = this.levels.reduce((total, level) => total + summaryLevels[level].relationMetadataGpuBytes, 0);
+    const relationMetadataCpuUploadBytes = this.levels.reduce((total, level) => total + summaryLevels[level].relationMetadataCpuUploadBytes, 0);
     const cpuSummaryBytesPerKeyframe = this.levels.reduce((total, level) => total + summaryLevels[level].sampleCount * 5 * Float32Array.BYTES_PER_ELEMENT, 0);
     return {
       active: true,
@@ -537,12 +682,19 @@ export class GpuPhysicalSummaryBackend {
       bytesPerSample: 12,
       persistentGpuSummaryBytes,
       relationMetadataGpuBytes,
+      relationMetadataCpuUploadBytes,
+      webglLimits: {
+        maxTextureSize: this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE),
+        max3DTextureSize: this.gl.getParameter(this.gl.MAX_3D_TEXTURE_SIZE),
+        maxArrayTextureLayers: this.gl.getParameter(this.gl.MAX_ARRAY_TEXTURE_LAYERS)
+      },
       transientScratchGpuBytes: 0,
       summaryReconstructionPassCount: this.reconstructionPassCount,
       cpuSummaryBytesAvoidedByGpuCalculation: cpuSummaryBytesPerKeyframe * 2,
       lastUpdateMs: this.lastUpdateMs,
       lastGpuPassMs: this.lastGpuPassMs,
       pendingTimerQueries: this.pendingTimerQueries.length,
+      passOwnership: this.lastPassOwnership,
       lastGpuError: this.lastGpuError,
       lastValidation: this.lastValidation
     };
@@ -559,6 +711,8 @@ export class GpuPhysicalSummaryBackend {
       gl.deleteTexture(slot.coverage);
       gl.deleteFramebuffer(slot.framebuffer);
     }
+    gl.deleteTexture(this.dummyValues);
+    gl.deleteTexture(this.dummyCoverage);
     gl.deleteTexture(this.readbackTexture);
     gl.deleteFramebuffer(this.readbackFramebuffer);
     gl.deleteProgram(this.program);

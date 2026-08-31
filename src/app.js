@@ -1379,13 +1379,33 @@ function installGpuWeatherExperiment() {
       if (!gpuWeatherRequestedAtCurrentLevel() || state.levelData?.level !== 13) {
         throw new Error('GPU physical-summary validation requires stable GPU L13.');
       }
+      // Validate the committed render state before constructing the diagnostic
+      // backend. This hook is intentionally diagnostic-only: an invalid or
+      // transitional state must not allocate relation textures or framebuffers.
+      const keyframe = gpuWeatherKeyframes?.a;
+      const source = weatherLayer?.gpuWeatherSource;
+      const squaresSource = squaresLayer?.gpuWeatherSource;
+      const committedSource = Boolean(
+        gpuWeatherUsingGpu
+        && !state.lodTransition
+        && gpuWeatherGl()
+        && gpuWeatherLevelData === state.levelData
+        && gpuWeatherTileReconstructor?.diagnostics()?.active
+        && keyframe?.texture
+        && gpuWeatherKeyframes?.b?.texture
+        && source
+        && source === squaresSource
+        && weatherLayer?.isGpuWeatherSourceCompatible(source)
+        && squaresLayer?.isGpuWeatherSourceCompatible(source)
+      );
+      if (!committedSource) {
+        throw new Error('GPU physical-summary validation requires a committed stable GPU L13 physical keyframe/source.');
+      }
       const topology = new GeographicLodTopology(state.canonicalWindow, lodRangeForStableLevel(10));
       if (!gpuPhysicalSummaryBackend || !canonicalWindowsEqual(gpuPhysicalSummaryBackend.topology.canonicalWindow, topology.canonicalWindow)) {
         gpuPhysicalSummaryBackend?.destroy();
         gpuPhysicalSummaryBackend = new GpuPhysicalSummaryBackend(gpuWeatherGl(), topology);
       }
-      const keyframe = gpuWeatherKeyframes?.a;
-      if (!keyframe?.texture) throw new Error('GPU physical-summary validation requires a committed L13 physical keyframe.');
       gpuPhysicalSummaryBackend.reconstruct({
         texture: keyframe.texture,
         topology: geographicWeatherPyramid.topology,
