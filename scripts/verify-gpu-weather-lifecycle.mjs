@@ -122,6 +122,28 @@ class StableGpuLifecycleScenario {
     check(this.active.source.resource.disposed === false, `${label} superseded cleanup cannot dispose ACTIVE resources`);
   }
 
+  completeAsync(pending, label) {
+    // Models the promise continuation after tile residency/keyframe work. A
+    // stale completion may dispose only its own pending resource; it cannot
+    // retag or release ACTIVE.
+    const accepted = this.pending === pending && !pending.cancelled;
+    if (!accepted) pending.source?.resource?.dispose();
+    check(!accepted || pending.source.resource.disposed === false, `${label} accepts only a live pending generation`);
+    check(!accepted || this.pending === pending, `${label} publishes only the current pending generation`);
+    this.assertStable(`${label} completion before publication`);
+    return accepted;
+  }
+
+  cancelPendingForTransition(label) {
+    const pending = this.pending;
+    if (pending) {
+      pending.cancelled = true;
+      this.pending = null;
+    }
+    this.assertStable(`${label} cancellation leaves pre-transition ACTIVE intact`);
+    return pending;
+  }
+
   commitPending(label, { expectReady = true } = {}) {
     const pending = this.pending;
     const ready = Boolean(pending && !pending.cancelled);
@@ -263,6 +285,42 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   scenario.assertStable('Dots ↔ Squares pending boundary');
   scenario.commitPending('Dots ↔ Squares pending boundary commit');
   check(scenario.dots.gpuWeatherSource === scenario.squares.gpuWeatherSource, 'Dots ↔ Squares commit preserves one source identity');
+}
+
+// Explicit asynchronous L14 stress ordering. These cases used to be modelled
+// only as synchronous replacement ordering, which missed late promise
+// completions after a new target or a transition had already changed owner.
+{
+  const scenario = new StableGpuLifecycleScenario();
+  scenario.commitStable(14, scenario.pyramid.topology, 'stable L14 initial activation');
+  const pendingA = scenario.beginPending(14, topologyFor(shiftedWindow), 'L14 pan replacement A');
+  const pendingB = { level: 14, topology: topologyFor(firstWindow), levelData: null, source: null, cancelled: false };
+  scenario.supersedePending(pendingB, 'L14 pan replacement B supersedes A');
+  check(!scenario.completeAsync(pendingA, 'stale L14 A completion while B is current'), 'stale L14 A cannot publish while B is current');
+  scenario.commitPending('L14 B commit');
+  check(!scenario.completeAsync(pendingA, 'stale L14 A completion after B commit'), 'stale L14 A cannot publish after B commit');
+
+  const interrupted = scenario.beginPending(14, topologyFor(shiftedWindow), 'L14 pending before L14→L13');
+  scenario.cancelPendingForTransition('L14→L13 transition entry');
+  scenario.transitionTo(13, 'stable L13 after interrupted L14 pending');
+  check(!scenario.completeAsync(interrupted, 'stale L14 completion after stable L13'), 'stale L14 completion cannot publish into stable L13');
+
+  scenario.transitionTo(14, 'L13→L14 reactivation');
+  const rapidA = scenario.beginPending(14, topologyFor(shiftedWindow), 'L13→L14 rapid pan A');
+  const rapidB = { level: 14, topology: topologyFor(firstWindow), levelData: null, source: null, cancelled: false };
+  scenario.supersedePending(rapidB, 'L13→L14 rapid pan B');
+  check(!scenario.completeAsync(rapidA, 'L13→L14 stale rapid A completion'), 'L13→L14 stale A cannot publish');
+  scenario.commitPending('L13→L14 rapid B commit');
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const pending = scenario.beginPending(14, topologyFor(shiftedWindow), `rapid L13/L14 cycle ${cycle} pending`);
+    scenario.cancelPendingForTransition(`rapid L13/L14 cycle ${cycle} transition entry`);
+    scenario.transitionTo(13, `rapid L13/L14 cycle ${cycle} stable L13`);
+    check(!scenario.completeAsync(pending, `rapid L13/L14 cycle ${cycle} stale completion`), `rapid L13/L14 cycle ${cycle} stale completion cannot publish`);
+    scenario.transitionTo(14, `rapid L13/L14 cycle ${cycle} stable L14`);
+  }
+  scenario.dots.setActive(false);
+  scenario.squares.setActive(true);
+  scenario.assertStable('Dots↔Squares after asynchronous L14 replacement stress');
 }
 
 if (failures) process.exitCode = 1;

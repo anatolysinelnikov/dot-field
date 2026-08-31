@@ -609,6 +609,18 @@ published and clean up after their asynchronous fetch completes. The existing
 two-sided spatial shrink rule still replaces a grossly oversized retained
 window after a strong zoom-in.
 
+Each pending spatial replacement also has a never-reused lifecycle generation
+in addition to its diagnostic/commit counter. Async tile, keyframe, and
+summary completion must compare that accepted generation and pending owner
+immediately before publication. A stale completion may release only the
+resources prepared by that stale pending state; it must never clear ACTIVE
+renderer sources, replace ACTIVE topology or level-data identities, dispose
+ACTIVE resources, or change GPU ownership. Only an accepted current pending
+generation may synchronously publish its complete replacement and then release
+the predecessor. Diagnostics retain a bounded lifecycle trace (creation,
+supersession, completion, publication, invalidation, and disposal) so a strict
+committed-source invariant failure includes the mutations leading to it.
+
 Provider tile payloads are shared by generation and provider-tile identity
 across active and pending reconstructors. Overlapping spatial replacements
 reuse resident payloads and request only newly required tiles; the cache is
