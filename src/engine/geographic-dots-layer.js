@@ -721,7 +721,8 @@ export class GeographicDotsLayer {
 
   setTopology(topology, options = {}) {
     const previousTopology = this.topology;
-    if (this.gpuWeatherSource && previousTopology !== topology) this.gpuWeatherSource = null;
+    const preserveGpuWeatherSource = options.preserveGpuWeatherSource === true;
+    if (this.gpuWeatherSource && previousTopology !== topology && !preserveGpuWeatherSource) this.gpuWeatherSource = null;
     const canPreserve = options.preserveCompatibleState !== false
       && previousTopology
       && canonicalWindowsEqual(previousTopology.canonicalWindow, topology.canonicalWindow);
@@ -738,7 +739,7 @@ export class GeographicDotsLayer {
       this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
       this.bufferCapacity = { rain: 0, strong: 0, storm: 0, hail: 0 };
       this.buffersDirty = true;
-      this.gpuWeatherSource = null;
+      if (!preserveGpuWeatherSource) this.gpuWeatherSource = null;
     } else {
       const retainedCurrent = retainedLevelData(previousTopology, topology, previousLevelData);
       this.levelData = retainedCurrent ? previousLevelData : null;
@@ -804,15 +805,26 @@ export class GeographicDotsLayer {
     if (requestRepaint) this.map?.triggerRepaint();
   }
 
-  isGpuWeatherSourceCompatible(source) {
+  setGpuWeatherCommittedState(topology, levelData, source, time) {
+    if (!this.gpuWeatherMode) throw new Error('Cannot commit GPU weather state while GPU weather mode is inactive.');
+    if (!this.isGpuWeatherSourceCompatible(source, { topology, levelData, allowTransition: true })) {
+      throw new Error('GPU weather committed state must contain a matching stable topology, level data, and source.');
+    }
+    this.setTopology(topology, { preserveCompatibleState: false, preserveGpuWeatherSource: true });
+    this.setLevelData(levelData, time, { preserveGpuWeatherSource: true });
+    this.gpuWeatherSource = source;
+    this.map?.triggerRepaint();
+  }
+
+  isGpuWeatherSourceCompatible(source, { topology = this.topology, levelData = this.levelData, allowTransition = false } = {}) {
     const expectedKind = source?.levelData?.level < REFERENCE_GRID_LEVEL ? 'summary' : 'physical';
-    return Boolean(this.gpuWeatherMode && source && source.topology === this.topology
-      && source.levelData === this.levelData
+    return Boolean(this.gpuWeatherMode && source && source.topology === topology
+      && source.levelData === levelData
       && isGpuWeatherLevel(source.levelData?.level)
       && source.kind === expectedKind
       && source.textureA && source.textureB
       && (expectedKind === 'physical' || (source.coverageTextureA && source.coverageTextureB))
-      && !this.transition);
+      && (allowTransition || !this.transition));
   }
 
   setGpuWeatherPresentationEnabled(enabled) {
@@ -885,9 +897,10 @@ export class GeographicDotsLayer {
     this.rebuildInstances();
   }
 
-  setLevelData(levelData, time) {
+  setLevelData(levelData, time, options = {}) {
     const level = levelData?.level ?? null;
-    if (this.gpuWeatherSource && (this.gpuWeatherSource.levelData !== levelData || !isGpuWeatherLevel(level))) {
+    const preserveGpuWeatherSource = options.preserveGpuWeatherSource === true;
+    if (this.gpuWeatherSource && (this.gpuWeatherSource.levelData !== levelData || !isGpuWeatherLevel(level)) && !preserveGpuWeatherSource) {
       this.gpuWeatherSource = null;
     }
     if (this.gpuWeatherMode && isGpuWeatherLevel(level)) {

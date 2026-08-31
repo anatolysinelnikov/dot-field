@@ -576,12 +576,13 @@ requested through the existing HIGH-priority scheduler; only then is the
 minimal CPU transition state rebuilt.
 
 GPU physical presentation sources carry both the shared canonical topology
-identity and the active stable-level level-data identity. A renderer drops its source
-before accepting a changed topology, level descriptor, transition, or GPU-mode
-deactivation; the application also preflights both Dots and Squares before
-publishing a new source, including to the inactive renderer. Thus a source is
-visible only after both renderers have the same synchronized topology/window
-and stable-level descriptor. For L10-L12 the source is the summary texture pair
+identity and the active stable-level level-data identity. Independent renderer
+topology, level, transition, and GPU-mode changes still invalidate their source;
+the stable spatial replacement path instead preflights both renderers and uses
+their committed-state operation to install the complete topology, level
+descriptor, and source together. Thus a stable source is visible only after
+both renderers have the same synchronized topology/window and stable-level
+descriptor. For L10-L12 the source is the summary texture pair
 and its RG16F coverage pair; for L13-L14 it is the direct R16F pair. Leaving a
 stable GPU level first hands control back to the CPU transition path, and
 returning establishes the new descriptor before publishing the next physical or
@@ -599,9 +600,11 @@ committed (or already pending) window and the latest target are unioned, then
 the existing 25% overscan proportion is applied and snapped to the global L10
 interval. Targets contained by the pending window coalesce without another
 load. When the pending reconstructor has every required temporal tile and both
-physical and required summary keyframes, both renderers are synchronized to its topology and level
-descriptor and the new topology/source pair is published synchronously; the
-old atlas is released only after that publication. Superseded loads cannot be
+physical and required summary keyframes, both renderers are preflighted against
+its topology and level descriptor and the complete new committed state is
+published synchronously; the old source and atlas remain owned by ACTIVE until
+that publication, and obsolete resources are released only afterward.
+Superseded loads cannot be
 published and clean up after their asynchronous fetch completes. The existing
 two-sided spatial shrink rule still replaces a grossly oversized retained
 window after a strong zoom-in.
