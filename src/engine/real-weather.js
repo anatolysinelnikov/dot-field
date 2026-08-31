@@ -397,7 +397,7 @@ export class RealWeatherSequenceFrame {
 }
 
 export class RealWeatherSequence extends RealWeatherField {
-  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, weatherSupport = null, timestamps, potentialWeatherMask = null, motion = null, temporalMode = 'motion', generationId = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
+  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, weatherSupport = null, timestamps, potentialWeatherMask = null, motion = null, temporalMode = 'motion', generationId = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, retainRawFrame = true, onSourceFrameCacheEvent = null }) {
     const frameSize = longitudes.length * latitudes.length;
     const emptyCodes = new Uint8Array(frameSize);
     const emptyChannel = new Float32Array(frameSize);
@@ -424,6 +424,7 @@ export class RealWeatherSequence extends RealWeatherField {
     this.temporalMode = temporalMode === 'linear' || !motion ? 'linear' : 'motion';
     this.sourceFrameCacheLimit = sourceFrameCacheLimit;
     this.retainAllSourceFrames = Boolean(retainAllSourceFrames);
+    this.retainRawFrame = Boolean(retainRawFrame);
     this.onSourceFrameCacheEvent = typeof onSourceFrameCacheEvent === 'function' ? onSourceFrameCacheEvent : null;
     if (!Number.isInteger(sourceFrameCacheLimit) || sourceFrameCacheLimit < 2) {
       throw new Error('Real weather sequence source-frame cache limit must be an integer of at least 2.');
@@ -456,7 +457,7 @@ export class RealWeatherSequence extends RealWeatherField {
         }
       }
     }
-    this.rawFrame = this.sourceFrames.has(0) ? this.exactSourceFrameAt(0) : null;
+    this.rawFrame = this.retainRawFrame && this.sourceFrames.has(0) ? this.exactSourceFrameAt(0) : null;
   }
 
   setTemporalMode(mode) {
@@ -509,7 +510,7 @@ export class RealWeatherSequence extends RealWeatherField {
       }
     }
     this.onSourceFrameCacheEvent?.({ type: 'insertion', frameIndex });
-    if (frameIndex === 0 && !this.rawFrame) this.rawFrame = this.exactSourceFrameAt(0);
+    if (this.retainRawFrame && frameIndex === 0 && !this.rawFrame) this.rawFrame = this.exactSourceFrameAt(0);
     return values;
   }
 
@@ -1414,7 +1415,7 @@ function createSourceFrameScheduler({ frameCount, concurrency, generationId, sou
   };
 }
 
-export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onResidencyChange = null, temporalMode = 'motion', sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, sourceFrameFetchConcurrency = 1 } = {}) {
+export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onResidencyChange = null, temporalMode = 'motion', sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, retainRawFrame = true, sourceFrameFetchConcurrency = 1 } = {}) {
   const timing = typeof onTiming === 'function' ? onTiming : () => {};
   const metadataReady = loadSequenceMetadata(metadataUrl, timing);
   const supportReady = metadataReady.then(async (validated) => {
@@ -1448,7 +1449,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
       longitudeSpacing: validated.longitudeSpacing, latitudeSpacing: validated.latitudeSpacing,
       weatherSupport: validated.weatherSupport,
       timestamps: validated.timestamps, potentialWeatherMask, motion, temporalMode, generationId: validated.generationId,
-      sourceFrameCacheLimit, retainAllSourceFrames,
+      sourceFrameCacheLimit, retainAllSourceFrames, retainRawFrame,
       onSourceFrameCacheEvent: (event) => scheduler?.recordCacheEvent(event)
     });
     sequenceForDiagnostics = sequence;

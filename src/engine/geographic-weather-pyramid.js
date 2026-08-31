@@ -887,6 +887,18 @@ export class GeographicWeatherPyramid {
     return geometry;
   }
 
+  // Stable GPU L14 presentation owns an uploaded canonical geometry texture,
+  // not this CPU-side provider sampling geometry. Keep the descriptor/topology
+  // for an adjacent CPU fallback transition, but discard per-sample temporal
+  // reconstruction state as soon as GPU residency takes ownership.
+  releaseSamplingGeometry(level) {
+    const geometry = this.samplingGeometries.get(level);
+    if (!geometry) return false;
+    geometry.spatialRainCache?.clear?.();
+    this.samplingGeometries.delete(level);
+    return true;
+  }
+
   evaluate(requestedLevels, frame, reusableStates = null) {
     if (!requestedLevels.length) return [];
     this.diagnostics.evaluateCalls++;

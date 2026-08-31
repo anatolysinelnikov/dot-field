@@ -778,6 +778,12 @@ export class GeographicDotsLayer {
       this.instances = { rain: new Float32Array(), strong: new Float32Array(), storm: new Float32Array(), hail: new Float32Array() };
       this.counts = { rain: 0, strong: 0, storm: 0, hail: 0 };
       this.instanceWriters = { rain: new InstanceWriter(), strong: new InstanceWriter(), storm: new InstanceWriter(), hail: new InstanceWriter() };
+      this.bufferCapacity = { rain: 0, strong: 0, storm: 0, hail: 0 };
+      const gl = this.map?.painter?.context?.gl;
+      if (gl && this.instanceBuffers) for (const buffer of Object.values(this.instanceBuffers)) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STREAM_DRAW);
+      }
       this.buffersDirty = false;
     } else if (this.active && this.levelData) this.rebuildTemporal(time);
     this.map?.triggerRepaint();

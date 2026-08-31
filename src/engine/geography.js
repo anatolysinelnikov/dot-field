@@ -101,17 +101,18 @@ export async function loadActiveWeatherField({ onTiming = null, temporalMode = '
   return field;
 }
 
-export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = null, temporalMode = 'motion' } = {}) {
+export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = null, temporalMode = 'motion', gpuFirst = false, rawEnabled = true } = {}) {
   const sequenceLoad = beginRealWeatherSequenceLoad(
     ACTIVE_REAL_WEATHER_METADATA_URL,
     {
       onTiming,
       onResidencyChange,
       temporalMode,
-      // The active finite forecast is intentionally fully resident after its
-      // background fill. This is source payload ownership, not derived LOD
-      // materialization; the latter remains bounded by the renderer lifecycle.
-      retainAllSourceFrames: true,
+      // The default/reference path deliberately retains the finite sequence.
+      // The no-RAW GPU experiment instead keeps the existing bounded scheduler
+      // policy: CPU frames are retained only for an active CPU LOD path.
+      retainAllSourceFrames: !gpuFirst,
+      retainRawFrame: rawEnabled,
       sourceFrameFetchConcurrency: 1
     }
   );
@@ -185,9 +186,10 @@ export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = nu
       if (field.frameCount === undefined) return field;
       const frameIndices = sourceFrameIndicesForInitialPlayback(field);
       await sequenceLoad.requestSourceFrames(frameIndices, { priority: 'high' });
-      // Playback readiness remains bounded to the initial buffer. Continue
-      // loading the rest of this immutable generation in the background.
-      void startFullSequenceFill(field);
+      // Playback readiness remains bounded to the initial buffer. The legacy
+      // reference path fills the immutable sequence; GPU-first keeps the
+      // existing bounded rolling horizon instead.
+      if (!gpuFirst) void startFullSequenceFill(field);
       return { field, frameIndices };
     },
     rebaseRollingPrefetch(normalizedTime) {
@@ -203,7 +205,9 @@ export function beginActiveWeatherLoad({ onTiming = null, onResidencyChange = nu
       const diagnostics = sequenceLoad.diagnostics();
       return diagnostics ? {
         ...diagnostics,
-        automaticFullSequenceFill: true
+        automaticFullSequenceFill: !gpuFirst,
+        gpuFirst,
+        rawEnabled
       } : diagnostics;
     }
   };

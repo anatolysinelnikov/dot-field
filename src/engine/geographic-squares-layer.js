@@ -432,6 +432,12 @@ export class GeographicSquaresLayer {
       this.instanceData = [new Float32Array(), new Float32Array()];
       this.instanceLayouts = [null, null];
       this.instanceCounts = [0, 0];
+      this.instanceBufferCapacity = [0, 0];
+      const gl = this.map?.painter?.context?.gl;
+      if (gl && this.instanceBuffers) for (const buffer of this.instanceBuffers) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, 0, gl.DYNAMIC_DRAW);
+      }
       this.instanceDirty = [false, false];
     } else if (this.active && this.levelData) this.rebuildTemporal(time);
     this.map?.triggerRepaint();

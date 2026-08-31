@@ -132,11 +132,11 @@ available. Metadata and the small immutable support sidecar may load while the
 basemap starts. After MapLibre renders the initial tiles, the application asks
 only for source frame 0; weather custom layers are created as soon as that
 frame is validated.
-The active finite sequence uses the same scheduler with full source-frame
-residency enabled. Playback becomes available after the initial three-frame
-source buffer (0, 1, 2); the remaining frames then fill the same immutable
-generation in the background. Initial rendering does not wait for all source
-frames. The scheduler has one global fetch slot, not separate interactive and
+The default/reference finite sequence uses the same scheduler with full
+source-frame residency enabled. Playback becomes available after the initial
+three-frame source buffer (0, 1, 2); the remaining frames then fill the same
+immutable generation in the background. Initial rendering does not wait for
+all source frames. The scheduler has one global fetch slot, not separate interactive and
 background pools. Current-time and adjacent temporal requirements are HIGH;
 full-sequence fill is LOW.
 HIGH work is selected before queued LOW work, while a running fetch is allowed
@@ -171,6 +171,11 @@ Squares. The centered timestamp control is owned by the application and uses
 provider metadata as its temporal authority. `GeographicScalarLayer` is
 deliberately not instantiated or added to MapLibre in this temporary active-mode
 configuration.
+
+`?raw=0` is a development-only GPU-first option. It removes RAW from the
+selector, starts in Dots, and does not construct a RAW layer or exact RAW-frame
+object. It therefore never loads or retains source payload solely for a future
+RAW selection. Without that parameter, the default RAW behavior is unchanged.
 
 The MapTiler Dataviz Dark Globe basemap, native label and
 administrative-boundary ordering, water tint/boundary context, camera controls,
@@ -408,11 +413,13 @@ accept this rectangular contract, and the sequence's arbitrary point-batch
 API, retain the dense generic fallback.
 These arrays are computation caches rather than a new weather representation;
 the single-point sampler remains the semantic reference path. The provider-grid
-source-frame cache is a deterministic Float32 residency store. The active
-source policy retains every validated frame in the finite generation after the
-initial buffer; its resident payload is therefore derived from metadata as
-`frameCount × frameByteLength`. The bounded LRU remains available only as an
-explicit lower-level compatibility/test configuration. Browser HTTP cache can
+source-frame cache is a deterministic Float32 residency store. The default/
+reference source policy retains every validated frame in the finite generation
+after the initial buffer; its resident payload is derived from metadata as
+`frameCount × frameByteLength`. In the `?gpuWeather=1&raw=0` GPU-first
+experiment, the same scheduler uses its bounded-LRU working set for current/
+adjacent CPU requirements and rolling prefetch instead, and does not start the
+LOW full-sequence fill. Browser HTTP cache can
 improve transport latency but is never a required second frame store. Frame
 availability is asynchronous only at the provider loading boundary: once the
 latest required frames are available, provider temporal reconstruction,
@@ -528,6 +535,17 @@ Each physical pass establishes overwrite-only state (blending, tests, culling,
 and partial writes disabled) before its full-target draw. When it runs inside a
 MapLibre custom-layer render, it restores the invocation's framebuffer,
 viewport, and VAO binding before presentation.
+
+With `?gpuWeather=1&raw=0`, stable GPU L14 has explicit GPU-first ownership:
+temporal rain/motion tiles, two R16F physical fields, and uploaded canonical
+position/tile-index textures remain resident, while Dots/Squares release CPU
+physical summaries, mapped arrays, instance-writer backing arrays, and legacy
+instance buffer capacity. The CPU L14 packed state remains only for the
+mathematically adjacent L13→L14 morph. Once tile residency is ready, the
+pyramid's L14 provider sampling geometry and the reconstructor's CPU canonical
+geometry are detached. For L14→L13, the last valid GPU field stays visible
+while the current renderer source pair is requested through the existing
+HIGH-priority scheduler; only then is the minimal CPU transition state rebuilt.
 
 ### Physical weather-summary profiles
 
@@ -729,9 +747,11 @@ Aggregation therefore skips guaranteed-dry child statistics but preserves every
 dry child in the cached denominators and retains the same summary API and
 representation-independent physical semantics.
 
-The sequence geometry owns a bounded four-entry prepared spatial source cache,
-but the active loader retains every validated source `Float32Array` in the
-single `sourceFrames` map for the life of the immutable generation. It does not
+The sequence geometry owns a bounded four-entry prepared spatial source cache.
+The default loader retains every validated source `Float32Array` in the single
+`sourceFrames` map for the life of the immutable generation; the no-RAW
+GPU-first loader uses the configured source cache limit as an actual bounded
+working-set limit. It does not
 retain a normal-runtime temporal rain array. A provider frame
 exposes a prepared temporal sampling capability through `geography.js`; the
 current sequence implementation captures its two prepared Float64 spatial
@@ -765,9 +785,10 @@ remain dense, so an L13→L14 transition intentionally supports mixed
 dense-reference and packed-direct temporal state while using the existing
 canonical direct-transition relation. Consequently high-LOD temporal CPU
 memory scales with potentially-active samples and the two adjacent keyframes
-rather than the full L14 rectangle. The active source sequence retains all
-validated source frames after the initial three-frame buffer, filling the
-remaining finite sequence in LOW-priority background work. HIGH interactive
+rather than the full L14 rectangle. The default active source sequence retains
+all validated source frames after the initial three-frame buffer, filling the
+remaining finite sequence in LOW-priority background work. In GPU-first
+no-RAW mode this fill is disabled. HIGH interactive
 requirements remain ahead of that fill until completion; after completion,
 arbitrary scrub and backward replay require no source fetch. The full source
 payload set is a separate memory domain from bounded derived renderer/LOD
@@ -834,7 +855,9 @@ independently; neither interpolates a lower discrete summary.
 
 Only the active discrete renderer retains temporal summary/mapping buffers;
 switching away releases that renderer's temporal state while retaining the
-shared topology and reusable GPU capacities. A range-only topology replacement
+shared topology and reusable GPU capacities. Stable GPU-first L14 additionally
+releases legacy instance capacity because its shaders do not consume instance
+buffers. A range-only topology replacement
 does not by itself release compatible active renderer state; canonical-window
 replacement remains the explicit invalidation boundary.
 Within an active Dots or Squares renderer, temporal state is owned per LOD
