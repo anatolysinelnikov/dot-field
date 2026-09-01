@@ -732,11 +732,27 @@ viewport, program, raster, color-mask, blend, and pixel-pack state, and verify
 summary/readback framebuffer completeness. There are no CPU per-sample summary
 uploads, no permanent full-domain L13 scratch textures, and no temporal source
 fetches or motion changes. The backend retains two summary keyframes per
-requested coarse level and reuses its relation textures for the topology
-lifetime. Stable L10-L13 presentation attaches the bounded subset required by
-the endpoint working set to the same active/pending spatial publication
-contract as the direct L13 pair; no second temporal or spatial lifecycle
-exists. Stable L14 remains direct-only.
+requested coarse level. The centered relation is translation-invariant in
+canonical space: its exact local forward candidates are determined by the
+fine/coarse levels, dimensions, fine parity, relative origins, and relative
+edge clipping, not by absolute geographic position. The existing
+`centeredContributionStructuralKey(fineLevel, coarseLevel)` is therefore also
+the GPU relation compatibility contract. Reverse child-to-parent ordering,
+Float32 reverse weights, maximum contribution count, and packed texture layout
+are deterministic consequences of that same forward relation and key.
+
+During an overlapping active/pending spatial replacement, compatible immutable
+relation resources (relation index/weight textures and their execution
+metadata) may be shared per summary edge. Each backend explicitly retains the
+shared resource; relation textures are deleted only after the final owner
+releases them. Summary values/coverage A/B textures, framebuffers,
+topology/window identity, reconstruction state, and direct physical source
+ownership remain private to each backend/window. Relation ownership is
+independent of renderer presentation/source ownership, and no historical
+multi-window GPU relation cache exists. Stable L10-L13 presentation attaches
+the bounded subset required by the endpoint working set to the same
+active/pending spatial publication contract as the direct L13 pair; no second
+temporal or spatial lifecycle exists. Stable L14 remains direct-only.
 
 ### Physical weather-summary profiles
 
@@ -901,7 +917,7 @@ both endpoint objects are retained. Removed levels become unreachable;
 new levels are constructed normally.
 
 Centered aggregation relations and geometric `totalWeight` arrays use bounded
-caches keyed by relative dyadic structure (level pair, dimensions,
+CPU caches keyed by relative dyadic structure (level pair, dimensions,
 origins/parity, and clipping shape), never absolute geographic position. A
 relation retains compact X- and Y-axis candidate tables: each fine column and
 row stores its valid local coarse indices and its untrimmed one- or two-anchor
@@ -916,7 +932,9 @@ shaped support-edge windows rebuild their compact relations. Range-only pyramid
 replacement carries sampling geometry and its compatible source-frame spatial
 cache only when the exact packed level object is retained; this preserves the
 provider's prepared lookup and potential-support state without coupling the
-provider to a renderer.
+provider to a renderer. This CPU cache is separate from the GPU backend
+relation ownership above; GPU sharing exists only between overlapping live
+backends and has no historical window retention.
 
 Dots and Squares receive the same replacement topology. Their active temporal
 states, mapped arrays, and packed instances are retained only when the

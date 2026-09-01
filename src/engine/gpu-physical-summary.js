@@ -8,6 +8,7 @@
 
 import {
   buildCenteredContributionRelation,
+  centeredContributionStructuralKey,
   forEachCenteredContributionRelationEntry,
   WEATHER_REFERENCE_LEVEL,
   WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY
@@ -167,6 +168,7 @@ function timingNow() {
 // ownership boundary local so only textures this module deleted are removed
 // from a later state restore; MapLibre-owned bindings are restored verbatim.
 const deletedOwnedTextures = new WeakSet();
+let nextRelationResourceId = 1;
 
 function typedArrayBytes(...values) {
   return values.reduce((total, value) => total + (ArrayBuffer.isView(value) ? value.byteLength : 0), 0);
@@ -229,7 +231,7 @@ function reverseRelation(fineLevel, coarseLevel, relation) {
   return { counts, offsets, childIndices, weights, maximum };
 }
 
-function relationTextures(gl, fineLevel, coarseLevel) {
+function relationTextures(gl, fineLevel, coarseLevel, structuralKey) {
   const relationStarted = timingNow();
   const relation = buildCenteredContributionRelation(fineLevel, coarseLevel);
   const reverse = reverseRelation(fineLevel, coarseLevel, relation);
@@ -282,7 +284,8 @@ function relationTextures(gl, fineLevel, coarseLevel) {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, previousUnpackAlignment);
   }
   const relationUploadMs = timingNow() - relationUploadStarted;
-  return {
+  return new GpuPhysicalSummaryRelationResource(gl, {
+    structuralKey,
     relation,
     indexTexture,
     weightTexture,
@@ -299,7 +302,7 @@ function relationTextures(gl, fineLevel, coarseLevel) {
       temporaryCpuStagingBytes: cpuStagingBytes,
       peakTemporaryCpuBytes: cpuRelationBytes + cpuStagingBytes
     }
-  };
+  });
 }
 
 function percentile(values, fraction) {
@@ -407,8 +410,13 @@ function restorePassState(gl, state) {
 // texture unit; otherwise a later pass-state restore can retain a reference
 // to a deleted WebGLTexture and bind it again.
 function deleteOwnedTexture(gl, texture) {
-  if (!texture) return;
+  if (!texture) return null;
+  if ((typeof texture === 'object' && texture !== null) || typeof texture === 'function') {
+    if (deletedOwnedTextures.has(texture)) return null;
+  }
+  const started = timingNow();
   const activeTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+  const bindingCleanupStarted = timingNow();
   const unitCount = Math.max(1, gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS) || 1);
   for (let unit = 0; unit < unitCount; unit++) {
     gl.activeTexture(gl.TEXTURE0 + unit);
@@ -416,10 +424,54 @@ function deleteOwnedTexture(gl, texture) {
     if (gl.getParameter(gl.TEXTURE_BINDING_2D_ARRAY) === texture) gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
   }
   gl.activeTexture(activeTexture);
+  const bindingCleanupMs = timingNow() - bindingCleanupStarted;
   if ((typeof texture === 'object' && texture !== null) || typeof texture === 'function') {
     deletedOwnedTextures.add(texture);
   }
+  const deletionStarted = timingNow();
   gl.deleteTexture(texture);
+  return {
+    bindingCleanupMs,
+    deletionMs: timingNow() - deletionStarted,
+    totalMs: timingNow() - started
+  };
+}
+
+class GpuPhysicalSummaryRelationResource {
+  constructor(gl, relation) {
+    Object.assign(this, relation);
+    this.gl = gl;
+    this.resourceId = nextRelationResourceId++;
+    this.ownerCount = 1;
+    this.retainCount = 1;
+    this.releaseCount = 0;
+    this.destroyed = false;
+  }
+
+  retain() {
+    fail(!this.destroyed && this.ownerCount > 0, 'cannot retain a destroyed relation resource.');
+    this.ownerCount++;
+    this.retainCount++;
+    return this;
+  }
+
+  release() {
+    if (this.destroyed) return null;
+    fail(this.ownerCount > 0, 'relation resource owner count underflow.');
+    this.ownerCount--;
+    this.releaseCount++;
+    if (this.ownerCount !== 0) return null;
+    this.destroyed = true;
+    let bindingCleanupMs = 0;
+    let deletionMs = 0;
+    for (const texture of [this.indexTexture, this.weightTexture]) {
+      const result = deleteOwnedTexture(this.gl, texture);
+      if (!result) continue;
+      bindingCleanupMs += result.bindingCleanupMs;
+      deletionMs += result.deletionMs;
+    }
+    return { bindingCleanupMs, deletionMs };
+  }
 }
 
 export function validateReverseCenteredRelation(fineLevel, coarseLevel) {
@@ -452,7 +504,10 @@ export function validateReverseCenteredRelation(fineLevel, coarseLevel) {
 }
 
 export class GpuPhysicalSummaryBackend {
-  constructor(gl, topology, { maximumLevels = GPU_PHYSICAL_SUMMARY_LEVELS } = {}) {
+  constructor(gl, topology, {
+    maximumLevels = GPU_PHYSICAL_SUMMARY_LEVELS,
+    relationReuseSource = null
+  } = {}) {
     fail(gl, 'WebGL2 context is required.');
     fail(topology?.levels?.has?.(WEATHER_REFERENCE_LEVEL), 'direct L13 level data is required.');
     this.gl = gl;
@@ -465,6 +520,7 @@ export class GpuPhysicalSummaryBackend {
     fail(gl.getExtension('EXT_color_buffer_float'), 'floating-point render targets are unavailable.');
     const constructionState = capturePassState(gl, [0, 1, 2, 3, 4]);
     this.relations = new Map();
+    this.levelConstructionTimings = new Map();
     this.outputs = new Map();
     this.reconstructionPassCount = 0;
     this.lastUpdateMs = 0;
@@ -473,14 +529,27 @@ export class GpuPhysicalSummaryBackend {
     this.lastGpuError = gl.NO_ERROR;
     this.lastValidation = null;
     this.lastPassOwnership = [];
-    this.relationBuildCount = this.levels.length;
-    this.relationUploadCount = this.levels.length * 2;
+    this.relationBuildCount = 0;
+    this.relationUploadCount = 0;
+    this.relationReuseHits = 0;
+    this.relationReuseMisses = 0;
+    this.relationBuildsAvoided = 0;
+    this.relationUploadsAvoided = 0;
+    this.temporaryCpuStagingBytesAvoided = 0;
     this.summaryKeyframeReconstructionCount = 0;
     this.summaryKeyframeReuseCount = 0;
     this.constructionTimings = {
       programSetupMs: 0,
       levels: [],
       peakTemporaryCpuStagingBytes: 0,
+      relationBuildMs: 0,
+      stagingAllocationFillMs: 0,
+      relationUploadMs: 0,
+      relationReuseHits: 0,
+      relationReuseMisses: 0,
+      relationBuildsAvoided: 0,
+      relationUploadsAvoided: 0,
+      temporaryCpuStagingBytesAvoided: 0,
       outputAllocationFramebufferMs: 0,
       totalMs: 0
     };
@@ -506,7 +575,31 @@ export class GpuPhysicalSummaryBackend {
         const levelStarted = timingNow();
         const parent = topology.levels.get(level);
         const child = topology.levels.get(level + 1);
-        const relation = relationTextures(gl, child, parent);
+        const structuralKey = centeredContributionStructuralKey(child, parent);
+        const reusable = relationReuseSource?.gl === gl
+          && relationReuseSource.destroyed !== true
+          ? relationReuseSource.relations?.get(level)
+          : null;
+        const canReuse = Boolean(reusable
+          && reusable.gl === gl
+          && reusable.destroyed !== true
+          && reusable.structuralKey === structuralKey);
+        const relation = canReuse
+          ? reusable.retain()
+          : relationTextures(gl, child, parent, structuralKey);
+        if (canReuse) {
+          this.relationReuseHits++;
+          this.relationBuildsAvoided++;
+          this.relationUploadsAvoided += 2;
+          this.temporaryCpuStagingBytesAvoided += relation.cpuStagingBytes;
+        } else {
+          this.relationReuseMisses++;
+          this.relationBuildCount++;
+          this.relationUploadCount += 2;
+          this.constructionTimings.relationBuildMs += relation.timings.relationBuildMs;
+          this.constructionTimings.stagingAllocationFillMs += relation.timings.stagingAllocationFillMs;
+          this.constructionTimings.relationUploadMs += relation.timings.relationUploadMs;
+        }
         this.relations.set(level, relation);
         const outputStarted = timingNow();
         const slots = [0, 1].map(() => ({
@@ -528,16 +621,25 @@ export class GpuPhysicalSummaryBackend {
           semanticRelationTexels: relation.semanticTexelCount,
           paddedRelationTexels: relation.paddedTexelCount,
           relationGpuBytes: relation.gpuBytes,
-          temporaryCpuStagingBytes: relation.cpuStagingBytes,
-          relationCpuBytes: relation.timings.cpuRelationBytes,
-          reverseRelationBytes: relation.timings.reverseRelationBytes,
-          peakTemporaryCpuBytes: relation.timings.peakTemporaryCpuBytes,
-          relationBuildMs: relation.timings.relationBuildMs,
-          stagingAllocationFillMs: relation.timings.stagingAllocationFillMs,
-          relationUploadMs: relation.timings.relationUploadMs,
+          temporaryCpuStagingBytes: canReuse ? 0 : relation.cpuStagingBytes,
+          relationCpuBytes: canReuse ? 0 : relation.timings.cpuRelationBytes,
+          reverseRelationBytes: canReuse ? 0 : relation.timings.reverseRelationBytes,
+          peakTemporaryCpuBytes: canReuse ? 0 : relation.timings.peakTemporaryCpuBytes,
+          relationBuildMs: canReuse ? 0 : relation.timings.relationBuildMs,
+          stagingAllocationFillMs: canReuse ? 0 : relation.timings.stagingAllocationFillMs,
+          relationUploadMs: canReuse ? 0 : relation.timings.relationUploadMs,
+          structuralKey,
+          relationResourceId: relation.resourceId,
+          reused: canReuse,
+          ownerCount: relation.ownerCount,
+          retainCount: relation.retainCount,
+          relationBuildSkipped: canReuse,
+          stagingBytesAvoided: canReuse ? relation.cpuStagingBytes : 0,
+          relationUploadBytesAvoided: canReuse ? relation.gpuBytes : 0,
           outputAllocationFramebufferMs: timingNow() - outputStarted,
           totalMs: timingNow() - levelStarted
         };
+        this.levelConstructionTimings.set(level, levelTimings);
         this.constructionTimings.levels.push(levelTimings);
         this.constructionTimings.peakTemporaryCpuStagingBytes = Math.max(
           this.constructionTimings.peakTemporaryCpuStagingBytes,
@@ -545,6 +647,11 @@ export class GpuPhysicalSummaryBackend {
         );
         this.constructionTimings.outputAllocationFramebufferMs += levelTimings.outputAllocationFramebufferMs;
       }
+      this.constructionTimings.relationReuseHits = this.relationReuseHits;
+      this.constructionTimings.relationReuseMisses = this.relationReuseMisses;
+      this.constructionTimings.relationBuildsAvoided = this.relationBuildsAvoided;
+      this.constructionTimings.relationUploadsAvoided = this.relationUploadsAvoided;
+      this.constructionTimings.temporaryCpuStagingBytesAvoided = this.temporaryCpuStagingBytesAvoided;
     } finally {
       restorePassState(gl, constructionState);
     }
@@ -762,9 +869,18 @@ export class GpuPhysicalSummaryBackend {
         persistentABBytes: count * 24,
         framebufferComplete: output.framebufferComplete,
         relationMaximumContributions: relation.maximumContributions,
-          relationMetadataGpuBytes: relation.gpuBytes,
-          relationMetadataCpuUploadBytes: relation.cpuStagingBytes,
-          construction: { ...relation.timings },
+        relationMetadataGpuBytes: relation.gpuBytes,
+        relationMetadataCpuUploadBytes: this.levelConstructionTimings.get(level)?.temporaryCpuStagingBytes ?? relation.cpuStagingBytes,
+        relationMetadataGpuBytesUnique: relation.gpuBytes,
+        structuralKey: relation.structuralKey,
+        relationResourceId: relation.resourceId,
+        reused: Boolean(this.levelConstructionTimings.get(level)?.reused),
+        ownerCount: relation.ownerCount,
+        retainCount: relation.retainCount,
+        relationBuildSkipped: Boolean(this.levelConstructionTimings.get(level)?.relationBuildSkipped),
+        stagingBytesAvoided: this.levelConstructionTimings.get(level)?.stagingBytesAvoided || 0,
+        relationUploadBytesAvoided: this.levelConstructionTimings.get(level)?.relationUploadBytesAvoided || 0,
+        construction: { ...(this.levelConstructionTimings.get(level) || relation.timings) },
         relationTexture: {
           target: relation.target,
           width: relation.width,
@@ -779,6 +895,8 @@ export class GpuPhysicalSummaryBackend {
     }));
     const persistentGpuSummaryBytes = this.levels.reduce((total, level) => total + summaryLevels[level].persistentABBytes, 0);
     const relationMetadataGpuBytes = this.levels.reduce((total, level) => total + summaryLevels[level].relationMetadataGpuBytes, 0);
+    const uniqueRelationResources = new Set(this.levels.map((level) => this.relations.get(level)));
+    const uniqueRelationMetadataGpuBytes = [...uniqueRelationResources].reduce((total, relation) => total + relation.gpuBytes, 0);
     const relationMetadataCpuUploadBytes = this.levels.reduce((total, level) => total + summaryLevels[level].relationMetadataCpuUploadBytes, 0);
     const cpuSummaryBytesPerKeyframe = this.levels.reduce((total, level) => total + summaryLevels[level].sampleCount * 5 * Float32Array.BYTES_PER_ELEMENT, 0);
     return {
@@ -791,6 +909,7 @@ export class GpuPhysicalSummaryBackend {
       bytesPerSample: 12,
       persistentGpuSummaryBytes,
       relationMetadataGpuBytes,
+      uniqueRelationMetadataGpuBytes,
       relationMetadataCpuUploadBytes,
       webglLimits: {
         maxTextureSize: this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE),
@@ -803,6 +922,11 @@ export class GpuPhysicalSummaryBackend {
       summaryKeyframeReuseCount: this.summaryKeyframeReuseCount,
       relationBuildCount: this.relationBuildCount,
       relationUploadCount: this.relationUploadCount,
+      relationReuseHits: this.relationReuseHits,
+      relationReuseMisses: this.relationReuseMisses,
+      relationBuildsAvoided: this.relationBuildsAvoided,
+      relationUploadsAvoided: this.relationUploadsAvoided,
+      temporaryCpuStagingBytesAvoided: this.temporaryCpuStagingBytesAvoided,
       cpuSummaryBytesAvoidedByGpuCalculation: cpuSummaryBytesPerKeyframe * 2,
       lastUpdateMs: this.lastUpdateMs,
       constructionMs: this.constructionMs,
@@ -832,12 +956,10 @@ export class GpuPhysicalSummaryBackend {
     let relationTextureDeletionMs = 0;
     let otherTextureDeletionMs = 0;
     for (const relation of this.relations.values()) {
-      for (const texture of [relation.indexTexture, relation.weightTexture]) {
-        const result = deleteOwnedTexture(gl, texture);
-        if (!result) continue;
-        bindingCleanupMs += result.bindingCleanupMs;
-        relationTextureDeletionMs += result.deletionMs;
-      }
+      const result = relation.release();
+      if (!result) continue;
+      bindingCleanupMs += result.bindingCleanupMs;
+      relationTextureDeletionMs += result.deletionMs;
     }
     let outputTextureFramebufferDeletionMs = 0;
     for (const output of this.outputs.values()) for (const slot of output.slots) {

@@ -755,16 +755,20 @@ function gpuWeatherKeyframesHavePresentationLevels(keyframes, levels) {
   return gpuWeatherKeyframesReadinessDetails(keyframes, levels).ready;
 }
 
-function createGpuPhysicalSummaryForStableLevel(topology, level) {
+function createGpuPhysicalSummaryForStableLevel(topology, level, relationReuseSource = gpuPhysicalSummaryBackend) {
   const levels = gpuSummaryLevelsForStableLevel(level);
   if (!levels.length) return null;
   const started = performance.now();
-  const backend = new GpuPhysicalSummaryBackend(gpuWeatherGl(), topology, { maximumLevels: levels });
+  const backend = new GpuPhysicalSummaryBackend(gpuWeatherGl(), topology, {
+    maximumLevels: levels,
+    relationReuseSource
+  });
   runtimeDiagnostics?.recordEvent('gpu-physical-summary-construction', {
     stableLevel: level,
     levels,
     durationMs: performance.now() - started,
-    timings: backend.constructionTimings
+    timings: backend.constructionTimings,
+    relationReuseSource: relationReuseSource?.destroyed ? null : gpuWeatherLifecycleIdentity(relationReuseSource, 'summary-backend')
   });
   return backend;
 }
@@ -779,6 +783,43 @@ function destroyGpuPhysicalSummaryBackend(backend, reason = 'unspecified') {
     timings
   });
   return timings;
+}
+
+// Diagnostics aggregate backend-reported relation identities only. The
+// physical-summary module remains the sole owner of relation textures and
+// reference counts; app.js never retains or releases an individual relation.
+function gpuPhysicalSummaryRelationMemoryDiagnostics(activeDiagnostics, pendingDiagnostics) {
+  const backends = [
+    ['active', activeDiagnostics],
+    ['pending', pendingDiagnostics]
+  ].filter(([, diagnostics]) => diagnostics?.active);
+  const unique = new Map();
+  let logicalBytes = 0;
+  for (const [owner, diagnostics] of backends) {
+    for (const level of Object.values(diagnostics.levels || {})) {
+      logicalBytes += level.relationMetadataGpuBytes || 0;
+      const id = level.relationResourceId;
+      if (id !== undefined && !unique.has(id)) unique.set(id, {
+        bytes: level.relationMetadataGpuBytesUnique || level.relationMetadataGpuBytes || 0,
+        owners: [owner]
+      });
+      else if (id !== undefined) unique.get(id).owners.push(owner);
+    }
+  }
+  const uniqueBytes = [...unique.values()].reduce((total, relation) => total + relation.bytes, 0);
+  return {
+    backendCount: backends.length,
+    overlapping: backends.length > 1,
+    logicalRelationBytesReferenced: logicalBytes,
+    uniquePhysicalRelationBytes: uniqueBytes,
+    sharedRelationBytes: Math.max(0, logicalBytes - uniqueBytes),
+    uniqueRelationResourceCount: unique.size,
+    resources: [...unique.entries()].map(([relationResourceId, relation]) => ({
+      relationResourceId,
+      bytes: relation.bytes,
+      owners: relation.owners
+    }))
+  };
 }
 
 function reconstructGpuWeatherKeyframe(reconstructor, summaryBackend, level, topology, index, slot) {
@@ -933,7 +974,11 @@ function prepareGpuWeatherSpatialState(pending) {
   const prepareStarted = performance.now();
   traceGpuWeatherLifecycle('pending-prepare-start', { pending, action: 'prepare' });
   const summaryStarted = performance.now();
-  const summaryBackend = createGpuPhysicalSummaryForStableLevel(pending.topology, pending.levelData.level);
+  const summaryBackend = createGpuPhysicalSummaryForStableLevel(
+    pending.topology,
+    pending.levelData.level,
+    gpuPhysicalSummaryBackend
+  );
   const summaryConstructionMs = performance.now() - summaryStarted;
   pending.summaryBackend = summaryBackend;
   pending.summaryConstructionMs = summaryConstructionMs;
@@ -1557,8 +1602,14 @@ async function initializeGpuWeatherPath() {
     if (!gpuPhysicalSummaryBackend
       || !canonicalWindowsEqual(gpuPhysicalSummaryBackend.topology.canonicalWindow, geographicWeatherPyramid.topology.canonicalWindow)
       || gpuPhysicalSummaryBackend.levels.join(',') !== requiredSummaryLevels.join(',')) {
-      destroyGpuPhysicalSummaryBackend(gpuPhysicalSummaryBackend, 'replace-gpu-weather-summary-levels');
-      gpuPhysicalSummaryBackend = createGpuPhysicalSummaryForStableLevel(geographicWeatherPyramid.topology, levelData.level);
+      const previousSummaryBackend = gpuPhysicalSummaryBackend;
+      const nextSummaryBackend = createGpuPhysicalSummaryForStableLevel(
+        geographicWeatherPyramid.topology,
+        levelData.level,
+        previousSummaryBackend
+      );
+      destroyGpuPhysicalSummaryBackend(previousSummaryBackend, 'replace-gpu-weather-summary-levels');
+      gpuPhysicalSummaryBackend = nextSummaryBackend;
     }
   } else if (gpuPhysicalSummaryBackend) {
     gpuPhysicalSummaryBackend.destroy();
@@ -1776,6 +1827,11 @@ function gpuWeatherDiagnostics() {
     : [];
   const retainedSummaryLevels = gpuPhysicalSummaryBackend?.levels ? [...gpuPhysicalSummaryBackend.levels] : [];
   const physicalSummaryDiagnostics = gpuPhysicalSummaryBackend?.diagnostics() || { active: false };
+  const pendingPhysicalSummaryDiagnostics = pendingSpatial?.summaryBackend?.diagnostics() || { active: false };
+  const physicalSummaryRelationMemory = gpuPhysicalSummaryRelationMemoryDiagnostics(
+    physicalSummaryDiagnostics,
+    pendingPhysicalSummaryDiagnostics
+  );
   const dotsSourceCompatibility = weatherLayer?.gpuWeatherSourceCompatibilityDetails?.(dotsSource) || {
     compatible: false, failedPredicates: ['dots-renderer-unavailable']
   };
@@ -1886,6 +1942,7 @@ function gpuWeatherDiagnostics() {
     timeline: { ...gpuWeatherTimelineStats },
     residency: tile,
     physicalSummary: physicalSummaryDiagnostics,
+    physicalSummaryRelationMemory,
     spatial: {
       activeLevel: stableCommittedGpu ? state.lod.level : null,
       activeSummaryLevel: stableCommittedGpu && state.lod.level < WEATHER_REFERENCE_LEVEL ? state.lod.level : null,
@@ -1899,7 +1956,7 @@ function gpuWeatherDiagnostics() {
       activeResidentTileCount: tile?.residentTileCount || 0,
       pendingRequiredTileCount: pendingTile?.requiredGeometricTileCount || 0,
       pendingResidentTileCount: pendingTile?.residentTileCount || 0,
-      pendingPhysicalSummary: gpuWeatherPendingSpatial?.summaryBackend?.diagnostics() || { active: false },
+      pendingPhysicalSummary: pendingPhysicalSummaryDiagnostics,
       activeSource: hasCommittedSource,
       pendingReady: Boolean(pendingSpatial && pendingLevelData && gpuWeatherSpatialStateReady(pendingSpatial)),
       pendingReplacement: Boolean(pendingSpatial),
@@ -2766,7 +2823,11 @@ function promoteGpuWeatherLodTransition(transition) {
   let targetSummaryBackend = gpuPhysicalSummaryBackend;
   const summaryStarted = performance.now();
   if (requiredSummaryLevels.length && summaryNeedsReplacement) {
-    targetSummaryBackend = createGpuPhysicalSummaryForStableLevel(targetTopology, targetLevel);
+    targetSummaryBackend = createGpuPhysicalSummaryForStableLevel(
+      targetTopology,
+      targetLevel,
+      gpuPhysicalSummaryBackend
+    );
     const directLevelData = gpuWeatherPhysicalLevelDataFor(targetTopology, targetLevel);
     for (const keyframe of [gpuWeatherKeyframes?.a, gpuWeatherKeyframes?.b]) {
       targetSummaryBackend.reconstruct({
