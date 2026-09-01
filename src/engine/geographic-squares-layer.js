@@ -438,6 +438,10 @@ export class GeographicSquaresLayer {
     this.gpuWeatherTransition = null;
     this.temporal = null;
     if (next) {
+      // GPU reactivation is a stable ownership boundary. A CPU transition can
+      // survive the preceding disable path when its final promotion was
+      // interrupted; it must not veto the first complete GPU source publish.
+      this.transition = null;
       this.instanceData = [new Float32Array(), new Float32Array()];
       this.instanceLayouts = [null, null];
       this.instanceCounts = [0, 0];
@@ -493,15 +497,66 @@ export class GeographicSquaresLayer {
     this.map?.triggerRepaint();
   }
 
-  isGpuWeatherSourceCompatible(source, { topology = this.topology, levelData = this.levelData, allowTransition = false } = {}) {
+  gpuWeatherSourceCompatibilityDetails(source, { topology = this.topology, levelData = this.levelData, allowTransition = false } = {}) {
     const expectedKind = source?.levelData?.level < WEATHER_REFERENCE_LEVEL ? 'summary' : 'physical';
-    return Boolean(this.gpuWeatherMode && source && source.topology === topology
-      && source.levelData === levelData
-      && isGpuWeatherLevel(source.levelData?.level)
-      && source.kind === expectedKind
-      && source.textureA && source.textureB
-      && (expectedKind === 'physical' || (source.coverageTextureA && source.coverageTextureB))
-      && (allowTransition || !this.transition));
+    const predicates = {
+      gpuWeatherMode: Boolean(this.gpuWeatherMode),
+      sourcePresent: Boolean(source),
+      topologyIdentity: Boolean(source && source.topology === topology),
+      levelDataIdentity: Boolean(source && source.levelData === levelData),
+      supportedLevel: Boolean(source && isGpuWeatherLevel(source.levelData?.level)),
+      expectedKind: expectedKind || null,
+      actualKind: source?.kind || null,
+      kindMatches: Boolean(source && source.kind === expectedKind),
+      textureAPresent: Boolean(source?.textureA),
+      textureBPresent: Boolean(source?.textureB),
+      coverageTextureAPresent: Boolean(source?.coverageTextureA),
+      coverageTextureBPresent: Boolean(source?.coverageTextureB),
+      cpuTransitionClear: Boolean(!this.transition),
+      transitionAllowed: Boolean(allowTransition)
+    };
+    const sourceOwners = {
+      reconstructorPresent: Boolean(source?.reconstructor),
+      reconstructorLive: source?.reconstructor ? Boolean(source.reconstructor.layout) : null,
+      summaryBackendPresent: Boolean(source?.summaryBackend),
+      summaryBackendLive: source?.summaryBackend ? source.summaryBackend.destroyed !== true : null
+    };
+    const failedPredicates = [];
+    if (!predicates.gpuWeatherMode) failedPredicates.push('gpu-weather-mode-inactive');
+    if (!predicates.sourcePresent) failedPredicates.push('source-missing');
+    if (!predicates.topologyIdentity) failedPredicates.push('topology-identity-mismatch');
+    if (!predicates.levelDataIdentity) failedPredicates.push('level-data-identity-mismatch');
+    if (!predicates.supportedLevel) failedPredicates.push('unsupported-source-level');
+    if (!predicates.kindMatches) failedPredicates.push('source-kind-mismatch');
+    if (!predicates.textureAPresent) failedPredicates.push('texture-a-missing');
+    if (!predicates.textureBPresent) failedPredicates.push('texture-b-missing');
+    if (expectedKind === 'summary' && !predicates.coverageTextureAPresent) failedPredicates.push('coverage-texture-a-missing');
+    if (expectedKind === 'summary' && !predicates.coverageTextureBPresent) failedPredicates.push('coverage-texture-b-missing');
+    if (!allowTransition && !predicates.cpuTransitionClear) failedPredicates.push('cpu-transition-active');
+    if (sourceOwners.reconstructorPresent && !sourceOwners.reconstructorLive) failedPredicates.push('reconstructor-owner-not-live');
+    if (sourceOwners.summaryBackendPresent && !sourceOwners.summaryBackendLive) failedPredicates.push('summary-backend-owner-destroyed');
+    return {
+      compatible: failedPredicates.length === 0,
+      failedPredicates,
+      predicates,
+      rendererState: {
+        topologyPresent: Boolean(this.topology),
+        levelDataLevel: this.levelData?.level ?? null,
+        cpuTransition: Boolean(this.transition),
+        gpuTransition: Boolean(this.gpuWeatherTransition)
+      },
+      sourceState: {
+        topologyPresent: Boolean(source?.topology),
+        levelDataLevel: source?.levelData?.level ?? null,
+        presentationLevel: source?.presentationLevel ?? null,
+        kind: source?.kind || null
+      },
+      sourceOwners
+    };
+  }
+
+  isGpuWeatherSourceCompatible(source, options = {}) {
+    return this.gpuWeatherSourceCompatibilityDetails(source, options).compatible;
   }
 
   setGpuWeatherPresentationEnabled(enabled) {

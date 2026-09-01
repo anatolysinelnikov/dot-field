@@ -459,6 +459,20 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
   layer.setTransition(pyramid.levelDataFor(13), pyramid.levelDataFor(GPU_LEVEL), 0, 0);
   check(layer.gpuWeatherSource === null, `${Layer.name} clears source before an L13/L14 transition`);
 
+  // A CPU transition may still be present when GPU ownership is reactivated
+  // after an interrupted L14 fallback. It must be retired at the renderer
+  // ownership boundary before the first source-only GPU publication.
+  const staleTransitionDetails = layer.gpuWeatherSourceCompatibilityDetails(source(layer.topology, layer.levelData));
+  check(staleTransitionDetails.failedPredicates.includes('cpu-transition-active'),
+    `${Layer.name} reports the stale CPU transition as the compatibility reason`);
+  layer.setGpuWeatherMode(false);
+  layer.setGpuWeatherMode(true);
+  check(!layer.transition, `${Layer.name} clears stale CPU transition on GPU reactivation`);
+  const reactivatedSource = source(layer.topology, layer.levelData);
+  const reactivatedDetails = layer.gpuWeatherSourceCompatibilityDetails(reactivatedSource);
+  check(reactivatedDetails.compatible && reactivatedDetails.failedPredicates.length === 0,
+    `${Layer.name} accepts the first complete source after GPU reactivation`);
+
   layer.setGpuWeatherMode(false);
   check(layer.gpuWeatherSource === null, `${Layer.name} clears source on GPU deactivation`);
 }

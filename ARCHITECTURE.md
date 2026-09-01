@@ -605,7 +605,10 @@ restoration from rebinding deleted objects; pending GPU timer queries are retire
 with the backend. Unsupported boundaries or failed preflight hand control
 back to the CPU transition path. A successful GPU promotion establishes the
 new descriptor and bounded summary range before publishing the next stable
-physical or summary A/B pair.
+physical or summary A/B pair. GPU reactivation is another stable ownership
+boundary: both renderers retire any abandoned CPU transition state before the
+first source-only GPU publication, so a coherent source cannot be rejected by
+stale CPU transition metadata.
 
 `?diagnostics=1` exposes this split under `gpuWeather.workingSet`: stable active
 LOD, renderer-published presentation LOD, transition-ready presentation levels,

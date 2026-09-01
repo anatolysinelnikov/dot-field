@@ -230,6 +230,7 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
   let flushTimer = null;
   let nextSampleDue = now() + SAMPLE_INTERVAL_MS;
   const renderTimestamps = [];
+  const longTasks = [];
   const seenResourceKeys = new Set();
 
   function safeSnapshot() {
@@ -312,7 +313,45 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     }
   }
 
+  function observeLongTasks() {
+    if (typeof PerformanceObserver !== 'function') return;
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const record = {
+            startMs: Number.isFinite(entry.startTime) ? entry.startTime : null,
+            durationMs: Number.isFinite(entry.duration) ? entry.duration : null,
+            endMs: Number.isFinite(entry.startTime) && Number.isFinite(entry.duration)
+              ? entry.startTime + entry.duration : null
+          };
+          longTasks.push(record);
+          if (longTasks.length > MAX_RENDER_TIMESTAMPS) longTasks.shift();
+          queueEvent('browser-longtask', record);
+        }
+      });
+      observer.observe({ type: 'longtask', buffered: true });
+    } catch {
+      // Long Task timing is optional; frame-gap events still record their wall-clock interval.
+    }
+  }
+
   function recordRender(timestamp = now()) {
+    const previous = renderTimestamps.at(-1);
+    if (Number.isFinite(previous)) {
+      const gapMs = timestamp - previous;
+      if (gapMs > 50) {
+        const overlappingLongTasks = longTasks.filter((task) => task.startMs < timestamp && task.endMs > previous);
+        queueEvent('frame-gap', {
+          startMs: previous,
+          endMs: timestamp,
+          gapMs,
+          thresholdMs: gapMs > 100 ? 100 : 50,
+          observedLongTaskCount: overlappingLongTasks.length,
+          observedLongTaskDurationMs: sumNumbers(overlappingLongTasks.map((task) => task.durationMs)),
+          observedLongTasks: overlappingLongTasks
+        });
+      }
+    }
     renderTimestamps.push(timestamp);
     if (renderTimestamps.length > MAX_RENDER_TIMESTAMPS) renderTimestamps.shift();
   }
@@ -576,14 +615,19 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     document.addEventListener('visibilitychange', () => queueEvent('visibility-change', { visibilityState: document.visibilityState }));
     globalThis.addEventListener?.('error', (event) => queueEvent('javascript-error', {
       message: clampText(event.message || event.error?.message),
+      name: clampText(event.error?.name || null),
       stack: clampText(event.error?.stack || null),
       filename: sanitizedUrl(event.filename),
       line: Number.isFinite(event.lineno) ? event.lineno : null,
-      column: Number.isFinite(event.colno) ? event.colno : null
+      column: Number.isFinite(event.colno) ? event.colno : null,
+      errorAvailable: Boolean(event.error),
+      errorType: event.error?.constructor?.name || null
     }));
     globalThis.addEventListener?.('unhandledrejection', (event) => queueEvent('unhandled-rejection', {
       reason: clampText(event.reason instanceof Error ? event.reason.message : event.reason),
-      stack: clampText(event.reason instanceof Error ? event.reason.stack : null)
+      name: clampText(event.reason instanceof Error ? event.reason.name : null),
+      stack: clampText(event.reason instanceof Error ? event.reason.stack : null),
+      reasonType: event.reason?.constructor?.name || typeof event.reason
     }));
     globalThis.addEventListener?.('pagehide', () => { void finish('pagehide').catch(() => {}); }, { once: true });
   }
@@ -591,6 +635,7 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
   const sessionStartedAt = now();
   queueEvent('diagnostic-session-start');
   observeResources();
+  observeLongTasks();
   captureContextEvents();
   persistenceReady = initializePersistence();
   sampleTimer = window.setInterval(() => {

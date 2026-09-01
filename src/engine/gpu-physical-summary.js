@@ -158,6 +158,20 @@ function createTexture2D(gl, internalFormat, width, height, format, type, data =
   return value;
 }
 
+function timingNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
+// A synchronous pass-state snapshot can outlive an owned backend resource
+// when a replacement is published and its predecessor is retired. Keep the
+// ownership boundary local so only textures this module deleted are removed
+// from a later state restore; MapLibre-owned bindings are restored verbatim.
+const deletedOwnedTextures = new WeakSet();
+
+function typedArrayBytes(...values) {
+  return values.reduce((total, value) => total + (ArrayBuffer.isView(value) ? value.byteLength : 0), 0);
+}
+
 export function relationTextureLayout(parentCount, maximumTextureSize) {
   fail(Number.isInteger(parentCount) && parentCount > 0, 'relation parent count must be a positive integer.');
   fail(Number.isInteger(maximumTextureSize) && maximumTextureSize > 0, 'maximum 2D texture size must be a positive integer.');
@@ -216,10 +230,13 @@ function reverseRelation(fineLevel, coarseLevel, relation) {
 }
 
 function relationTextures(gl, fineLevel, coarseLevel) {
+  const relationStarted = timingNow();
   const relation = buildCenteredContributionRelation(fineLevel, coarseLevel);
   const reverse = reverseRelation(fineLevel, coarseLevel, relation);
+  const relationBuildMs = timingNow() - relationStarted;
   const maximumTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
   const layout = relationTextureLayout(coarseLevel.count, maximumTextureSize);
+  const stagingStarted = timingNow();
   const indices = new Uint32Array(layout.paddedTexelCount * 4);
   indices.fill(0xffffffff);
   const weights = new Float32Array(layout.paddedTexelCount * 4);
@@ -235,7 +252,22 @@ function relationTextures(gl, fineLevel, coarseLevel) {
       weights[textureOffset] = weight;
     }
   }
+  const stagingAllocationFillMs = timingNow() - stagingStarted;
+  const cpuRelationBytes = typedArrayBytes(
+    relation.x?.candidateCounts,
+    relation.x?.rawCandidateCounts,
+    relation.x?.candidateIndices,
+    relation.y?.candidateCounts,
+    relation.y?.rawCandidateCounts,
+    relation.y?.candidateIndices,
+    reverse.counts,
+    reverse.offsets,
+    reverse.childIndices,
+    reverse.weights
+  );
+  const cpuStagingBytes = indices.byteLength + weights.byteLength;
   const previousUnpackAlignment = gl.getParameter(gl.UNPACK_ALIGNMENT);
+  const relationUploadStarted = timingNow();
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   let indexTexture;
   let weightTexture;
@@ -249,6 +281,7 @@ function relationTextures(gl, fineLevel, coarseLevel) {
   } finally {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, previousUnpackAlignment);
   }
+  const relationUploadMs = timingNow() - relationUploadStarted;
   return {
     relation,
     indexTexture,
@@ -256,7 +289,16 @@ function relationTextures(gl, fineLevel, coarseLevel) {
     ...layout,
     maximumContributions: reverse.maximum,
     gpuBytes: layout.paddedTexelCount * (4 * Uint32Array.BYTES_PER_ELEMENT + 4 * 2),
-    cpuStagingBytes: indices.byteLength + weights.byteLength
+    cpuStagingBytes,
+    timings: {
+      relationBuildMs,
+      stagingAllocationFillMs,
+      relationUploadMs,
+      cpuRelationBytes,
+      reverseRelationBytes: typedArrayBytes(reverse.counts, reverse.offsets, reverse.childIndices, reverse.weights),
+      temporaryCpuStagingBytes: cpuStagingBytes,
+      peakTemporaryCpuBytes: cpuRelationBytes + cpuStagingBytes
+    }
   };
 }
 
@@ -334,8 +376,10 @@ function restorePassState(gl, state) {
   gl.bindVertexArray(state.vao);
   for (const binding of state.textureBindings) {
     gl.activeTexture(gl.TEXTURE0 + binding.unit);
-    gl.bindTexture(gl.TEXTURE_2D, binding.texture2D);
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, binding.texture2DArray);
+    gl.bindTexture(gl.TEXTURE_2D, binding.texture2D && !deletedOwnedTextures.has(binding.texture2D)
+      ? binding.texture2D : null);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, binding.texture2DArray && !deletedOwnedTextures.has(binding.texture2DArray)
+      ? binding.texture2DArray : null);
   }
   gl.activeTexture(state.activeTexture);
   for (const [capability, enabled] of [
@@ -372,6 +416,9 @@ function deleteOwnedTexture(gl, texture) {
     if (gl.getParameter(gl.TEXTURE_BINDING_2D_ARRAY) === texture) gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
   }
   gl.activeTexture(activeTexture);
+  if ((typeof texture === 'object' && texture !== null) || typeof texture === 'function') {
+    deletedOwnedTextures.add(texture);
+  }
   gl.deleteTexture(texture);
 }
 
@@ -411,7 +458,7 @@ export class GpuPhysicalSummaryBackend {
     this.gl = gl;
     this.topology = topology;
     this.destroyed = false;
-    const constructionStarted = globalThis.performance?.now?.() ?? Date.now();
+    const constructionStarted = timingNow();
     this.levels = [...maximumLevels].filter((level) => topology.levels.has(level));
     fail(this.levels.length > 0 && this.levels.every((level) => GPU_PHYSICAL_SUMMARY_LEVELS.includes(level)), 'requested GPU summary levels are unavailable.');
     fail(this.levels.every((level, index) => level === GPU_PHYSICAL_SUMMARY_LEVELS[index]), 'GPU summary levels must be ordered from coarse to fine.');
@@ -430,10 +477,20 @@ export class GpuPhysicalSummaryBackend {
     this.relationUploadCount = this.levels.length * 2;
     this.summaryKeyframeReconstructionCount = 0;
     this.summaryKeyframeReuseCount = 0;
+    this.constructionTimings = {
+      programSetupMs: 0,
+      levels: [],
+      peakTemporaryCpuStagingBytes: 0,
+      outputAllocationFramebufferMs: 0,
+      totalMs: 0
+    };
+    this.lastDestroyTimings = null;
     try {
+      const programStarted = timingNow();
       this.program = createProgram(gl, GPU_PHYSICAL_SUMMARY_FRAGMENT_SOURCE);
       this.copyProgram = createProgram(gl, COPY_FRAGMENT_SOURCE);
       this.quad = createQuad(gl);
+      this.constructionTimings.programSetupMs = timingNow() - programStarted;
       this.locations = Object.fromEntries([
         'u_physical', 'u_values', 'u_coverage', 'u_relationIndices', 'u_relationWeights',
         'u_inputSize', 'u_outputSize', 'u_inputKind', 'u_relationLayers',
@@ -446,10 +503,12 @@ export class GpuPhysicalSummaryBackend {
       this.dummyValues = createTexture2D(gl, gl.RGBA16F, 1, 1, gl.RGBA, gl.HALF_FLOAT);
       this.dummyCoverage = createTexture2D(gl, gl.RG16F, 1, 1, gl.RG, gl.HALF_FLOAT);
       for (const level of this.levels) {
+        const levelStarted = timingNow();
         const parent = topology.levels.get(level);
         const child = topology.levels.get(level + 1);
         const relation = relationTextures(gl, child, parent);
         this.relations.set(level, relation);
+        const outputStarted = timingNow();
         const slots = [0, 1].map(() => ({
           values: createTexture2D(gl, gl.RGBA16F, parent.width, parent.height, gl.RGBA, gl.HALF_FLOAT),
           coverage: createTexture2D(gl, gl.RG16F, parent.width, parent.height, gl.RG, gl.HALF_FLOAT),
@@ -463,11 +522,34 @@ export class GpuPhysicalSummaryBackend {
           fail(gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE, `L${level} summary framebuffer is incomplete.`);
         }
         this.outputs.set(level, { levelData: parent, slots, framebufferComplete: true });
+        const levelTimings = {
+          level,
+          parentSampleCount: parent.count,
+          semanticRelationTexels: relation.semanticTexelCount,
+          paddedRelationTexels: relation.paddedTexelCount,
+          relationGpuBytes: relation.gpuBytes,
+          temporaryCpuStagingBytes: relation.cpuStagingBytes,
+          relationCpuBytes: relation.timings.cpuRelationBytes,
+          reverseRelationBytes: relation.timings.reverseRelationBytes,
+          peakTemporaryCpuBytes: relation.timings.peakTemporaryCpuBytes,
+          relationBuildMs: relation.timings.relationBuildMs,
+          stagingAllocationFillMs: relation.timings.stagingAllocationFillMs,
+          relationUploadMs: relation.timings.relationUploadMs,
+          outputAllocationFramebufferMs: timingNow() - outputStarted,
+          totalMs: timingNow() - levelStarted
+        };
+        this.constructionTimings.levels.push(levelTimings);
+        this.constructionTimings.peakTemporaryCpuStagingBytes = Math.max(
+          this.constructionTimings.peakTemporaryCpuStagingBytes,
+          levelTimings.peakTemporaryCpuBytes
+        );
+        this.constructionTimings.outputAllocationFramebufferMs += levelTimings.outputAllocationFramebufferMs;
       }
     } finally {
       restorePassState(gl, constructionState);
     }
-    this.constructionMs = (globalThis.performance?.now?.() ?? Date.now()) - constructionStarted;
+    this.constructionMs = timingNow() - constructionStarted;
+    this.constructionTimings.totalMs = this.constructionMs;
     this.readbackTexture = null;
     this.readbackFramebuffer = null;
   }
@@ -680,8 +762,9 @@ export class GpuPhysicalSummaryBackend {
         persistentABBytes: count * 24,
         framebufferComplete: output.framebufferComplete,
         relationMaximumContributions: relation.maximumContributions,
-        relationMetadataGpuBytes: relation.gpuBytes,
-        relationMetadataCpuUploadBytes: relation.cpuStagingBytes,
+          relationMetadataGpuBytes: relation.gpuBytes,
+          relationMetadataCpuUploadBytes: relation.cpuStagingBytes,
+          construction: { ...relation.timings },
         relationTexture: {
           target: relation.target,
           width: relation.width,
@@ -723,6 +806,11 @@ export class GpuPhysicalSummaryBackend {
       cpuSummaryBytesAvoidedByGpuCalculation: cpuSummaryBytesPerKeyframe * 2,
       lastUpdateMs: this.lastUpdateMs,
       constructionMs: this.constructionMs,
+      constructionTimings: {
+        ...this.constructionTimings,
+        levels: this.constructionTimings.levels.map((level) => ({ ...level }))
+      },
+      destroyTimings: this.lastDestroyTimings,
       lastGpuPassMs: this.lastGpuPassMs,
       pendingTimerQueries: this.pendingTimerQueries.length,
       passOwnership: this.lastPassOwnership,
@@ -732,29 +820,59 @@ export class GpuPhysicalSummaryBackend {
   }
 
   destroy() {
-    if (this.destroyed) return;
+    if (this.destroyed) return this.lastDestroyTimings;
+    const started = timingNow();
     this.destroyed = true;
     const gl = this.gl;
+    const timerRetirementStarted = timingNow();
     for (const { query } of this.pendingTimerQueries) gl.deleteQuery(query);
     this.pendingTimerQueries = [];
+    const timerRetirementMs = timingNow() - timerRetirementStarted;
+    let bindingCleanupMs = 0;
+    let relationTextureDeletionMs = 0;
+    let otherTextureDeletionMs = 0;
     for (const relation of this.relations.values()) {
-      deleteOwnedTexture(gl, relation.indexTexture);
-      deleteOwnedTexture(gl, relation.weightTexture);
+      for (const texture of [relation.indexTexture, relation.weightTexture]) {
+        const result = deleteOwnedTexture(gl, texture);
+        if (!result) continue;
+        bindingCleanupMs += result.bindingCleanupMs;
+        relationTextureDeletionMs += result.deletionMs;
+      }
     }
+    let outputTextureFramebufferDeletionMs = 0;
     for (const output of this.outputs.values()) for (const slot of output.slots) {
-      deleteOwnedTexture(gl, slot.values);
-      deleteOwnedTexture(gl, slot.coverage);
+      for (const texture of [slot.values, slot.coverage]) {
+        const result = deleteOwnedTexture(gl, texture);
+        if (!result) continue;
+        bindingCleanupMs += result.bindingCleanupMs;
+        outputTextureFramebufferDeletionMs += result.deletionMs;
+      }
       gl.deleteFramebuffer(slot.framebuffer);
     }
-    deleteOwnedTexture(gl, this.dummyValues);
-    deleteOwnedTexture(gl, this.dummyCoverage);
-    deleteOwnedTexture(gl, this.readbackTexture);
+    const otherResourceDeletionStarted = timingNow();
+    for (const texture of [this.dummyValues, this.dummyCoverage, this.readbackTexture]) {
+      const result = deleteOwnedTexture(gl, texture);
+      if (!result) continue;
+      bindingCleanupMs += result.bindingCleanupMs;
+      otherTextureDeletionMs += result.deletionMs;
+    }
     gl.deleteFramebuffer(this.readbackFramebuffer);
     gl.deleteProgram(this.program);
     gl.deleteProgram(this.copyProgram);
     gl.deleteBuffer(this.quad.buffer);
     gl.deleteVertexArray(this.quad.vao);
+    const otherResourceDeletionMs = timingNow() - otherResourceDeletionStarted;
     this.relations.clear();
     this.outputs.clear();
+    this.lastDestroyTimings = {
+      bindingCleanupMs,
+      relationTextureDeletionMs,
+      outputTextureFramebufferDeletionMs,
+      otherTextureDeletionMs,
+      timerRetirementMs,
+      otherResourceDeletionMs,
+      totalMs: timingNow() - started
+    };
+    return this.lastDestroyTimings;
   }
 }
