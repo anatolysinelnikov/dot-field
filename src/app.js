@@ -23,6 +23,7 @@ import { GeographicSquaresLayer, mapSquaresWeatherSummary } from './engine/geogr
 import { GeographicWeatherPyramid, WEATHER_REFERENCE_LEVEL } from './engine/geographic-weather-pyramid.js';
 import { GpuMotionReconstructor } from './engine/gpu-motion-reconstruction.js';
 import { GpuTemporalTileReconstructor } from './engine/gpu-temporal-tile-reconstruction.js';
+import { GpuWeatherProviderResidency } from './engine/gpu-weather-provider-residency.js';
 import { GPU_PHYSICAL_SUMMARY_LEVELS, GpuPhysicalSummaryBackend } from './engine/gpu-physical-summary.js';
 import {
   fixedL13ChunkForCenter,
@@ -117,6 +118,8 @@ const GPU_WEATHER_LEVEL = 14;
 const GPU_WEATHER_MIN_LEVEL = GPU_WEATHER_LEVELS[0];
 let gpuMotionReconstructor = null;
 let gpuMotionTileReconstructor = null;
+const gpuMotionSharedTileCache = { entries: new Map(), pending: new Map() };
+let gpuWeatherProviderResidency = null;
 let gpuWeatherTileReconstructor = null;
 let gpuWeatherLevelData = null;
 let gpuWeatherUsingGpu = false;
@@ -138,7 +141,6 @@ const gpuWeatherLifecycleTrace = [];
 const gpuWeatherLifecycleObjectIds = new WeakMap();
 let gpuWeatherLifecycleObjectId = 0;
 const GPU_WEATHER_LIFECYCLE_TRACE_LIMIT = 96;
-const gpuWeatherSharedTileCache = { entries: new Map(), pending: new Map() };
 let gpuWeatherL13Chunk = null;
 let gpuWeatherL13ChunkSuspendedReason = null;
 const gpuWeatherL13ChunkStats = {
@@ -151,6 +153,9 @@ const gpuWeatherL13ChunkStats = {
   cameraMoveTopologyRebuildCount: 0,
   cameraMoveReconstructorRebuildCount: 0,
   cameraMoveDirectPhysicalReconstructionCount: 0,
+  cameraMoveProviderResidencyRebuildCount: 0,
+  cameraMoveProviderResidencyUploadCount: 0,
+  providerResidencyCreationCount: 0,
   initialResourceIdentity: null,
   lastCameraMove: null
 };
@@ -196,6 +201,14 @@ function traceGpuWeatherLifecycle(operation, {
     topology: gpuWeatherLifecycleIdentity(pending?.topology || source?.topology || geographicWeatherPyramid?.topology, 'topology'),
     levelData: gpuWeatherLifecycleIdentity(pending?.levelData || source?.levelData || state.levelData, 'level-data'),
     rendererSource: gpuWeatherLifecycleIdentity(source || committedSource, 'source'),
+    providerResidency: gpuWeatherLifecycleIdentity(
+      pending?.reconstructor?.provider || source?.reconstructor?.provider || committedSource?.reconstructor?.provider,
+      'provider-residency'
+    ),
+    reconstructionTarget: gpuWeatherLifecycleIdentity(
+      pending?.reconstructor || source?.reconstructor || committedSource?.reconstructor,
+      'reconstruction-target'
+    ),
     details,
     ownership: pending ? 'pending' : 'active',
     pendingStatus: pending?.status ?? null,
@@ -223,6 +236,8 @@ function fixedL13ChunkPathActive() {
 function fixedL13ChunkResourceIdentity(source = weatherLayer?.gpuWeatherSource) {
   return {
     rendererSource: gpuWeatherLifecycleIdentity(source, 'source'),
+    providerResidency: gpuWeatherLifecycleIdentity(source?.reconstructor?.provider, 'provider-residency'),
+    target: gpuWeatherLifecycleIdentity(source?.reconstructor, 'reconstruction-target'),
     physicalA: gpuWeatherLifecycleIdentity(source?.physicalOwnerA?.texture || source?.textureA, 'physical'),
     physicalB: gpuWeatherLifecycleIdentity(source?.physicalOwnerB?.texture || source?.textureB, 'physical'),
     topology: gpuWeatherLifecycleIdentity(source?.topology, 'topology'),
@@ -720,6 +735,8 @@ function releaseGpuWeatherResidency() {
   cancelGpuWeatherPendingSpatial();
   gpuWeatherTileReconstructor?.destroy();
   gpuWeatherTileReconstructor = null;
+  gpuWeatherProviderResidency?.release();
+  gpuWeatherProviderResidency = null;
   destroyGpuPhysicalSummaryBackend(gpuPhysicalSummaryBackend, 'release-gpu-weather-residency');
   gpuPhysicalSummaryBackend = null;
   gpuWeatherLevelData = null;
@@ -733,8 +750,26 @@ async function createGpuWeatherResidency(levelData) {
   const gl = gpuWeatherGl();
   if (!gl) throw new Error('MapLibre WebGL2 context is unavailable.');
   let previousTemporalDestroyTimings = null;
-  if (gpuWeatherLevelData !== levelData) {
+  if (!gpuWeatherProviderResidency
+    || gpuWeatherProviderResidency.gl !== gl
+    || gpuWeatherProviderResidency.metadata.generation_id !== activeWeatherField.generationId) {
     previousTemporalDestroyTimings = gpuWeatherTileReconstructor?.destroy() || null;
+    gpuWeatherTileReconstructor = null;
+    gpuWeatherProviderResidency?.release();
+    gpuWeatherProviderResidency = await GpuWeatherProviderResidency.create({
+      metadataUrl: ACTIVE_REAL_WEATHER_METADATA_URL,
+      generationId: activeWeatherField.generationId,
+      sequence: activeWeatherField,
+      gl
+    });
+    gpuWeatherL13ChunkStats.providerResidencyCreationCount += 1;
+    runtimeDiagnostics?.recordEvent('gpu-weather-provider-residency-created', {
+      providerResidency: gpuWeatherLifecycleIdentity(gpuWeatherProviderResidency, 'provider-residency'),
+      generationId: activeWeatherField.generationId
+    });
+  }
+  if (gpuWeatherLevelData !== levelData) {
+    previousTemporalDestroyTimings = previousTemporalDestroyTimings || gpuWeatherTileReconstructor?.destroy() || null;
     gpuWeatherTileReconstructor = null;
     destroyGpuPhysicalSummaryBackend(gpuPhysicalSummaryBackend, 'replace-gpu-weather-level-data');
     gpuPhysicalSummaryBackend = null;
@@ -751,7 +786,7 @@ async function createGpuWeatherResidency(levelData) {
       sequence: activeWeatherField,
       procedural: true,
       gl,
-      sharedTileCache: gpuWeatherSharedTileCache
+      provider: gpuWeatherProviderResidency
     });
   }
   const reconstructorCreationMs = hadReconstructor ? 0 : performance.now() - reconstructorStarted;
@@ -1047,11 +1082,7 @@ function gpuWeatherGrowthWindow(activeWindow, targetWindow) {
 }
 
 function trimGpuWeatherTileCache(keepTileIds = []) {
-  const generation = activeWeatherField?.generationId;
-  const keep = new Set(keepTileIds.map((id) => `${generation}|${id}`));
-  for (const key of gpuWeatherSharedTileCache.entries.keys()) if (!keep.has(key)) {
-    gpuWeatherSharedTileCache.entries.delete(key);
-  }
+  gpuWeatherProviderResidency?.trimPayloadCache?.(keepTileIds);
 }
 
 function gpuWeatherPendingIsCurrent(pending) {
@@ -1117,6 +1148,7 @@ function prepareGpuWeatherSpatialState(pending) {
   pending.summaryBackend = summaryBackend;
   pending.summaryConstructionMs = summaryConstructionMs;
   const reconstructorStarted = performance.now();
+  if (!gpuWeatherProviderResidency) throw new Error('GPU weather provider residency is unavailable for target preparation.');
   return GpuTemporalTileReconstructor.create({
     metadataUrl: ACTIVE_REAL_WEATHER_METADATA_URL,
     generationId: activeWeatherField.generationId,
@@ -1124,7 +1156,7 @@ function prepareGpuWeatherSpatialState(pending) {
     sequence: activeWeatherField,
     procedural: true,
     gl: gpuWeatherGl(),
-    sharedTileCache: gpuWeatherSharedTileCache
+    provider: gpuWeatherProviderResidency
   }).then(async (reconstructor) => {
     const reconstructorCreationMs = performance.now() - reconstructorStarted;
     pending.reconstructor = reconstructor;
@@ -1257,6 +1289,8 @@ function gpuWeatherPresentationSourceOwnership(source) {
     topology: gpuWeatherLifecycleIdentity(source?.topology, 'topology'),
     levelData: gpuWeatherLifecycleIdentity(source?.levelData, 'level-data'),
     reconstructor: gpuWeatherLifecycleIdentity(source?.reconstructor, 'reconstructor'),
+    reconstructionTarget: gpuWeatherLifecycleIdentity(source?.reconstructor, 'reconstruction-target'),
+    providerResidency: gpuWeatherLifecycleIdentity(source?.reconstructor?.provider, 'provider-residency'),
     reconstructorLive: source?.reconstructor ? Boolean(source.reconstructor.layout) : null,
     summaryBackend: gpuWeatherLifecycleIdentity(source?.summaryBackend, 'summary-backend'),
     summaryBackendLive: source?.summaryBackend ? source.summaryBackend.destroyed !== true : null,
@@ -1916,6 +1950,15 @@ function synchronizeGpuWeatherPresentationForRender() {
 
 function gpuWeatherDiagnostics() {
   const tile = gpuWeatherTileReconstructor?.diagnostics() || null;
+  const provider = gpuWeatherProviderResidency?.diagnostics() || {
+    active: false,
+    providerRevisionId: null,
+    providerOwnerCount: 0,
+    providerGpuRainBytes: 0,
+    providerGpuMotionBytes: 0,
+    providerLookupInfoGpuBytes: 0,
+    totalProviderGpuBytes: 0
+  };
   const pendingSpatial = gpuWeatherPendingSpatial;
   const pendingLevelData = pendingSpatial?.levelData || null;
   const pendingStateInvariantError = pendingSpatial && !pendingLevelData
@@ -2027,6 +2070,11 @@ function gpuWeatherDiagnostics() {
       cameraMoveTopologyRebuildCount: gpuWeatherL13ChunkStats.cameraMoveTopologyRebuildCount,
       cameraMoveReconstructorRebuildCount: gpuWeatherL13ChunkStats.cameraMoveReconstructorRebuildCount,
       cameraMoveDirectPhysicalReconstructionCount: gpuWeatherL13ChunkStats.cameraMoveDirectPhysicalReconstructionCount,
+      cameraMoveProviderResidencyRebuildCount: gpuWeatherL13ChunkStats.cameraMoveProviderResidencyRebuildCount,
+      cameraMoveProviderResidencyUploadCount: gpuWeatherL13ChunkStats.cameraMoveProviderResidencyUploadCount,
+      providerResidencyCreationCount: gpuWeatherL13ChunkStats.providerResidencyCreationCount,
+      providerResidencyIdentity: fixedChunkResource.providerResidency,
+      reconstructionTargetIdentity: fixedChunkResource.target,
       currentTemporalPair: gpuWeatherKeyframes ? {
         a: gpuWeatherKeyframes.a?.index ?? null,
         b: gpuWeatherKeyframes.b?.index ?? null
@@ -2080,6 +2128,16 @@ function gpuWeatherDiagnostics() {
       byteEstimate: gpuWeatherTileReconstructor.width * gpuWeatherTileReconstructor.height * 2,
       workingSetByteEstimate: gpuWeatherTileReconstructor.width * gpuWeatherTileReconstructor.height * 4
     } : null,
+    providerResidency: {
+      identity: gpuWeatherLifecycleIdentity(gpuWeatherProviderResidency, 'provider-residency'),
+      ...provider
+    },
+    targetMemory: {
+      identity: gpuWeatherLifecycleIdentity(gpuWeatherTileReconstructor, 'reconstruction-target'),
+      physicalABBytes: tile?.targetPhysicalOutputBytes || 0,
+      auxiliaryBytes: tile?.targetAuxiliaryGpuBytes || 0,
+      totalTargetBytes: tile?.totalTargetGpuBytes || 0
+    },
     reconstruction: gpuWeatherTileReconstructor ? {
       drawCount: tile.gpu.drawCount,
       latestGpuPassMs: tile.gpu.latestPassMs,
@@ -2098,11 +2156,18 @@ function gpuWeatherDiagnostics() {
       retainedPresentationLevels,
       directPhysicalReconstructionLevel: tile?.active ? gpuWeatherTileReconstructor.levelData?.level ?? null : null,
       retainedSummaryLevels,
-      temporalProviderResidencyCount: gpuWeatherTileReconstructor ? 1 : 0,
+      temporalProviderResidencyCount: provider.active ? 1 : 0,
       directPhysicalReconstructionTargetCount: gpuWeatherTileReconstructor ? 1 : 0,
       rendererKeyframeSlots: gpuWeatherKeyframes ? 2 : 0,
       directPhysicalKeyframeGpuBytes: tile?.physicalKeyframeWorkingSetByteEstimate || 0,
       summaryKeyframeGpuBytes: physicalSummaryDiagnostics.persistentGpuSummaryBytes || 0,
+      providerGpuRainBytes: provider.providerGpuRainBytes || 0,
+      providerGpuMotionBytes: provider.providerGpuMotionBytes || 0,
+      providerLookupInfoGpuBytes: provider.providerLookupInfoGpuBytes || 0,
+      totalProviderGpuBytes: provider.totalProviderGpuBytes || 0,
+      targetPhysicalABBytes: tile?.targetPhysicalOutputBytes || 0,
+      targetAuxiliaryGpuBytes: tile?.targetAuxiliaryGpuBytes || 0,
+      totalTargetGpuBytes: tile?.totalTargetGpuBytes || 0,
       presentationSourcesBorrowOwnerTextures: true
     },
     presentation: {
@@ -2773,7 +2838,8 @@ function installGpuMotionExperiment() {
             metadataUrl: ACTIVE_REAL_WEATHER_METADATA_URL,
             generationId: activeWeatherField.generationId,
             geometry,
-            sequence: activeWeatherField
+            sequence: activeWeatherField,
+            sharedTileCache: gpuMotionSharedTileCache
           });
         }
         await gpuMotionTileReconstructor.ensureResident();

@@ -610,19 +610,50 @@ boundary: both renderers retire any abandoned CPU transition state before the
 first source-only GPU publication, so a coherent source cannot be rejected by
 stale CPU transition metadata.
 
-`?diagnostics=1` exposes this split under `gpuWeather.workingSet`: stable active
+The provider/input and reconstruction-target ownership split is explicit in
+`gpu-weather-provider-residency.js` and
+`gpu-temporal-tile-reconstruction.js`. `GpuWeatherProviderResidency` validates
+the immutable temporal-tile contract, coordinates generation/tile payload
+fetches, owns the rain and motion `TEXTURE_2D_ARRAY` atlases, provider tile
+info/motion-info textures, stable tile-to-slot assignments, upload accounting,
+and provider cleanup. It publishes an immutable provider revision; a target
+retains a revision handle, so its slot mapping cannot change underneath it.
+The app retains one explicit creator reference, while each reconstruction
+target retains its own provider reference and revision handle. Provider
+revisions are replaced transactionally when a different required tile set is
+prepared; an old revision remains only while an existing target still retains
+it. There is no historical provider-residency cache.
+
+`GpuTemporalTileReconstructor` remains the compatibility-facing API, but is
+now a reconstruction target/executor. It owns the target level descriptor and
+canonical coordinate contract, target-specific tile-grid or legacy tile-index
+indirection, physical R16F A/B outputs and framebuffers, validation target,
+shader execution, target timers, and target diagnostics. The procedural
+`u_tileGrid` is target-local and stores slots from the retained provider
+revision, which keeps it correct if a provider revision later represents a
+union of provider tiles. Presentation sources borrow target outputs and do
+not own WebGL resources. Target destruction releases only target resources and
+its provider handle; provider textures remain valid while the app or another
+target retains the provider. Final provider release unbinds and deletes each
+provider texture exactly once. The fixed-L13 experiment still has one provider
+residency, one reconstruction target, and one renderer chunk; multi-chunk
+selection, eviction, and prefetch are not implemented.
+
+`?diagnostics=1` exposes this split under `gpuWeather.workingSet` and
+`gpuWeather.providerResidency`/`gpuWeather.targetMemory`: stable active
 LOD, renderer-published presentation LOD, transition-ready presentation levels,
 direct physical reconstruction level, retained summary levels, one temporal
-provider/reconstruction residency, and the two renderer keyframe slots. The
-keyframe diagnostics also list the retained endpoint levels, while
+provider residency, one reconstruction target, provider rain/motion/lookup
+bytes, target physical A/B and auxiliary bytes, and the two renderer keyframe
+slots. The keyframe diagnostics also list the retained endpoint levels, while
 `gpuWeather.lodTransition` reports GPU/CPU ownership, endpoint levels,
 fine-grid Dots domain, completeness, progress, and draw counts. An A/B rollover
 can therefore be checked against the same pair rather than inferred from the
 published endpoint alone.
 
 Stable GPU L10-L14 spatial residency has one explicit active/pending contract. The
-active state owns one canonical window/topology, its compatible provider-tile
-atlas, one direct L13 physical A/B reconstruction residency, the bounded
+active state owns one canonical window/topology, one retained provider
+revision, one direct L13 physical A/B reconstruction target, the bounded
 summary A/B chain needed by its endpoint set, and the renderer-published source
 pair. Camera movement
 updates the latest pending window without clearing or retagging that active
@@ -633,8 +664,9 @@ interval. Targets contained by the pending window coalesce without another
 load. When the pending reconstructor has every required temporal tile and both
 physical and required summary keyframes, both renderers are preflighted against
 its topology and level descriptor and the complete new committed state is
-published synchronously; the old source and atlas remain owned by ACTIVE until
-that publication, and obsolete resources are released only afterward.
+published synchronously; the old source, target, and provider revision remain
+owned by ACTIVE until that publication, and obsolete resources are released
+only afterward.
 Superseded loads cannot be
 published and clean up after their asynchronous fetch completes. The existing
 two-sided spatial shrink rule still replaces a grossly oversized retained
@@ -652,12 +684,15 @@ the predecessor. Diagnostics retain a bounded lifecycle trace (creation,
 supersession, completion, publication, invalidation, and disposal) so a strict
 committed-source invariant failure includes the mutations leading to it.
 
-Provider tile payloads are shared by generation and provider-tile identity
-across active and pending reconstructors. Overlapping spatial replacements
-reuse resident payloads and request only newly required tiles; the cache is
-trimmed to the committed bounded working set after replacement and stale-load
-cleanup. Metadata is likewise cached per immutable generation, so small
-window replacement does not refetch unchanged generation metadata.
+Provider tile payloads are coordinated by the single provider residency owner
+and shared by generation and provider-tile identity across active and pending
+targets. Overlapping spatial replacements reuse resident payloads and request
+only newly required tiles; the provider-owned payload cache is trimmed to the
+committed bounded working set after replacement and stale-load cleanup.
+Metadata is likewise cached per immutable generation, so small-window
+replacement does not refetch unchanged generation metadata. A stale provider
+load cannot publish a revision after a newer request or final provider
+destruction, and stale target creation releases only target/transient state.
 
 Timeline readiness is backend-aware. In stable GPU L10-L14, the timeline is
 ready when the committed spatial working set has all required temporal provider
