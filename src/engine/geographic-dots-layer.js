@@ -665,6 +665,144 @@ void main() {
   };
 }
 
+function makeGpuWeatherLodTransitionProgram(gl, shaderData, strong) {
+  const vertexSource = `${GPU_DOTS_RAIN_MAPPING_SHADER}
+in vec2 a_vertex;
+out vec2 v_local;
+uniform sampler2D u_from_weather_a;
+uniform sampler2D u_from_weather_b;
+uniform sampler2D u_from_coverage_a;
+uniform sampler2D u_from_coverage_b;
+uniform sampler2D u_to_weather_a;
+uniform sampler2D u_to_weather_b;
+uniform sampler2D u_to_coverage_a;
+uniform sampler2D u_to_coverage_b;
+uniform float u_weather_progress;
+uniform float u_lod_progress;
+uniform int u_from_kind;
+uniform int u_to_kind;
+uniform int u_from_is_fine;
+uniform int u_to_is_fine;
+uniform int u_from_width;
+uniform int u_from_height;
+uniform int u_from_min_i;
+uniform int u_from_min_j;
+uniform int u_to_width;
+uniform int u_to_height;
+uniform int u_to_min_i;
+uniform int u_to_min_j;
+uniform int u_fine_min_i;
+uniform int u_fine_min_j;
+uniform int u_fine_width;
+uniform float u_fine_spacing;
+uniform float u_from_spacing;
+uniform float u_to_spacing;
+vec4 decodeWeather(vec4 values, vec2 coverage, int kind) {
+  if (kind == 0) return vec4(values.r, 1.0, values.r, step(2.5, values.r));
+  float totalWeight = values.b;
+  float wetMean = coverage.x > 0.0 ? values.r / coverage.x : 0.0;
+  float wetCoverage = totalWeight > 0.0 ? coverage.x / totalWeight : 0.0;
+  float strongCoverage = totalWeight > 0.0 ? coverage.y / totalWeight : 0.0;
+  return vec4(wetMean, wetCoverage, values.g, strongCoverage);
+}
+vec4 fromRecord(ivec2 coordinate, bool second) {
+  return decodeWeather(
+    second ? texelFetch(u_from_weather_b, coordinate, 0) : texelFetch(u_from_weather_a, coordinate, 0),
+    second ? texelFetch(u_from_coverage_b, coordinate, 0).rg : texelFetch(u_from_coverage_a, coordinate, 0).rg,
+    u_from_kind
+  );
+}
+vec4 toRecord(ivec2 coordinate, bool second) {
+  return decodeWeather(
+    second ? texelFetch(u_to_weather_b, coordinate, 0) : texelFetch(u_to_weather_a, coordinate, 0),
+    second ? texelFetch(u_to_coverage_b, coordinate, 0).rg : texelFetch(u_to_coverage_a, coordinate, 0).rg,
+    u_to_kind
+  );
+}
+bool sourceCoordinate(ivec2 fineCoordinate, int isFine, int width, int height, int minI, int minJ, out ivec2 coordinate) {
+  if (isFine != 0) coordinate = fineCoordinate - ivec2(minI, minJ);
+  else {
+    if ((fineCoordinate.x & 1) != 0 || (fineCoordinate.y & 1) != 0) return false;
+    coordinate = ivec2(fineCoordinate.x / 2 - minI, fineCoordinate.y / 2 - minJ);
+  }
+  return coordinate.x >= 0 && coordinate.x < width && coordinate.y >= 0 && coordinate.y < height;
+}
+vec4 endpointFrom(ivec2 fineCoordinate, bool second) {
+  ivec2 coordinate;
+  return sourceCoordinate(fineCoordinate, u_from_is_fine, u_from_width, u_from_height, u_from_min_i, u_from_min_j, coordinate)
+    ? mix(fromRecord(coordinate, false), fromRecord(coordinate, true), u_weather_progress)
+    : vec4(0.0);
+}
+vec4 endpointTo(ivec2 fineCoordinate, bool second) {
+  ivec2 coordinate;
+  return sourceCoordinate(fineCoordinate, u_to_is_fine, u_to_width, u_to_height, u_to_min_i, u_to_min_j, coordinate)
+    ? mix(toRecord(coordinate, false), toRecord(coordinate, true), u_weather_progress)
+    : vec4(0.0);
+}
+float endpointRadius(vec4 weather, int kind, float spacing) {
+  return spacing * ${strong
+    ? '(kind == 0 ? dotsStrongRadiusFraction(weather.z) : sqrt(max(weather.w, 0.0)) * dotsStrongRadiusFraction(weather.z))'
+    : 'sqrt(max(weather.y, 0.0)) * rainRadiusFraction(weather.x)'};
+}
+void main() {
+  int sampleIndex = gl_InstanceID;
+  int column = sampleIndex % u_fine_width;
+  int row = sampleIndex / u_fine_width;
+  ivec2 fineCoordinate = ivec2(u_fine_min_i + column, u_fine_min_j + row);
+  float fromRadius = endpointRadius(endpointFrom(fineCoordinate, false), u_from_kind, u_from_spacing);
+  float toRadius = endpointRadius(endpointTo(fineCoordinate, false), u_to_kind, u_to_spacing);
+  float radius = sqrt(mix(fromRadius * fromRadius, toRadius * toRadius, u_lod_progress));
+  v_local = a_vertex;
+  gl_Position = projectTile(vec2(fineCoordinate) * u_fine_spacing + a_vertex * radius);
+}`;
+  const fragmentSource = `in vec2 v_local;
+uniform vec4 u_color;
+out vec4 fragColor;
+void main() {
+  float distanceToCenter = length(v_local);
+  float edge = fwidth(distanceToCenter);
+  float alpha = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distanceToCenter);
+  fragColor = vec4(u_color.rgb, u_color.a * alpha);
+}`;
+  const program = createGpuWeatherProgram(gl, shaderData, vertexSource, fragmentSource, 'GPU Dots LOD transition');
+  return {
+    program,
+    locations: {
+      vertex: gl.getAttribLocation(program, 'a_vertex'),
+      fromWeatherA: gl.getUniformLocation(program, 'u_from_weather_a'),
+      fromWeatherB: gl.getUniformLocation(program, 'u_from_weather_b'),
+      fromCoverageA: gl.getUniformLocation(program, 'u_from_coverage_a'),
+      fromCoverageB: gl.getUniformLocation(program, 'u_from_coverage_b'),
+      toWeatherA: gl.getUniformLocation(program, 'u_to_weather_a'),
+      toWeatherB: gl.getUniformLocation(program, 'u_to_weather_b'),
+      toCoverageA: gl.getUniformLocation(program, 'u_to_coverage_a'),
+      toCoverageB: gl.getUniformLocation(program, 'u_to_coverage_b'),
+      weatherProgress: gl.getUniformLocation(program, 'u_weather_progress'),
+      lodProgress: gl.getUniformLocation(program, 'u_lod_progress'),
+      fromKind: gl.getUniformLocation(program, 'u_from_kind'),
+      toKind: gl.getUniformLocation(program, 'u_to_kind'),
+      fromIsFine: gl.getUniformLocation(program, 'u_from_is_fine'),
+      toIsFine: gl.getUniformLocation(program, 'u_to_is_fine'),
+      fromWidth: gl.getUniformLocation(program, 'u_from_width'),
+      fromHeight: gl.getUniformLocation(program, 'u_from_height'),
+      fromMinI: gl.getUniformLocation(program, 'u_from_min_i'),
+      fromMinJ: gl.getUniformLocation(program, 'u_from_min_j'),
+      toWidth: gl.getUniformLocation(program, 'u_to_width'),
+      toHeight: gl.getUniformLocation(program, 'u_to_height'),
+      toMinI: gl.getUniformLocation(program, 'u_to_min_i'),
+      toMinJ: gl.getUniformLocation(program, 'u_to_min_j'),
+      fineMinI: gl.getUniformLocation(program, 'u_fine_min_i'),
+      fineMinJ: gl.getUniformLocation(program, 'u_fine_min_j'),
+      fineWidth: gl.getUniformLocation(program, 'u_fine_width'),
+      fineSpacing: gl.getUniformLocation(program, 'u_fine_spacing'),
+      fromSpacing: gl.getUniformLocation(program, 'u_from_spacing'),
+      toSpacing: gl.getUniformLocation(program, 'u_to_spacing'),
+      color: gl.getUniformLocation(program, 'u_color'),
+      ...gpuWeatherProjectionLocations(gl, program)
+    }
+  };
+}
+
 function isHierarchicalTransition(fromLevel, toLevel, legacyHierarchicalLodMorph = false) {
   return legacyHierarchicalLodMorph
     && Math.abs(fromLevel - toLevel) === 1
@@ -691,6 +829,7 @@ export class GeographicDotsLayer {
     this.temporalProgress = 0;
     this.gpuWeatherMode = false;
     this.gpuWeatherSource = null;
+    this.gpuWeatherTransition = null;
     this.gpuWeatherPresentationEnabled = true;
     this.gpuWeatherRenderSynchronizer = null;
     this.gpuPresentationTiming = createGpuPresentationTiming();
@@ -725,6 +864,7 @@ export class GeographicDotsLayer {
   setTopology(topology, options = {}) {
     const previousTopology = this.topology;
     const preserveGpuWeatherSource = options.preserveGpuWeatherSource === true;
+    if (previousTopology !== topology && !canonicalWindowsEqual(previousTopology?.canonicalWindow, topology?.canonicalWindow)) this.gpuWeatherTransition = null;
     if (this.gpuWeatherSource && previousTopology !== topology && !preserveGpuWeatherSource) this.gpuWeatherSource = null;
     const canPreserve = options.preserveCompatibleState !== false
       && previousTopology
@@ -783,6 +923,7 @@ export class GeographicDotsLayer {
     if (this.gpuWeatherMode === next) return;
     this.gpuWeatherMode = next;
     this.gpuWeatherSource = null;
+    this.gpuWeatherTransition = null;
     this.temporal = null;
     if (next) {
       this.instances = { rain: new Float32Array(), strong: new Float32Array(), storm: new Float32Array(), hail: new Float32Array() };
@@ -808,6 +949,28 @@ export class GeographicDotsLayer {
     if (requestRepaint) this.map?.triggerRepaint();
   }
 
+  setGpuWeatherTransition(transition, { requestRepaint = true } = {}) {
+    if (!this.gpuWeatherMode) throw new Error('Cannot install a GPU LOD transition while GPU weather mode is inactive.');
+    if (!transition?.fromSource || !transition?.toSource || !transition.fineLevelData) {
+      throw new Error('GPU LOD transition requires both endpoint sources and a fine level domain.');
+    }
+    const topology = transition.topology || this.topology;
+    if (!this.isGpuWeatherSourceCompatible(transition.fromSource, {
+      topology, levelData: transition.fromSource.levelData, allowTransition: true
+    }) || !this.isGpuWeatherSourceCompatible(transition.toSource, {
+      topology, levelData: transition.toSource.levelData, allowTransition: true
+    })) throw new Error('GPU LOD transition endpoint source is incompatible with the active topology.');
+    this.gpuWeatherTransition = { ...transition, progress: transition.progress ?? 0 };
+    this.transition = null;
+    this.temporal = null;
+    if (requestRepaint) this.map?.triggerRepaint();
+  }
+
+  clearGpuWeatherTransition({ requestRepaint = true } = {}) {
+    this.gpuWeatherTransition = null;
+    if (requestRepaint) this.map?.triggerRepaint();
+  }
+
   setGpuWeatherCommittedState(topology, levelData, source, time) {
     if (!this.gpuWeatherMode) throw new Error('Cannot commit GPU weather state while GPU weather mode is inactive.');
     if (!this.isGpuWeatherSourceCompatible(source, { topology, levelData, allowTransition: true })) {
@@ -815,6 +978,7 @@ export class GeographicDotsLayer {
     }
     this.setTopology(topology, { preserveCompatibleState: false, preserveGpuWeatherSource: true });
     this.setLevelData(levelData, time, { preserveGpuWeatherSource: true });
+    this.gpuWeatherTransition = null;
     this.gpuWeatherSource = source;
     this.map?.triggerRepaint();
   }
@@ -843,6 +1007,7 @@ export class GeographicDotsLayer {
   }
 
   activeLevels() {
+    if (this.gpuWeatherTransition) return [this.gpuWeatherTransition.fromSource.levelData.level, this.gpuWeatherTransition.toSource.levelData.level];
     if (this.transition) return [this.transition.fromLevelData.level, this.transition.toLevelData.level];
     return this.levelData ? [this.levelData.level] : [];
   }
@@ -1154,7 +1319,17 @@ export class GeographicDotsLayer {
           ? this.gpuWeatherSource.width * this.gpuWeatherSource.height * (this.gpuWeatherSource.kind === 'summary' ? 12 : 2)
           : 0,
         mappedCpuBytes: this.gpuWeatherSource ? 0 : temporalBreakdown.mappedPresentationBytes,
-        mappedBufferUploads: this.gpuWeatherSource ? 0 : null
+        mappedBufferUploads: this.gpuWeatherSource ? 0 : null,
+        transitionOwner: this.gpuWeatherTransition ? 'gpu' : null,
+        transition: this.gpuWeatherTransition ? {
+          fromLevel: this.gpuWeatherTransition.fromSource.levelData.level,
+          toLevel: this.gpuWeatherTransition.toSource.levelData.level,
+          progress: this.gpuWeatherTransition.progress,
+          fineGridLevel: this.gpuWeatherTransition.fineLevelData.level,
+          fromSourceComplete: Boolean(this.gpuWeatherTransition.fromSource.textureA && this.gpuWeatherTransition.fromSource.textureB),
+          toSourceComplete: Boolean(this.gpuWeatherTransition.toSource.textureA && this.gpuWeatherTransition.toSource.textureB),
+          drawCallCount: 2
+        } : null
       },
       gpuPresentationTiming: this.gpuPresentationTiming.diagnostics(this.map?.painter?.context?.gl),
       lifecycle: { ...this.lifecycleDiagnostics }
@@ -1176,7 +1351,9 @@ export class GeographicDotsLayer {
     if (!programs) {
       programs = {
         rain: makeGpuWeatherProgram(gl, shaderData, false),
-        strong: makeGpuWeatherProgram(gl, shaderData, true)
+        strong: makeGpuWeatherProgram(gl, shaderData, true),
+        transitionRain: makeGpuWeatherLodTransitionProgram(gl, shaderData, false),
+        transitionStrong: makeGpuWeatherLodTransitionProgram(gl, shaderData, true)
       };
       this.programs.set(key, programs);
     }
@@ -1185,6 +1362,10 @@ export class GeographicDotsLayer {
 
   renderGpuWeather(gl, shaderData, projection) {
     this.gpuWeatherRenderSynchronizer?.();
+    if (this.gpuWeatherTransition) {
+      this.renderGpuWeatherLodTransition(gl, shaderData, projection);
+      return;
+    }
     const source = this.gpuWeatherSource;
     const levelData = this.levelData;
     if (!source || !levelData || !isGpuWeatherLevel(levelData.level)) return;
@@ -1235,6 +1416,55 @@ export class GeographicDotsLayer {
     this.gpuPresentationTiming.end(gl, query, startedAt);
   }
 
+  renderGpuWeatherLodTransition(gl, shaderData, projection) {
+    const transition = this.gpuWeatherTransition;
+    const fine = transition?.fineLevelData;
+    if (!transition || !fine || !this.gpuWeatherPresentationEnabled) return;
+    const startedAt = performance.now();
+    const query = this.gpuPresentationTiming.begin(gl);
+    const programs = this.gpuProgramsFor(gl, shaderData);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(-1, -1);
+    for (const type of ['rain', 'strong']) {
+      const entry = programs[type === 'rain' ? 'transitionRain' : 'transitionStrong'];
+      const { locations } = entry;
+      const from = transition.fromSource;
+      const to = transition.toSource;
+      gl.useProgram(entry.program);
+      setGeographicProjection(gl, locations, projection);
+      for (const [location, unit] of [[locations.fromWeatherA, 0], [locations.fromWeatherB, 1], [locations.fromCoverageA, 2], [locations.fromCoverageB, 3], [locations.toWeatherA, 4], [locations.toWeatherB, 5], [locations.toCoverageA, 6], [locations.toCoverageB, 7]]) gl.uniform1i(location, unit);
+      gl.uniform1f(locations.weatherProgress, from.progress ?? 0);
+      gl.uniform1f(locations.lodProgress, transition.progress ?? 0);
+      gl.uniform1i(locations.fromKind, from.kind === 'summary' ? 1 : 0);
+      gl.uniform1i(locations.toKind, to.kind === 'summary' ? 1 : 0);
+      gl.uniform1i(locations.fromIsFine, from.levelData.level === fine.level ? 1 : 0);
+      gl.uniform1i(locations.toIsFine, to.levelData.level === fine.level ? 1 : 0);
+      for (const [location, value] of [
+        [locations.fromWidth, from.levelData.width], [locations.fromHeight, from.levelData.height], [locations.fromMinI, from.levelData.minI], [locations.fromMinJ, from.levelData.minJ],
+        [locations.toWidth, to.levelData.width], [locations.toHeight, to.levelData.height], [locations.toMinI, to.levelData.minI], [locations.toMinJ, to.levelData.minJ],
+        [locations.fineMinI, fine.minI], [locations.fineMinJ, fine.minJ], [locations.fineWidth, fine.width]
+      ]) gl.uniform1i(location, value);
+      gl.uniform1f(locations.fineSpacing, fine.spacing);
+      gl.uniform1f(locations.fromSpacing, from.levelData.spacing);
+      gl.uniform1f(locations.toSpacing, to.levelData.spacing);
+      gl.uniform4fv(locations.color, COLORS[type]);
+      const textures = [from.textureA, from.textureB, from.coverageTextureA || from.textureA, from.coverageTextureB || from.textureB, to.textureA, to.textureB, to.coverageTextureA || to.textureA, to.coverageTextureB || to.textureB];
+      textures.forEach((texture, index) => { gl.activeTexture(gl.TEXTURE0 + index); gl.bindTexture(gl.TEXTURE_2D, texture); });
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffers[type]);
+      gl.enableVertexAttribArray(locations.vertex);
+      gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, fine.count);
+    }
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.depthMask(true);
+    this.lifecycleDiagnostics.gpuWeatherPresentationDrawCalls += 2;
+    this.gpuPresentationTiming.end(gl, query, startedAt);
+  }
+
   renderInstances(gl, entry, projection, types) {
     const { program, locations } = entry;
     gl.useProgram(program);
@@ -1277,7 +1507,7 @@ export class GeographicDotsLayer {
 
   render(gl, args) {
     if (!this.active) return;
-    if (this.gpuWeatherMode && !this.transition && isGpuWeatherLevel(this.levelData?.level) && this.gpuWeatherSource) {
+    if (this.gpuWeatherMode && !this.transition && isGpuWeatherLevel(this.levelData?.level) && (this.gpuWeatherSource || this.gpuWeatherTransition)) {
       this.renderGpuWeather(gl, args.shaderData, args.defaultProjectionData);
       return;
     }

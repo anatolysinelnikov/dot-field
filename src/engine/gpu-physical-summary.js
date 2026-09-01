@@ -358,6 +358,23 @@ function restorePassState(gl, state) {
   gl.pixelStorei(gl.PACK_SKIP_ROWS, state.packSkipRows);
 }
 
+// Backend textures are also used by the application-owned presentation
+// sources. Delete them only after removing this backend's bindings from every
+// texture unit; otherwise a later pass-state restore can retain a reference
+// to a deleted WebGLTexture and bind it again.
+function deleteOwnedTexture(gl, texture) {
+  if (!texture) return;
+  const activeTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+  const unitCount = Math.max(1, gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS) || 1);
+  for (let unit = 0; unit < unitCount; unit++) {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    if (gl.getParameter(gl.TEXTURE_BINDING_2D) === texture) gl.bindTexture(gl.TEXTURE_2D, null);
+    if (gl.getParameter(gl.TEXTURE_BINDING_2D_ARRAY) === texture) gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+  }
+  gl.activeTexture(activeTexture);
+  gl.deleteTexture(texture);
+}
+
 export function validateReverseCenteredRelation(fineLevel, coarseLevel) {
   const relation = buildCenteredContributionRelation(fineLevel, coarseLevel);
   const reverse = reverseRelation(fineLevel, coarseLevel, relation);
@@ -393,6 +410,8 @@ export class GpuPhysicalSummaryBackend {
     fail(topology?.levels?.has?.(WEATHER_REFERENCE_LEVEL), 'direct L13 level data is required.');
     this.gl = gl;
     this.topology = topology;
+    this.destroyed = false;
+    const constructionStarted = globalThis.performance?.now?.() ?? Date.now();
     this.levels = [...maximumLevels].filter((level) => topology.levels.has(level));
     fail(this.levels.length > 0 && this.levels.every((level) => GPU_PHYSICAL_SUMMARY_LEVELS.includes(level)), 'requested GPU summary levels are unavailable.');
     fail(this.levels.every((level, index) => level === GPU_PHYSICAL_SUMMARY_LEVELS[index]), 'GPU summary levels must be ordered from coarse to fine.');
@@ -448,6 +467,7 @@ export class GpuPhysicalSummaryBackend {
     } finally {
       restorePassState(gl, constructionState);
     }
+    this.constructionMs = (globalThis.performance?.now?.() ?? Date.now()) - constructionStarted;
     this.readbackTexture = null;
     this.readbackFramebuffer = null;
   }
@@ -557,7 +577,7 @@ export class GpuPhysicalSummaryBackend {
   ensureReadbackTarget(width, height) {
     const gl = this.gl;
     if (this.readbackTexture && this.readbackWidth === width && this.readbackHeight === height) return;
-    if (this.readbackTexture) gl.deleteTexture(this.readbackTexture);
+    if (this.readbackTexture) deleteOwnedTexture(gl, this.readbackTexture);
     if (this.readbackFramebuffer) gl.deleteFramebuffer(this.readbackFramebuffer);
     const state = capturePassState(gl, [0]);
     try {
@@ -702,6 +722,7 @@ export class GpuPhysicalSummaryBackend {
       relationUploadCount: this.relationUploadCount,
       cpuSummaryBytesAvoidedByGpuCalculation: cpuSummaryBytesPerKeyframe * 2,
       lastUpdateMs: this.lastUpdateMs,
+      constructionMs: this.constructionMs,
       lastGpuPassMs: this.lastGpuPassMs,
       pendingTimerQueries: this.pendingTimerQueries.length,
       passOwnership: this.lastPassOwnership,
@@ -711,19 +732,23 @@ export class GpuPhysicalSummaryBackend {
   }
 
   destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
     const gl = this.gl;
+    for (const { query } of this.pendingTimerQueries) gl.deleteQuery(query);
+    this.pendingTimerQueries = [];
     for (const relation of this.relations.values()) {
-      gl.deleteTexture(relation.indexTexture);
-      gl.deleteTexture(relation.weightTexture);
+      deleteOwnedTexture(gl, relation.indexTexture);
+      deleteOwnedTexture(gl, relation.weightTexture);
     }
     for (const output of this.outputs.values()) for (const slot of output.slots) {
-      gl.deleteTexture(slot.values);
-      gl.deleteTexture(slot.coverage);
+      deleteOwnedTexture(gl, slot.values);
+      deleteOwnedTexture(gl, slot.coverage);
       gl.deleteFramebuffer(slot.framebuffer);
     }
-    gl.deleteTexture(this.dummyValues);
-    gl.deleteTexture(this.dummyCoverage);
-    gl.deleteTexture(this.readbackTexture);
+    deleteOwnedTexture(gl, this.dummyValues);
+    deleteOwnedTexture(gl, this.dummyCoverage);
+    deleteOwnedTexture(gl, this.readbackTexture);
     gl.deleteFramebuffer(this.readbackFramebuffer);
     gl.deleteProgram(this.program);
     gl.deleteProgram(this.copyProgram);

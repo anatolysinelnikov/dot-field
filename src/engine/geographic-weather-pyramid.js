@@ -855,7 +855,7 @@ export class GeographicWeatherPyramid {
     if (canonicalWindowsEqual(this.topology.canonicalWindow, nextWindow) && lodRangesEqual(this.topology.levelRange, nextRange)) return false;
     const sameWindow = canonicalWindowsEqual(this.topology.canonicalWindow, nextWindow);
     this.setTopology(new GeographicLodTopology(nextWindow, nextRange, sameWindow ? this.topology : null, {
-      deferTransitionParents: options.deferL14TransitionParents
+      deferTransitionParents: options.deferTransitionParents ?? options.deferL14TransitionParents
     }), {
       preserveCompatibleState: sameWindow
     });

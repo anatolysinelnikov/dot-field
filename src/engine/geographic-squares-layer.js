@@ -334,6 +334,7 @@ export class GeographicSquaresLayer {
     this.temporalProgress = 0;
     this.gpuWeatherMode = false;
     this.gpuWeatherSource = null;
+    this.gpuWeatherTransition = null;
     this.gpuWeatherPresentationEnabled = true;
     this.gpuWeatherRenderSynchronizer = null;
     this.gpuPresentationTiming = createGpuPresentationTiming();
@@ -369,6 +370,7 @@ export class GeographicSquaresLayer {
     if (this.weatherPyramid.topology !== topology) throw new Error('Squares topology must be the shared weather-pyramid topology.');
     const previousTopology = this.topology;
     const preserveGpuWeatherSource = options.preserveGpuWeatherSource === true;
+    if (previousTopology !== topology && !canonicalWindowsEqual(previousTopology?.canonicalWindow, topology?.canonicalWindow)) this.gpuWeatherTransition = null;
     if (this.gpuWeatherSource && previousTopology !== topology && !preserveGpuWeatherSource) this.gpuWeatherSource = null;
     const canPreserve = options.preserveCompatibleState !== false
       && previousTopology
@@ -433,6 +435,7 @@ export class GeographicSquaresLayer {
     if (this.gpuWeatherMode === next) return;
     this.gpuWeatherMode = next;
     this.gpuWeatherSource = null;
+    this.gpuWeatherTransition = null;
     this.temporal = null;
     if (next) {
       this.instanceData = [new Float32Array(), new Float32Array()];
@@ -458,6 +461,26 @@ export class GeographicSquaresLayer {
     if (requestRepaint) this.map?.triggerRepaint();
   }
 
+  setGpuWeatherTransition(transition, { requestRepaint = true } = {}) {
+    if (!this.gpuWeatherMode) throw new Error('Cannot install a GPU LOD transition while GPU weather mode is inactive.');
+    if (!transition?.fromSource || !transition?.toSource) throw new Error('GPU LOD transition requires both endpoint sources.');
+    const topology = transition.topology || this.topology;
+    if (!this.isGpuWeatherSourceCompatible(transition.fromSource, {
+      topology, levelData: transition.fromSource.levelData, allowTransition: true
+    }) || !this.isGpuWeatherSourceCompatible(transition.toSource, {
+      topology, levelData: transition.toSource.levelData, allowTransition: true
+    })) throw new Error('GPU LOD transition endpoint source is incompatible with the active topology.');
+    this.gpuWeatherTransition = { ...transition, progress: transition.progress ?? 0 };
+    this.transition = null;
+    this.temporal = null;
+    if (requestRepaint) this.map?.triggerRepaint();
+  }
+
+  clearGpuWeatherTransition({ requestRepaint = true } = {}) {
+    this.gpuWeatherTransition = null;
+    if (requestRepaint) this.map?.triggerRepaint();
+  }
+
   setGpuWeatherCommittedState(topology, levelData, source, time) {
     if (!this.gpuWeatherMode) throw new Error('Cannot commit GPU weather state while GPU weather mode is inactive.');
     if (!this.isGpuWeatherSourceCompatible(source, { topology, levelData, allowTransition: true })) {
@@ -465,6 +488,7 @@ export class GeographicSquaresLayer {
     }
     this.setTopology(topology, { preserveCompatibleState: false, preserveGpuWeatherSource: true });
     this.setLevelData(levelData, time, { preserveGpuWeatherSource: true });
+    this.gpuWeatherTransition = null;
     this.gpuWeatherSource = source;
     this.map?.triggerRepaint();
   }
@@ -498,6 +522,7 @@ export class GeographicSquaresLayer {
   }
 
   activeLevels() {
+    if (this.gpuWeatherTransition) return [this.gpuWeatherTransition.fromSource.levelData.level, this.gpuWeatherTransition.toSource.levelData.level];
     if (this.transition) return [this.transition.fromLevelData.level, this.transition.toLevelData.level];
     return this.levelData ? [this.levelData.level] : [];
   }
@@ -727,6 +752,10 @@ export class GeographicSquaresLayer {
 
   renderGpuWeather(gl, shaderData, projection) {
     this.gpuWeatherRenderSynchronizer?.();
+    if (this.gpuWeatherTransition) {
+      this.renderGpuWeatherTransition(gl, shaderData, projection);
+      return;
+    }
     const source = this.gpuWeatherSource;
     const levelData = this.levelData;
     if (!source || !levelData || !isGpuWeatherLevel(levelData.level)) return;
@@ -770,6 +799,49 @@ export class GeographicSquaresLayer {
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.depthMask(true);
     this.lifecycleDiagnostics.gpuWeatherPresentationDrawCalls++;
+    this.gpuPresentationTiming.end(gl, query, startedAt);
+  }
+
+  renderGpuWeatherTransition(gl, shaderData, projection) {
+    const transition = this.gpuWeatherTransition;
+    if (!transition || !this.gpuWeatherPresentationEnabled) return;
+    const startedAt = performance.now();
+    const query = this.gpuPresentationTiming.begin(gl);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(-1, -1);
+    const entry = this.gpuProgramFor(gl, shaderData);
+    const { locations } = entry;
+    for (const [source, opacity] of [[transition.fromSource, 1 - (transition.progress ?? 0)], [transition.toSource, transition.progress ?? 0]]) {
+      const levelData = source.levelData;
+      gl.useProgram(entry.program);
+      setGeographicProjection(gl, locations, projection);
+      gl.uniform1i(locations.weatherA, 0);
+      gl.uniform1i(locations.weatherB, 1);
+      gl.uniform1i(locations.coverageA, 2);
+      gl.uniform1i(locations.coverageB, 3);
+      gl.uniform1f(locations.weatherProgress, source.progress ?? 0);
+      gl.uniform1i(locations.weatherKind, source.kind === 'summary' ? 1 : 0);
+      gl.uniform1i(locations.width, levelData.width);
+      gl.uniform1i(locations.minI, levelData.minI);
+      gl.uniform1i(locations.minJ, levelData.minJ);
+      gl.uniform1f(locations.spacing, levelData.spacing);
+      gl.uniform1f(locations.opacity, opacity);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, source.textureA);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, source.textureB);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, source.coverageTextureA || source.textureA);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, source.coverageTextureB || source.textureB);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+      gl.enableVertexAttribArray(locations.vertex);
+      gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, levelData.count);
+    }
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.depthMask(true);
+    this.lifecycleDiagnostics.gpuWeatherPresentationDrawCalls += 2;
     this.gpuPresentationTiming.end(gl, query, startedAt);
   }
 
@@ -856,7 +928,16 @@ export class GeographicSquaresLayer {
           ? this.gpuWeatherSource.width * this.gpuWeatherSource.height * (this.gpuWeatherSource.kind === 'summary' ? 12 : 2)
           : 0,
         mappedCpuBytes: this.gpuWeatherSource ? 0 : temporalStateBytes(this.temporal),
-        mappedBufferUploads: this.gpuWeatherSource ? 0 : null
+        mappedBufferUploads: this.gpuWeatherSource ? 0 : null,
+        transitionOwner: this.gpuWeatherTransition ? 'gpu' : null,
+        transition: this.gpuWeatherTransition ? {
+          fromLevel: this.gpuWeatherTransition.fromSource.levelData.level,
+          toLevel: this.gpuWeatherTransition.toSource.levelData.level,
+          progress: this.gpuWeatherTransition.progress,
+          fromSourceComplete: Boolean(this.gpuWeatherTransition.fromSource.textureA && this.gpuWeatherTransition.fromSource.textureB),
+          toSourceComplete: Boolean(this.gpuWeatherTransition.toSource.textureA && this.gpuWeatherTransition.toSource.textureB),
+          drawCallCount: 2
+        } : null
       },
       gpuPresentationTiming: this.gpuPresentationTiming.diagnostics(this.map?.painter?.context?.gl),
       lifecycle: { ...this.lifecycleDiagnostics }
@@ -865,7 +946,7 @@ export class GeographicSquaresLayer {
 
   render(gl, args) {
     if (!this.active) return;
-    if (this.gpuWeatherMode && !this.transition && isGpuWeatherLevel(this.levelData?.level) && this.gpuWeatherSource) {
+    if (this.gpuWeatherMode && !this.transition && isGpuWeatherLevel(this.levelData?.level) && (this.gpuWeatherSource || this.gpuWeatherTransition)) {
       this.renderGpuWeather(gl, args.shaderData, args.defaultProjectionData);
       return;
     }

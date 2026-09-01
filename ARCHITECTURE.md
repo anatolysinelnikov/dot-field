@@ -535,12 +535,13 @@ existing 100 ms renderer-keyframe pair changes, not on every playback RAF;
 sequential playback reuses the prior B field while reconstructing only the new
 C field. Arbitrary timeline jumps reconstruct only missing members of the
 two-field working set. The renderers do not read the fields back to the CPU,
-rebuild canonical geometry, or duplicate temporal reconstruction. LOD
-transitions use the CPU reference path, with an explicit diagnostics fallback
-reason. Production GPU Weather LOD transitions remain on this CPU fallback path
-pending the later GPU transition lifecycle task. Stable L10-L14 GPU state now
-retains a bounded adjacent-transition presentation working set, but only the
-stable endpoint is published to the renderers. A stable L10-L14 viewport
+rebuild canonical geometry, or duplicate temporal reconstruction. Default
+stationary adjacent L10-L13 transitions remain GPU-owned: their endpoint
+presentation records borrow the retained textures, while L13↔L14 and
+`?lodMorph=hierarchical` retain the CPU reference path with an explicit
+diagnostics fallback reason. Stable L10-L14 GPU state now retains a bounded
+adjacent-transition presentation working set; during an eligible morph both
+endpoint sources are published to the discrete renderers. A stable L10-L14 viewport
 change creates a pending spatial state;
 the committed topology, physical fields, and tile residency remain active until
 the replacement is complete. The experiment has no generic GPU LOD pyramid;
@@ -574,9 +575,9 @@ relations, never from a renderer-specific or L14-derived representation.
 Stable L10-L14 CPU weather summaries, mapped arrays, and instance state are
 released after GPU activation; topology, relations, and temporary transition
 state remain for the legacy morphs. When a stable GPU window changes,
-the CPU pyramid still builds the requested topology descriptors and may defer
-its L14 transition-parent relation; that legacy relation is built lazily if a
-later L13↔L14 morph needs it. Stable provider sampling geometry and temporal CPU
+the CPU pyramid still builds the requested topology descriptors and defers
+visual transition-parent relations; a legacy hierarchical morph builds the
+needed relation lazily. Stable provider sampling geometry and temporal CPU
 geometry are not retained for stable GPU ownership. For a stable GPU→CPU
 transition, the last valid GPU field stays visible while the
 current renderer source pair is
@@ -594,23 +595,27 @@ source; the stable spatial replacement path instead preflights both renderers
 and uses their committed-state operation to install the complete topology, level
 descriptor, and source together. Thus a stable source is visible only after
 both renderers have the same synchronized topology/window and stable-level
-descriptor. Only the stable endpoint is published in this task: L10-L12 use
-their summary texture and RG16F coverage pair, and L13-L14 use their direct
-R16F pair. The retained endpoint records borrow textures owned by the current
-physical reconstructor and summary backend; they are discarded before that
-owner is released. Leaving a stable GPU level first hands control back to the
-CPU transition path, and returning establishes the new descriptor before
-publishing the next physical or summary A/B pair. This lifecycle guard is
-intentionally temporary alongside the legacy transition state; L10-L12
-aggregation remains CPU-owned only while a transition is active.
+descriptor. Stable sources use L10-L12 summary textures and RG16F coverage
+pairs, and L13-L14 direct R16F pairs. During a supported L10-L13 morph both
+endpoint records are published to the renderers; they borrow textures owned
+by the current physical reconstructor and summary backend; they are discarded before that
+owner is released. Destruction first removes owned textures from every texture
+unit binding, preserving unrelated MapLibre state and preventing later pass-state
+restoration from rebinding deleted objects; pending GPU timer queries are retired
+with the backend. Unsupported boundaries or failed preflight hand control
+back to the CPU transition path. A successful GPU promotion establishes the
+new descriptor and bounded summary range before publishing the next stable
+physical or summary A/B pair.
 
 `?diagnostics=1` exposes this split under `gpuWeather.workingSet`: stable active
 LOD, renderer-published presentation LOD, transition-ready presentation levels,
 direct physical reconstruction level, retained summary levels, one temporal
 provider/reconstruction residency, and the two renderer keyframe slots. The
-keyframe diagnostics also list the retained endpoint levels, so an A/B rollover
-can be checked against the same pair rather than inferred from the published
-endpoint alone.
+keyframe diagnostics also list the retained endpoint levels, while
+`gpuWeather.lodTransition` reports GPU/CPU ownership, endpoint levels,
+fine-grid Dots domain, completeness, progress, and draw counts. An A/B rollover
+can therefore be checked against the same pair rather than inferred from the
+published endpoint alone.
 
 Stable GPU L10-L14 spatial residency has one explicit active/pending contract. The
 active state owns one canonical window/topology, its compatible provider-tile
@@ -678,6 +683,15 @@ average. Total weight retains the edge normalization denominator. The summary
 contains no colors, radii, opacity, or symbol state. Storm/hail channels remain
 in the generic CPU summary and hazard path; the current GPU temporal asset is
 explicitly rain-only and does not fabricate those phenomena.
+
+For a supported GPU-native LOD morph, each Dots endpoint applies its own
+stable physical/summary presentation mapping first, then interpolates the
+resulting radii by squared area on the fine-grid domain. Shared samples keep
+their exact canonical centers and fine-only samples grow or shrink at their
+own centers; no relation texture or CPU transition instance array is used.
+Squares draw the from and to endpoint sources in the existing order at
+opacities `1-p` and `p`. Both renderers share the same temporal A/B owner pair
+through the morph, including rollover and direction reversal.
 
 The verified CPU order is direct temporal physical reconstruction at L13,
 Float32 summary storage, centered weighted aggregation to L12, then recursively
@@ -835,11 +849,14 @@ retains its explicit L15-capable topology and summary algorithms. Logical
 sampling zoom is application-owned and latitude-corrected for Globe camera behavior. An explicit
 active window is represented by inclusive L15 integer bounds, snapped outward
 to the coarsest L10 interval. A topology also has an explicit contiguous LOD
-range; it builds only the requested levels and only the transition parents,
-compact direct adjacent-transition relations, and compact centered aggregate
-relations whose endpoints exist. Stable GPU L14 window replacement may defer
-the legacy L13→L14 transition-parent array; `transitionParentsFor(14)` builds
-that same deterministic relation on demand for the later CPU transition.
+range; it builds only the requested levels, compact direct adjacent-transition
+relations, and compact centered aggregate relations whose endpoints exist.
+Visual transition-parent CSR relations are optional and can be deferred as a
+group; `transitionParentsFor(fineLevel)` builds the requested deterministic
+relation on demand. The normal GPU stationary application path defers these
+visual relations because its procedural Dots and dual-grid Squares transitions
+do not consume them. Legacy hierarchical Dots and other CPU callers retain the
+same relation contract and pay the cost only when requested.
 When lower levels are requested, the complete L13→L12→L11→L10 dependency chain
 is required; missing levels fail clearly. Thus panning and rotating do not
 alter displayed weather density or sample identity, while low display LODs do
@@ -973,8 +990,9 @@ state: it does not multiply summaries, temporal keyframes, packed instances,
 or renderer-specific copies by frame count. The current LOD materialization
 ranges remain `L10..L13` for stable L10/L11, `L11..L13` for stable L12,
 `L12..L14` for stable L13, and `L13..L14` for stable L14; stable direct levels
-remain procedural in presentation and the visual semantics are unchanged; L10–L12 aggregation and
-all LOD transitions remain temporary CPU paths.
+remain procedural in presentation and the visual semantics are unchanged. GPU
+LOD promotion normalizes this bounded range using compatible level identities and
+resident direct L13 textures; it does not recreate the temporal reconstructor.
 Immutable-generation cleanup/GC remains unrelated to this browser
 source-residency policy.
 
@@ -1038,14 +1056,15 @@ releases legacy instance capacity because its shaders do not consume instance
 buffers. A range-only topology replacement
 does not by itself release compatible active renderer state; canonical-window
 replacement remains the explicit invalidation boundary.
-Within an active Dots or Squares renderer, temporal state is owned per LOD
+Within an active CPU Dots or Squares renderer, temporal state is owned per LOD
 level: a stable renderer retains the current level's frame 0/frame 1 summary
 and mapped state, while a transition retains those states for both `fromLevel`
-and `toLevel`. Starting an adjacent transition preserves the prepared source
-and evaluates/maps only a missing destination level. Completion promotes the
-prepared destination state without reevaluating it; reversal swaps transition
-ownership and reuses both level states. When the temporal frame advances, each
-active level promotes its previous next frame and prepares only its missing
+and `toLevel`. GPU-owned L10-L13 transitions instead retain only shared GPU
+endpoint records and the direct temporal A/B textures; they do not materialize
+CPU weather or instance state. Completion promotes the prepared GPU target
+source, and reversal swaps endpoint ownership and reuses both resources. When
+the temporal frame advances, the GPU path promotes its previous next texture
+slot and prepares only the missing direct L13 slot; the CPU path prepares only its missing
 future frame.
 
 ## Dots — `src/engine/geographic-dots-layer.js`
@@ -1095,22 +1114,23 @@ non-rectangular providers retain their appropriate dense fallback.
 
 The custom MapLibre layer draws instanced Mercator-space circles, storm stars,
 and hail hexagons with MapLibre's `projectTile` projection path. Its 0.2 s LOD
-transitions use the direct adjacent relation for every adjacent display
-transition from L10 through L14. Shared nested-grid samples remain at their
-canonical positions and finer-level-only samples grow or shrink in place; zoom
+transitions use the direct adjacent relation for the CPU path, while default
+stationary GPU Weather uses a procedural arithmetic relation for L10↔L11,
+L11↔L12, and L12↔L13. GPU Dots always renders on the fine-grid domain:
+shared nested-grid samples remain at their canonical positions and finer-level-
+only samples grow or shrink in place by squared-radius interpolation; zoom
 changes visible density and presentation, not sample position. The former
 deterministic parent/child morph remains available only as the development
 reference mode via `?lodMorph=hierarchical` for transitions through L13;
 L13↔L14 continues to use the direct relation in that mode. The engine retains
 the direct L14↔L15 relation for explicit future configurations. Temporal weather
 interpolation remains independent of LOD progress.
-Dots retain the stable same-level temporal/mapped state for a source LOD while
-a transition builds the required pair representation; promoting a destination
-therefore only performs the unavoidable same-level instance pass. A subsequent
-same-window stable-range replacement retains the promoted temporal/mapped state
-and compatible packed instances, so it does not reevaluate the destination.
-Reversals reuse physical and mapped states and rebuild only the
-direction-specific pair instance representation.
+GPU transitions retain the stable direct L13 A/B residency and borrow both
+endpoint presentation records; promotion swaps the target source and
+normalizes the bounded summary range from those resident direct textures.
+Reversals swap endpoint ownership and complementary progress without provider
+reconstruction. CPU transitions retain the existing mapped/instance behavior
+when GPU ownership is unavailable.
 Rain glyph radii use the shared monotonic physical anchor transfer in squared
 radius/visual area; the light-blue base saturates at 0.86 spacing near 10 mm/h,
 while the nested Dots-only strong-blue overlay starts visually at 1.6 mm/h and
@@ -1121,7 +1141,9 @@ This fixed presentation setting does not affect other renderers.
 
 Squares use the same active globally anchored L10–L14 Mercator topology and
 shared physical summaries as Dots, but map them into square color and opacity.
-Squares LOD semantics are unchanged.
+Squares LOD semantics are unchanged: its GPU path draws the endpoint grids in
+from→to order at opacity `1-p` and `p`, while its CPU path retains the existing
+dual-grid instance crossfade.
 The canonical topology and renderer algorithms remain capable of explicit L15
 evaluation, but the normal application path stops at L14.
 Mapped arrays retain canonical indexing, while sequence summaries pack only

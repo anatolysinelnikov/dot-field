@@ -460,7 +460,7 @@ export class GeographicLodTopology {
     this.transitionParents = new Map();
     const transitionStarted = now();
     for (let level = this.levelRange.minLevel + 1; level <= this.levelRange.maxLevel; level++) {
-      if (this.deferTransitionParents && level === MAX_DISPLAY_GRID_LEVEL) continue;
+      if (this.deferTransitionParents) continue;
       const reusable = sameWindow && reuseFrom.transitionParents.get(level);
       if (reusable && reuseFrom.levels.get(level) === this.levels.get(level)
         && reuseFrom.levels.get(level - 1) === this.levels.get(level - 1)) {
@@ -497,7 +497,7 @@ export class GeographicLodTopology {
 
   transitionParentsFor(fineLevel) {
     let parents = this.transitionParents.get(fineLevel);
-    if (!parents && fineLevel === MAX_DISPLAY_GRID_LEVEL && this.levels.has(fineLevel) && this.levels.has(fineLevel - 1)) {
+    if (!parents && this.levels.has(fineLevel) && this.levels.has(fineLevel - 1)) {
       const started = now();
       parents = buildTransitionParents(this.levels.get(fineLevel), this.levels.get(fineLevel - 1));
       this.transitionParents.set(fineLevel, parents);

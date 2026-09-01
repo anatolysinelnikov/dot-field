@@ -8,7 +8,8 @@ import {
 } from './precipitation-mapping.js';
 
 // Stable GPU weather covers the direct physical levels and the validated
-// recursive physical-summary levels. LOD morphs still use the CPU path.
+// recursive physical-summary levels. Default stationary adjacent L10-L13
+// morphs use the bounded endpoint records retained by that stable state.
 export const GPU_WEATHER_LEVELS = Object.freeze([10, 11, 12, 13, 14]);
 // Bounded endpoint set for the future GPU-owned stationary LOD transition.
 // This is intentionally not a generic GPU LOD pyramid.
@@ -24,6 +25,38 @@ export function gpuWeatherTransitionReadyPresentationLevels(level) {
 }
 export function isGpuWeatherLevel(level) {
   return GPU_WEATHER_LEVELS.includes(level);
+}
+
+export function isGpuWeatherLodTransitionPairSupported(fromLevel, toLevel) {
+  return Number.isInteger(fromLevel) && Number.isInteger(toLevel)
+    && Math.abs(fromLevel - toLevel) === 1
+    && Math.min(fromLevel, toLevel) >= 10
+    && Math.max(fromLevel, toLevel) <= 13;
+}
+
+// This is the arithmetic used by the GPU Dots transition shader. Keeping the
+// verifier/reference helper next to the shader contract makes the global-grid
+// parity and clipped-window rules explicit without allocating a relation
+// texture or requiring a renderer-side pair list.
+export function adjacentCoarseIndexForFineSample(fine, coarse, fineIndex) {
+  const column = fineIndex % fine.width;
+  const row = Math.floor(fineIndex / fine.width);
+  const globalI = fine.minI + column;
+  const globalJ = fine.minJ + row;
+  if ((globalI & 1) !== 0 || (globalJ & 1) !== 0) return -1;
+  const coarseColumn = globalI / 2 - coarse.minI;
+  const coarseRow = globalJ / 2 - coarse.minJ;
+  if (coarseColumn < 0 || coarseColumn >= coarse.width || coarseRow < 0 || coarseRow >= coarse.height) return -1;
+  return coarseRow * coarse.width + coarseColumn;
+}
+
+export function gpuDotsTransitionRadius(fromRadius, toRadius, progress) {
+  return Math.sqrt(fromRadius * fromRadius
+    + (toRadius * toRadius - fromRadius * fromRadius) * progress);
+}
+
+export function gpuSquaresTransitionOpacities(progress) {
+  return { from: 1 - progress, to: progress };
 }
 
 function number(value) {
