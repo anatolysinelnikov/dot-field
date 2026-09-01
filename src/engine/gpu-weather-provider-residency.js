@@ -90,6 +90,11 @@ function validateMetadata(metadata) {
 }
 
 function revisionKey(required) { return required.join(','); }
+function tileIdOrder(left, right) {
+  const [leftX, leftY] = left.split(',').map(Number);
+  const [rightX, rightY] = right.split(',').map(Number);
+  return leftY - rightY || leftX - rightX;
+}
 function revisionBytes(revision, metadata) {
   return {
     rain: revision.rainW * revision.rainH * metadata.time.count * 2,
@@ -178,6 +183,12 @@ export class GpuWeatherProviderResidency {
       ids.add(`${Math.floor(point[0] / 128)},${Math.floor(point[1] / 128)}`);
     }
     return [...ids];
+  }
+
+  requiredTileUnion(tileIdSets) {
+    const union = new Set();
+    for (const ids of tileIdSets || []) for (const id of ids || []) union.add(id);
+    return [...union].sort(tileIdOrder);
   }
 
   async loadTilePayload(tile) {
@@ -401,6 +412,32 @@ export class GpuWeatherProviderResidency {
       }
     };
     return handle;
+  }
+
+  retainPreparedRevision(providerRevision, requiredTileIds = []) {
+    fail(providerRevision?.provider === this, 'prepared provider revision belongs to another provider residency.');
+    fail(providerRevision?.revision && providerRevision.provider.gl === this.gl, 'prepared provider revision belongs to another WebGL context.');
+    const revision = providerRevision.revision;
+    fail(revision && !revision.destroyed && this.revisions.has(revision), 'prepared provider revision is not live.');
+    const required = [...requiredTileIds];
+    // IDs outside the provider metadata are the existing safely-omitted
+    // world-edge tiles. Only provider-owned tiles are required in a union
+    // revision; the target shader already treats omitted slots as dry.
+    for (const tileId of required) {
+      if (this.tiles.has(tileId)) fail(revision.slots.has(tileId), `prepared provider revision is missing required tile ${tileId}.`);
+    }
+    return this.retainRevision(revision);
+  }
+
+  discardPreparedRevision(providerRevision) {
+    if (!providerRevision || providerRevision.provider !== this || providerRevision.released) return false;
+    const revision = providerRevision.revision;
+    if (this.currentRevision === revision) {
+      this.currentRevision = null;
+      revision.refs = Math.max(0, revision.refs - 1);
+      if (revision.refs === 0) this.destroyRevision(revision);
+    }
+    return providerRevision.release();
   }
 
   releaseRevision(revision) {

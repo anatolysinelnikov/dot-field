@@ -620,9 +620,10 @@ function makeProgram(gl, shaderData, kind) {
   };
 }
 
-function makeGpuWeatherProgram(gl, shaderData, strong) {
+function makeGpuWeatherProgram(gl, shaderData, strong, { multiChunk = false } = {}) {
   const vertexSource = `${GPU_WEATHER_COMMON_VERTEX}
 ${GPU_DOTS_RAIN_MAPPING_SHADER}
+${multiChunk ? 'uniform ivec4 u_owner_bounds;' : ''}
 out vec2 v_local;
 void main() {
   int sampleIndex;
@@ -630,6 +631,7 @@ void main() {
   float radius = u_spacing * ${strong
     ? '(u_weather_kind == 0 ? dotsStrongRadiusFraction(weather.z) : sqrt(max(weather.w, 0.0)) * dotsStrongRadiusFraction(weather.z))'
     : 'sqrt(max(weather.y, 0.0)) * rainRadiusFraction(weather.x)'};
+  ${multiChunk ? 'int ownerColumn = sampleIndex % u_width; int ownerRow = sampleIndex / u_width; ivec2 ownerCoordinate = ivec2(u_minI + ownerColumn, u_minJ + ownerRow); if (ownerCoordinate.x < u_owner_bounds.x || ownerCoordinate.x > u_owner_bounds.y || ownerCoordinate.y < u_owner_bounds.z || ownerCoordinate.y > u_owner_bounds.w) radius = 0.0;' : ''}
   v_local = a_vertex;
   gl_Position = projectTile(gpuWeatherCenter(sampleIndex) + a_vertex * radius);
 }`;
@@ -659,6 +661,7 @@ void main() {
       minJ: gl.getUniformLocation(program, 'u_minJ'),
       spacing: gl.getUniformLocation(program, 'u_spacing'),
       opacity: gl.getUniformLocation(program, 'u_opacity'),
+      ownerBounds: multiChunk ? gl.getUniformLocation(program, 'u_owner_bounds') : null,
       color: gl.getUniformLocation(program, 'u_color'),
       ...gpuWeatherProjectionLocations(gl, program)
     }
@@ -830,6 +833,7 @@ export class GeographicDotsLayer {
     this.temporalProgress = 0;
     this.gpuWeatherMode = false;
     this.gpuWeatherSource = null;
+    this.gpuWeatherMultiChunkSources = null;
     this.gpuWeatherTransition = null;
     this.gpuWeatherPresentationEnabled = true;
     this.gpuWeatherRenderSynchronizer = null;
@@ -924,6 +928,7 @@ export class GeographicDotsLayer {
     if (this.gpuWeatherMode === next) return;
     this.gpuWeatherMode = next;
     this.gpuWeatherSource = null;
+    this.gpuWeatherMultiChunkSources = null;
     this.gpuWeatherTransition = null;
     this.temporal = null;
     if (next) {
@@ -951,6 +956,41 @@ export class GeographicDotsLayer {
       throw new Error(`GPU weather source must match the active stable GPU topology (expected topology=${this.topology?.canonicalWindow ? JSON.stringify(this.topology.canonicalWindow) : 'none'}, levelData=${this.levelData?.level ?? 'none'}; actual topology=${source.topology?.canonicalWindow ? JSON.stringify(source.topology.canonicalWindow) : 'none'}, levelData=${source.levelData?.level ?? 'none'}).`);
     }
     this.gpuWeatherSource = source;
+    this.gpuWeatherMultiChunkSources = null;
+    if (requestRepaint) this.map?.triggerRepaint();
+  }
+
+  gpuWeatherMultiChunkSourceCompatibilityDetails(source, gl = this.map?.painter?.context?.gl) {
+    const failedPredicates = [];
+    if (!this.gpuWeatherMode) failedPredicates.push('gpu-weather-mode-inactive');
+    if (!source) failedPredicates.push('source-missing');
+    if (source?.gl && gl && source.gl !== gl) failedPredicates.push('webgl-context-mismatch');
+    if (source && source.presentationLevel !== REFERENCE_GRID_LEVEL) failedPredicates.push('not-direct-l13');
+    if (source && source.kind !== 'physical') failedPredicates.push('not-physical');
+    if (!source?.chunk?.key) failedPredicates.push('chunk-key-missing');
+    if (!source?.presentationOwnership) failedPredicates.push('presentation-ownership-missing');
+    if (!source?.textureA) failedPredicates.push('texture-a-missing');
+    if (!source?.textureB) failedPredicates.push('texture-b-missing');
+    if (!source?.reconstructor?.layout) failedPredicates.push('reconstructor-owner-not-live');
+    return { compatible: failedPredicates.length === 0, failedPredicates };
+  }
+
+  setGpuWeatherMultiChunkSources(sources, { requestRepaint = true } = {}) {
+    if (!this.gpuWeatherMode) throw new Error('Cannot install multi-chunk GPU weather while GPU weather mode is inactive.');
+    const next = [...(sources || [])];
+    const keys = new Set();
+    const pair = next[0] ? [next[0].temporalA, next[0].temporalB, next[0].progress] : null;
+    for (const source of next) {
+      const compatibility = this.gpuWeatherMultiChunkSourceCompatibilityDetails(source);
+      if (!compatibility.compatible) throw new Error(`GPU multi-chunk source rejected: ${compatibility.failedPredicates.join(', ')}.`);
+      if (keys.has(source.chunk.key)) throw new Error(`GPU multi-chunk source key is duplicated: ${source.chunk.key}.`);
+      keys.add(source.chunk.key);
+      if (pair && (source.temporalA !== pair[0] || source.temporalB !== pair[1] || source.progress !== pair[2])) {
+        throw new Error('GPU multi-chunk sources must share one renderer temporal pair and progress.');
+      }
+    }
+    this.gpuWeatherSource = null;
+    this.gpuWeatherMultiChunkSources = next;
     if (requestRepaint) this.map?.triggerRepaint();
   }
 
@@ -1365,17 +1405,24 @@ export class GeographicDotsLayer {
       estimatedGpuBufferBytes: gpuInstanceBytes + staticGpuBytes,
       gpuWeather: {
         enabled: this.gpuWeatherMode,
-        source: Boolean(this.gpuWeatherSource),
-        physicalField: this.gpuWeatherSource ? (this.gpuWeatherSource.kind === 'summary' ? 'gpu-physical-summary' : 'gpu-r16f') : null,
-        level: this.gpuWeatherSource?.levelData?.level ?? null,
-        sampleCount: this.gpuWeatherSource?.levelData?.count || 0,
-        drawCallCount: this.gpuWeatherMode && this.gpuWeatherSource ? 2 : 0,
+        source: Boolean(this.gpuWeatherSource || this.gpuWeatherMultiChunkSources?.length),
+        physicalField: this.gpuWeatherSource ? (this.gpuWeatherSource.kind === 'summary' ? 'gpu-physical-summary' : 'gpu-r16f')
+          : this.gpuWeatherMultiChunkSources?.length ? 'gpu-r16f-multi-chunk' : null,
+        level: this.gpuWeatherSource?.levelData?.level ?? (this.gpuWeatherMultiChunkSources?.length ? REFERENCE_GRID_LEVEL : null),
+        sampleCount: this.gpuWeatherSource?.levelData?.count
+          || this.gpuWeatherMultiChunkSources?.reduce((total, source) => total + source.levelData.count, 0) || 0,
+        drawCallCount: this.gpuWeatherMode && (this.gpuWeatherSource || this.gpuWeatherMultiChunkSources?.length)
+          ? (this.gpuWeatherMultiChunkSources?.length || 1) * 2 : 0,
         vertexCountPerDraw: 6,
         currentFieldBytes: this.gpuWeatherSource
           ? this.gpuWeatherSource.width * this.gpuWeatherSource.height * (this.gpuWeatherSource.kind === 'summary' ? 12 : 2)
-          : 0,
-        mappedCpuBytes: this.gpuWeatherSource ? 0 : temporalBreakdown.mappedPresentationBytes,
-        mappedBufferUploads: this.gpuWeatherSource ? 0 : null,
+          : this.gpuWeatherMultiChunkSources?.reduce((total, source) => total + source.width * source.height * 2, 0) || 0,
+        mappedCpuBytes: this.gpuWeatherSource || this.gpuWeatherMultiChunkSources?.length ? 0 : temporalBreakdown.mappedPresentationBytes,
+        mappedBufferUploads: this.gpuWeatherSource || this.gpuWeatherMultiChunkSources?.length ? 0 : null,
+        multiChunk: this.gpuWeatherMultiChunkSources ? {
+          count: this.gpuWeatherMultiChunkSources.length,
+          keys: this.gpuWeatherMultiChunkSources.map((source) => source.chunk.key)
+        } : null,
         transitionOwner: this.gpuWeatherTransition ? 'gpu' : null,
         transition: this.gpuWeatherTransition ? {
           fromLevel: this.gpuWeatherTransition.fromSource.levelData.level,
@@ -1410,6 +1457,19 @@ export class GeographicDotsLayer {
         strong: makeGpuWeatherProgram(gl, shaderData, true),
         transitionRain: makeGpuWeatherLodTransitionProgram(gl, shaderData, false),
         transitionStrong: makeGpuWeatherLodTransitionProgram(gl, shaderData, true)
+      };
+      this.programs.set(key, programs);
+    }
+    return programs;
+  }
+
+  gpuMultiChunkProgramsFor(gl, shaderData) {
+    const key = `gpu-multi:${shaderData.variantName}`;
+    let programs = this.programs.get(key);
+    if (!programs) {
+      programs = {
+        rain: makeGpuWeatherProgram(gl, shaderData, false, { multiChunk: true }),
+        strong: makeGpuWeatherProgram(gl, shaderData, true, { multiChunk: true })
       };
       this.programs.set(key, programs);
     }
@@ -1469,6 +1529,57 @@ export class GeographicDotsLayer {
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.depthMask(true);
     this.lifecycleDiagnostics.gpuWeatherPresentationDrawCalls += 2;
+    this.gpuPresentationTiming.end(gl, query, startedAt);
+  }
+
+  renderGpuWeatherMultiChunk(gl, shaderData, projection) {
+    const sources = this.gpuWeatherMultiChunkSources;
+    if (!sources?.length) return;
+    this.lifecycleDiagnostics.gpuWeatherRenderCalls++;
+    if (!this.gpuWeatherPresentationEnabled) return;
+    const startedAt = performance.now();
+    const query = this.gpuPresentationTiming.begin(gl);
+    const programs = this.gpuMultiChunkProgramsFor(gl, shaderData);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(-1, -1);
+    for (const type of ['rain', 'strong']) {
+      const entry = programs[type];
+      const { locations } = entry;
+      gl.useProgram(entry.program);
+      setGeographicProjection(gl, locations, projection);
+      gl.uniform1i(locations.weatherA, 0);
+      gl.uniform1i(locations.weatherB, 1);
+      gl.uniform1i(locations.coverageA, 2);
+      gl.uniform1i(locations.coverageB, 3);
+      gl.uniform1i(locations.weatherKind, 0);
+      gl.uniform1f(locations.opacity, 1);
+      gl.uniform4fv(locations.color, COLORS[type]);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffers[type]);
+      gl.enableVertexAttribArray(locations.vertex);
+      gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
+      for (const source of sources) {
+        const levelData = source.levelData;
+        const ownership = source.presentationOwnership;
+        gl.uniform1f(locations.weatherProgress, source.progress ?? 0);
+        gl.uniform1i(locations.width, levelData.width);
+        gl.uniform1i(locations.minI, levelData.minI);
+        gl.uniform1i(locations.minJ, levelData.minJ);
+        gl.uniform1f(locations.spacing, levelData.spacing);
+        gl.uniform4i(locations.ownerBounds, ownership.minI, ownership.maxI, ownership.minJ, ownership.maxJ);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, source.textureA);
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, source.textureB);
+        gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, source.textureA);
+        gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, source.textureB);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, levelData.count);
+      }
+    }
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.depthMask(true);
+    this.lifecycleDiagnostics.gpuWeatherPresentationDrawCalls += sources.length * 2;
     this.gpuPresentationTiming.end(gl, query, startedAt);
   }
 
@@ -1563,6 +1674,13 @@ export class GeographicDotsLayer {
 
   render(gl, args) {
     if (!this.active) return;
+    if (this.gpuWeatherMode && !this.transition && this.gpuWeatherMultiChunkSources?.length) {
+      this.renderDiagnostics?.enter();
+      this.gpuWeatherRenderSynchronizer?.();
+      this.renderGpuWeatherMultiChunk(gl, args.shaderData, args.defaultProjectionData);
+      this.renderDiagnostics?.exit();
+      return;
+    }
     if (this.gpuWeatherMode && !this.transition && isGpuWeatherLevel(this.levelData?.level) && (this.gpuWeatherSource || this.gpuWeatherTransition)) {
       this.renderDiagnostics?.enter();
       this.renderGpuWeather(gl, args.shaderData, args.defaultProjectionData);

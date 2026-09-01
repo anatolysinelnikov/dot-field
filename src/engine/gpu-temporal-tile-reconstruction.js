@@ -104,10 +104,13 @@ export class GpuTemporalTileReconstructor {
     const result = { bindingCleanupMs, textureDeletionMs, totalMs: timingNow() - started }; this.stats.latestResidencyDestroyMs = result.totalMs; return result;
   }
 
-  async ensureResident() {
+  async ensureResident({ providerRevision = null } = {}) {
     fail(!this.destroyed, 'target is destroyed.'); const required = this.required(); const generation = ++this.requestGeneration; const start = timingNow();
-    if (this.residentKey === required.join(',') && this.layout) { this.stats.latestSpatialAsyncWaitMs = 0; this.stats.latestSpatialSynchronousMs = 0; return this.diagnostics(); }
-    const revision = await this.provider.acquire(required);
+    const alreadyHasRequestedRevision = !providerRevision || this.providerRevision?.revisionId === providerRevision.revisionId;
+    if (this.residentKey === required.join(',') && this.layout && alreadyHasRequestedRevision) { this.stats.latestSpatialAsyncWaitMs = 0; this.stats.latestSpatialSynchronousMs = 0; return this.diagnostics(); }
+    const revision = providerRevision
+      ? this.provider.retainPreparedRevision(providerRevision, required)
+      : await this.provider.acquire(required);
     if (!revision || generation !== this.requestGeneration || this.destroyed) { if (revision) revision.release(); this.stats.staleLoads += 1; return null; }
     const afterAsyncWait = timingNow(); this.stats.latestSpatialAsyncWaitMs = afterAsyncWait - start; this.destroyTargetResidency(); this.providerRevision = revision;
     try {
@@ -117,6 +120,10 @@ export class GpuTemporalTileReconstructor {
       deleteOwnedTexture(this.gl, this.tileIndex); deleteOwnedTexture(this.gl, this.tileGrid); this.tileIndex = this.tileGrid = null; revision.release(); throw error;
     }
     this.layout = revision; this.residentKey = required.join(','); this.stats.latestSpatialSynchronousMs = timingNow() - afterAsyncWait; this.stats.latestResidencyPublicationMs = timingNow() - afterAsyncWait; return this.diagnostics();
+  }
+
+  installProviderRevision(providerRevision) {
+    return this.ensureResident({ providerRevision });
   }
 
   update(frame, { measureGpu = false, targetSlot = 0 } = {}) {

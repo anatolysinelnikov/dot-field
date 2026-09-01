@@ -646,17 +646,65 @@ union of provider tiles. Presentation sources borrow target outputs and do
 not own WebGL resources. Target destruction releases only target resources and
 its provider handle; provider textures remain valid while the app or another
 target retains the provider. Final provider release unbinds and deletes each
-provider texture exactly once. The fixed-L13 experiment still has one provider
-residency, one reconstruction target, and one renderer chunk; multi-chunk
-selection, eviction, and prefetch are not implemented.
+provider texture exactly once. The opt-in fixed-L13 Dots experiment uses one
+`GpuWeatherProviderResidency` for its complete selected chunk set. It computes
+the deterministic union of provider tile IDs required by all selected chunks,
+builds one immutable provider revision for that union, and installs a retained
+handle to that same revision into every reconstruction target. The revision
+therefore has one rain atlas, motion atlas, lookup mapping, and revision ID for
+the settled set; each target still owns its own target-local tile-grid
+indirection and physical R16F A/B outputs. This path intentionally does not
+add historical revision caching, eviction, or prefetch.
+
+The fixed-L13 chunk lattice is globally anchored. For the profiling extent
+`C = 64` L10 intervals, a chunk cell has span `C * L10 canonical interval`
+and the cell boundaries are integer multiples of that full span from the
+canonical origin. A chunk key is `(level = 13, chunkX, chunkY)`, serialized as
+`13/chunkX/chunkY`; it is independent of camera history and viewport center.
+The projection-aware visible Mercator envelope is converted to a canonical
+window, and every globally fixed cell intersecting that window is selected in
+deterministic row-major order. The selected set is visible/overscanned only:
+there is no one-ring prefetch, predictive loading, LRU, or background chunk
+retention policy in this experiment.
+
+Each chunk has a complete physical canonical L13 grid, including any shared
+boundary samples needed by reconstruction. Presentation uses deterministic
+half-open ownership: a chunk owns its minimum X/Y boundaries, a non-terminal
+maximum X/Y boundary belongs to the adjacent cell, and the terminal world edge
+remains owned by the final cell. The Dots multi-chunk presentation path draws
+one physical source per ready chunk while suppressing samples outside that
+source's presentation ownership bounds, so every canonical sample has exactly
+one renderer owner without changing or jittering its canonical coordinate.
+
+The multi-chunk working set has explicit ACTIVE and CANDIDATE ownership. A
+camera move that leaves the ordered chunk-key set unchanged updates selection
+diagnostics only and retains all provider, target, topology, output, and source
+resources. A changed set prepares all fixed chunk topologies and targets,
+builds the single provider union revision, reconstructs the current renderer
+A/B pair for every target, and creates every Dots source before publication.
+The complete candidate replaces ACTIVE atomically; only then are predecessor
+targets, sources, and revision handles released. A superseded generation can
+release only its own resources and cannot publish or invalidate ACTIVE.
+
+All selected chunks represent the same `geographicTemporalFrameAt()` A/B pair
+and progress. Progress-only updates change source interpolation without
+physical reconstruction. A pair rollover reconstructs the missing endpoint in
+each target (reusing the previous endpoint for sequential playback where
+possible); provider residency and provider upload state do not change for
+temporal-only updates. The multi-chunk source contract is Dots-only and direct
+L13-only. Leaving Dots or L13 suspends and releases this working set before the
+existing normal GPU/CPU path resumes; Squares and all normal non-chunk GPU
+paths retain their existing single-source contracts.
 
 `?diagnostics=1` exposes this split under `gpuWeather.workingSet` and
 `gpuWeather.providerResidency`/`gpuWeather.targetMemory`: stable active
 LOD, renderer-published presentation LOD, transition-ready presentation levels,
-direct physical reconstruction level, retained summary levels, one temporal
-provider residency, one reconstruction target, provider rain/motion/lookup
-bytes, target physical A/B and auxiliary bytes, and the two renderer keyframe
-slots. The keyframe diagnostics also list the retained endpoint levels, while
+direct physical reconstruction level, retained summary levels, provider
+residency identity and revision ID, selected and ready fixed-chunk keys,
+reconstruction target identities, aggregate target physical A/B bytes, chunk
+set changes/reuse/publication/supersession counters, and the synchronized
+renderer keyframe pair/progress. The keyframe diagnostics also list the
+retained endpoint levels, while
 `gpuWeather.lodTransition` reports GPU/CPU ownership, endpoint levels,
 fine-grid Dots domain, completeness, progress, and draw counts. An A/B rollover
 can therefore be checked against the same pair rather than inferred from the

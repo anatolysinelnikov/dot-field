@@ -68,4 +68,41 @@ staleProvider.destroy();
 check(await staleBuild === null, 'stale provider build must not publish after final destruction');
 check(staleGl.deleted.length === 0, 'stale empty build must not create provider textures after destruction');
 
+const multiMetadata = {
+  generation_id: 'multichunk-provider-test-generation',
+  time: { count: 2 },
+  spatial_grid: { width: 4, height: 4 },
+  motion: { interval_count: 1 },
+  temporal_tiles: {
+    contract_version: 'dot-field-temporal-tiles-v1',
+    tile_interior_source_nodes: 128,
+    rain_halo_source_nodes: 1,
+    tiles: ['0,0', '1,0'].map((id) => ({
+      id,
+      rain: { stored_width: 2, stored_height: 2, stored_x_start: 0, stored_y_start: 0, byte_length: 16 },
+      motion: { grid_width: 2, grid_height: 2, grid_x_start: 0, grid_y_start: 0, byte_length: 64 }
+    }))
+  }
+};
+const multiGl = new FakeGl();
+const multiProvider = new GpuWeatherProviderResidency(multiGl, '/metadata.json', multiMetadata, {});
+multiProvider.loadTilePayload = async () => ({ rain: new Uint16Array(8), motion: new Float32Array(16) });
+const union = multiProvider.requiredTileUnion([['1,0'], ['0,0', '1,0']]);
+check(union.join(',') === '0,0,1,0', 'multi-chunk provider requirements form one deterministic union');
+const unionHandle = await multiProvider.acquire(union);
+const targetARevision = multiProvider.retainPreparedRevision(unionHandle, ['0,0']);
+const targetBRevision = multiProvider.retainPreparedRevision(unionHandle, ['1,0']);
+check(multiProvider.diagnostics().providerRevisionCount === 1, 'multi-chunk union creates one live provider revision');
+check(targetARevision.revisionId === targetBRevision.revisionId, 'all chunk targets retain the same provider revision ID');
+check(targetARevision.rain === targetBRevision.rain && targetARevision.motion === targetBRevision.motion
+  && targetARevision.info === targetBRevision.info, 'all chunk targets share provider atlas and lookup textures');
+targetARevision.release();
+check(multiProvider.diagnostics().active, 'destroying one target revision handle preserves shared provider resources');
+targetBRevision.release();
+unionHandle.release();
+const multiDeletedBeforeFinalRelease = multiGl.deleted.length;
+multiProvider.release();
+check(multiGl.deleted.length > multiDeletedBeforeFinalRelease, 'final shared provider release destroys provider resources exactly once');
+check(multiProvider.diagnostics().providerRevisionCount === 0, 'final shared provider release removes the live union revision');
+
 console.log('GPU provider residency verification passed: explicit creator/target references, stable revision slot mapping, target-first cleanup, final provider cleanup, idempotent cleanup, and stale build rejection');
