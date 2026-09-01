@@ -475,6 +475,20 @@ for (const Layer of [GeographicDotsLayer, GeographicSquaresLayer]) {
 
   layer.setGpuWeatherMode(false);
   check(layer.gpuWeatherSource === null, `${Layer.name} clears source on GPU deactivation`);
+
+  // CPU-boundary orchestration first clears GPU ownership for both renderers.
+  // It must be possible to make that ownership mutation without entering a
+  // renderer-specific synchronous CPU rebuild that could interrupt the second
+  // renderer's handoff.
+  layer.setActive(true);
+  layer.setGpuWeatherMode(true);
+  layer.setLevelData(pyramid.levelDataFor(GPU_LEVEL), 0);
+  layer.setGpuWeatherSource(source(layer.topology, layer.levelData), { requestRepaint: false });
+  layer.rebuildTemporal = () => { throw new Error('test CPU rebuild failure'); };
+  let deferredDisableThrew = false;
+  try { layer.setGpuWeatherMode(false, 0, { rebuildCpu: false, requestRepaint: false }); } catch { deferredDisableThrew = true; }
+  check(!deferredDisableThrew && !layer.gpuWeatherMode && layer.gpuWeatherSource === null,
+    `${Layer.name} can clear GPU ownership before CPU rebuild work`);
 }
 
 // Stable L13 uses the same source/topology identity contract as L14.

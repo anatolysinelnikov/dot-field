@@ -5,8 +5,16 @@ const MAX_EVENTS = 320;
 const MAX_WEATHER_RESOURCES = 256;
 const MAX_RENDER_TIMESTAMPS = 360;
 const FRAME_WINDOW_MS = 5000;
+const FAILURE_WINDOW_MS = 90_000;
+const FAILURE_EVENT_TAIL = 24;
+const FAILURE_RESOURCE_NEAR_WINDOW_MS = 15_000;
 const SAMPLE_INTERVAL_MS = 1000;
 const FLUSH_INTERVAL_MS = 2000;
+const STALL_THRESHOLDS_MS = Object.freeze([100, 500, 2000]);
+const CALLBACK_EXCEPTION_NAME_LIMIT = 120;
+const CALLBACK_EXCEPTION_MESSAGE_LIMIT = 1000;
+const CALLBACK_EXCEPTION_STACK_LIMIT = 4000;
+const CALLBACK_EXCEPTION_VALUE_LIMIT = 500;
 
 const LIMITATIONS = Object.freeze({
   totalProcessMemory: 'Total Safari/WebContent process memory is unavailable from page JavaScript.',
@@ -171,6 +179,12 @@ function weatherResourceAggregate(resources) {
   };
 }
 
+function compactWeatherResourceAggregate(resources) {
+  const aggregate = weatherResourceAggregate(resources);
+  const { recentResources, ...compact } = aggregate;
+  return compact;
+}
+
 function createSessionMetadata(id, environment) {
   return {
     id,
@@ -206,7 +220,233 @@ function captureBrowserMemory() {
   };
 }
 
-export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvironment }) {
+function compactIdentity(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object') return value;
+  const result = {};
+  for (const key of ['id', 'key', 'generation', 'revision', 'owner', 'level', 'index', 'slot', 'type']) {
+    if (value[key] !== undefined && value[key] !== null) result[key] = value[key];
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+function compactWindow(value) {
+  if (!value || typeof value !== 'object') return null;
+  const result = {};
+  for (const key of ['level', 'minX', 'maxX', 'minY', 'maxY', 'width', 'height', 'count', 'sampleCount', 'area']) {
+    if (Number.isFinite(value[key])) result[key] = value[key];
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+export function compactPeriodicSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return {};
+  const state = snapshot.state || {};
+  const camera = snapshot.camera || {};
+  const lod = snapshot.lod || {};
+  const canonicalWindow = snapshot.canonicalWindow || {};
+  const source = snapshot.source || {};
+  const gpuWeather = snapshot.gpuWeather || {};
+  const spatial = gpuWeather.spatial || {};
+  const memory = snapshot.memory || {};
+  const compact = {
+    state: {
+      activeRenderMode: state.activeRenderMode ?? null,
+      playing: Boolean(state.playing),
+      scrubbing: Boolean(state.scrubbing),
+      mapMoving: state.mapMoving ?? null,
+      mapZooming: state.mapZooming ?? null,
+      normalizedAnimationTime: state.normalizedAnimationTime ?? null,
+      rawFrameIndex: state.rawFrameIndex ?? null,
+      playbackStalled: Boolean(state.playbackStalled)
+    },
+    camera: {
+      center: Array.isArray(camera.center) ? camera.center.slice(0, 2) : null,
+      rawZoom: camera.rawZoom ?? null,
+      logicalWeatherZoom: camera.logicalWeatherZoom ?? null,
+      pitch: camera.pitch ?? null,
+      bearing: camera.bearing ?? null
+    },
+    lod: {
+      stableLevel: lod.stableLevel ?? null,
+      transition: lod.transition ? {
+        fromLevel: lod.transition.fromLevel ?? null,
+        toLevel: lod.transition.toLevel ?? null,
+        progress: lod.transition.progress ?? null
+      } : null,
+      leafCount: lod.leafCount ?? null
+    },
+    canonicalWindow: {
+      rebuilds: canonicalWindow.rebuilds ?? null,
+      lastMs: canonicalWindow.lastMs ?? null,
+      targetSampleCount: canonicalWindow.targetSampleCount ?? null,
+      retainedSampleCount: canonicalWindow.retainedSampleCount ?? null,
+      targetDimensions: compactWindow(canonicalWindow.targetDimensions),
+      retainedDimensions: compactWindow(canonicalWindow.retainedDimensions),
+      retainedTargetAreaRatio: canonicalWindow.retainedTargetAreaRatio ?? null,
+      pending: Boolean(canonicalWindow.pending)
+    },
+    source: {
+      generationId: source.generationId ?? source.generation_id ?? null,
+      providerRevisionId: source.providerRevisionId ?? null,
+      targetFrameIndex: source.targetFrameIndex ?? source.rawLayerExactFrameIndex ?? null,
+      residentSourceFrameCount: source.residentSourceFrameCount ?? null,
+      highQueueCount: source.highQueueCount ?? source.highPriorityQueueCount ?? null,
+      lowQueueCount: source.lowQueueCount ?? source.lowPriorityQueueCount ?? null,
+      pendingFetchCount: source.pendingFetchCount ?? source.fetchConcurrency ?? null,
+      residentSourceBytes: source.residentSourceBytes ?? null
+    },
+    gpuWeather: {
+      active: Boolean(gpuWeather.active),
+      path: gpuWeather.path ?? null,
+      activeLevel: gpuWeather.activeLevel ?? null,
+      transitionOwner: gpuWeather.transitionOwner ?? null,
+      providerResidency: compactIdentity(gpuWeather.providerResidency?.identity),
+      reconstructionTarget: compactIdentity(gpuWeather.targetMemory?.identity),
+      rendererSource: compactIdentity(gpuWeather.committedSourceCompatibility?.dotsOwnership),
+      pendingSpatial: spatial.pendingReplacement ? {
+        generation: spatial.pendingGeneration ?? null,
+        status: spatial.pendingStatus ?? null
+      } : null,
+      pendingStatus: spatial.pendingStatus ?? null,
+      pendingGeneration: spatial.pendingGeneration ?? null,
+      activeSource: spatial.activeSource ?? null,
+      latestLifecycleEventId: gpuWeather.latestLifecycleEventId ?? null
+    },
+    memory: {
+      sourceResidentBytes: memory.sourceResidentBytes ?? 0,
+      trackedCpuBytes: memory.trackedCpuBytes ?? 0,
+      estimatedGpuBufferBytes: memory.estimatedGpuBufferBytes ?? 0,
+      representationGpuBytes: memory.representationGpuBytes ?? 0
+    }
+  };
+  return compact;
+}
+
+function readExceptionProperty(value, key) {
+  try {
+    return { available: true, value: value[key] };
+  } catch {
+    return { available: false, value: null };
+  }
+}
+
+function safeExceptionText(value, limit) {
+  if (value === null || value === undefined) return null;
+  try {
+    return clampText(String(value), limit);
+  } catch {
+    return null;
+  }
+}
+
+function safeThrownValueText(value) {
+  try {
+    return clampText(String(value), CALLBACK_EXCEPTION_VALUE_LIMIT);
+  } catch {
+    return `[unstringifiable ${typeof value}]`;
+  }
+}
+
+export function serializeCallbackException(callbackName, callbackId, thrownValue, timestamp = now()) {
+  const valueType = typeof thrownValue;
+  const objectLike = thrownValue !== null && (valueType === 'object' || valueType === 'function');
+  let isError = false;
+  if (objectLike) {
+    try { isError = thrownValue instanceof Error; } catch { isError = false; }
+  }
+  const name = objectLike ? readExceptionProperty(thrownValue, 'name') : { available: false, value: null };
+  const message = objectLike ? readExceptionProperty(thrownValue, 'message') : { available: false, value: null };
+  const stack = objectLike ? readExceptionProperty(thrownValue, 'stack') : { available: false, value: null };
+  const errorLike = isError || name.available && name.value !== undefined
+    || message.available && message.value !== undefined
+    || stack.available && stack.value !== undefined;
+  const base = {
+    callbackName: clampText(callbackName, 80),
+    callbackId: Number.isInteger(callbackId) ? callbackId : null,
+    timestamp: Number.isFinite(timestamp) ? timestamp : null,
+    typeof: valueType
+  };
+  if (errorLike) {
+    return {
+      ...base,
+      kind: 'error-like',
+      name: safeExceptionText(name.value, CALLBACK_EXCEPTION_NAME_LIMIT),
+      message: safeExceptionText(message.value, CALLBACK_EXCEPTION_MESSAGE_LIMIT),
+      stack: safeExceptionText(stack.value, CALLBACK_EXCEPTION_STACK_LIMIT)
+    };
+  }
+  return {
+    ...base,
+    kind: 'thrown-value',
+    value: safeThrownValueText(thrownValue)
+  };
+}
+
+function latestCallbackExceptionFromEvents(events) {
+  return [...(events || [])]
+    .filter((event) => event?.type === 'callback-exception' && event.details)
+    .sort((left, right) => left.sequence - right.sequence)
+    .at(-1)?.details || null;
+}
+
+export function compactFailureSlice(data) {
+  const samples = [...(data?.samples || [])].sort((left, right) => left.sequence - right.sequence);
+  const latestElapsed = Math.max(
+    samples.at(-1)?.elapsedMs ?? 0,
+    ...(data?.events || []).map((event) => Number.isFinite(event.elapsedMs) ? event.elapsedMs : 0),
+    ...(data?.weatherResources || []).map((resource) => Number.isFinite(resource.elapsedMs) ? resource.elapsedMs : 0)
+  );
+  const cutoff = Math.max(0, latestElapsed - FAILURE_WINDOW_MS);
+  const recentSamples = samples.filter((sample) => sample.elapsedMs >= cutoff);
+  const events = [...(data?.events || [])].sort((left, right) => left.sequence - right.sequence);
+  const firstRecentEvent = events.findIndex((event) => event.elapsedMs >= cutoff);
+  const eventStart = firstRecentEvent < 0
+    ? Math.max(0, events.length - FAILURE_EVENT_TAIL)
+    : Math.max(0, firstRecentEvent - FAILURE_EVENT_TAIL);
+  const slicedEvents = events.slice(eventStart).filter((event) => event.elapsedMs <= latestElapsed);
+  const resources = [...(data?.weatherResources || [])]
+    .sort((left, right) => left.sequence - right.sequence)
+    .filter((resource) => {
+      const elapsed = resource.elapsedMs;
+      return Number.isFinite(elapsed)
+        ? elapsed >= cutoff - FAILURE_RESOURCE_NEAR_WINDOW_MS && elapsed <= latestElapsed + FAILURE_RESOURCE_NEAR_WINDOW_MS
+        : true;
+    });
+  return {
+    ...data,
+    samples: recentSamples,
+    events: slicedEvents,
+    weatherResources: resources,
+    latestCallbackException: latestCallbackExceptionFromEvents(slicedEvents) || data?.latestCallbackException || null,
+    retention: {
+      mode: 'failure-slice',
+      windowMs: FAILURE_WINDOW_MS,
+      precedingEventTail: FAILURE_EVENT_TAIL,
+      resourceNearWindowMs: FAILURE_RESOURCE_NEAR_WINDOW_MS,
+      latestElapsedMs: latestElapsed,
+      cutoffElapsedMs: cutoff
+    }
+  };
+}
+
+export function runDiagnosticCallback(name, callback, diagnostics) {
+  const callbackId = diagnostics?.recordCallbackEnter(name) ?? null;
+  let completed = false;
+  let thrownValue;
+  try {
+    const result = callback();
+    completed = true;
+    return result;
+  } catch (error) {
+    thrownValue = error;
+    throw error;
+  } finally {
+    diagnostics?.recordCallbackExit(callbackId, completed, thrownValue);
+  }
+}
+
+export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvironment, getStallSnapshot }) {
   const isEnabled = Boolean(enabled);
   if (!isEnabled) return null;
 
@@ -224,11 +464,39 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
   let pendingEvents = [];
   let pendingResources = [];
   let resources = [];
+  let latestCallbackException = null;
   let latestSnapshot = null;
   let hud = null;
   let sampleTimer = null;
   let flushTimer = null;
   let nextSampleDue = now() + SAMPLE_INTERVAL_MS;
+  let lastDiagnosticTimerAt = null;
+  const activity = {
+    inputEventCount: 0,
+    lastInputType: null,
+    lastInputAt: null,
+    mapRenderCount: 0,
+    lastMapRenderAt: null,
+    weatherRenderEnterCount: 0,
+    weatherRenderExitCount: 0,
+    lastWeatherRenderType: null,
+    lastWeatherRenderPhase: null,
+    lastWeatherRenderAt: null,
+    repaintRequestCount: 0,
+    lastRepaintRequestAt: null,
+    repaintRequestsSinceRender: 0,
+    callbackSequence: 0,
+    activeCallbackId: null,
+    activeCallbackName: null,
+    lastCallbackId: null,
+    lastCallbackName: null,
+    lastCallbackPhase: null,
+    lastCallbackAt: null,
+    callbackExceptionCount: 0,
+    lastCallbackExceptionAt: null,
+    applicationFrameCount: 0,
+    lastApplicationFrameAt: null
+  };
   const renderTimestamps = [];
   const longTasks = [];
   const seenResourceKeys = new Set();
@@ -255,9 +523,10 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
       wallClock: wallClock(),
       visibilityState: document.visibilityState,
       schedulingDriftMs: Math.round(schedulingDriftMs * 100) / 100,
-      ...snapshot,
+      ...compactPeriodicSnapshot(snapshot),
+      activity: { ...activity },
       frame: frameSummary(renderTimestamps, timestamp, document.visibilityState),
-      network: weatherResourceAggregate(resources),
+      network: compactWeatherResourceAggregate(resources),
       browserMemory: captureBrowserMemory()
     };
   }
@@ -275,6 +544,24 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     if (pendingEvents.length > MAX_EVENTS) pendingEvents.shift();
   }
 
+  function stallSeverity(gapMs) {
+    for (let index = STALL_THRESHOLDS_MS.length - 1; index >= 0; index--) {
+      if (gapMs > STALL_THRESHOLDS_MS[index]) return STALL_THRESHOLDS_MS[index];
+    }
+    return null;
+  }
+
+  function stallDetails(gapMs, extra = {}) {
+    return {
+      gapMs,
+      thresholdMs: stallSeverity(gapMs),
+      visibilityState: document.visibilityState,
+      activity: { ...activity },
+      ...extra,
+      snapshot: getStallSnapshot?.() || null
+    };
+  }
+
   function processResource(entry) {
     if (!isWeatherResource(entry)) return;
     const key = `${entry.name}|${entry.startTime}|${entry.duration}`;
@@ -285,6 +572,7 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     const resource = {
       sessionId,
       sequence: resourceSequence++,
+      elapsedMs: Math.max(0, now() - sessionStartedAt),
       path: sanitizedUrl(entry.name),
       startTimeMs: Number.isFinite(entry.startTime) ? entry.startTime : null,
       durationMs: Number.isFinite(entry.duration) ? entry.duration : null,
@@ -341,19 +629,73 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
       const gapMs = timestamp - previous;
       if (gapMs > 50) {
         const overlappingLongTasks = longTasks.filter((task) => task.startMs < timestamp && task.endMs > previous);
-        queueEvent('frame-gap', {
+        queueEvent('maplibre-render-gap', stallDetails(gapMs, {
           startMs: previous,
           endMs: timestamp,
-          gapMs,
-          thresholdMs: gapMs > 100 ? 100 : 50,
           observedLongTaskCount: overlappingLongTasks.length,
           observedLongTaskDurationMs: sumNumbers(overlappingLongTasks.map((task) => task.durationMs)),
           observedLongTasks: overlappingLongTasks
-        });
+        }));
       }
     }
     renderTimestamps.push(timestamp);
     if (renderTimestamps.length > MAX_RENDER_TIMESTAMPS) renderTimestamps.shift();
+    activity.mapRenderCount++;
+    activity.lastMapRenderAt = timestamp;
+    activity.repaintRequestsSinceRender = 0;
+  }
+
+  function recordInput(type, timestamp = now()) {
+    activity.inputEventCount++;
+    activity.lastInputType = clampText(type, 80);
+    activity.lastInputAt = timestamp;
+  }
+
+  function recordRepaintRequest(timestamp = now()) {
+    activity.repaintRequestCount++;
+    activity.lastRepaintRequestAt = timestamp;
+    activity.repaintRequestsSinceRender++;
+  }
+
+  function recordWeatherRender(type, phase, timestamp = now()) {
+    activity.lastWeatherRenderType = clampText(type, 80);
+    activity.lastWeatherRenderPhase = clampText(phase, 20);
+    activity.lastWeatherRenderAt = timestamp;
+    if (phase === 'enter') activity.weatherRenderEnterCount++;
+    else if (phase === 'exit') activity.weatherRenderExitCount++;
+  }
+
+  function recordCallbackEnter(name) {
+    const id = ++activity.callbackSequence;
+    activity.activeCallbackId = id;
+    activity.activeCallbackName = clampText(name, 80);
+    activity.lastCallbackId = id;
+    activity.lastCallbackName = activity.activeCallbackName;
+    activity.lastCallbackPhase = 'enter';
+    activity.lastCallbackAt = now();
+    return id;
+  }
+
+  function recordCallbackExit(id, completed, thrownValue) {
+    if (!Number.isInteger(id)) return;
+    activity.lastCallbackId = id;
+    activity.lastCallbackPhase = completed ? 'exit' : 'exception';
+    activity.lastCallbackAt = now();
+    if (!completed) {
+      activity.callbackExceptionCount++;
+      activity.lastCallbackExceptionAt = activity.lastCallbackAt;
+      // Exception diagnostics must never replace the original thrown value.
+      try {
+        latestCallbackException = serializeCallbackException(activity.lastCallbackName, id, thrownValue, activity.lastCallbackAt);
+        queueEvent('callback-exception', latestCallbackException);
+      } catch {
+        // Keep the existing callback bookkeeping and preserve the original throw.
+      }
+    }
+    if (activity.activeCallbackId === id) {
+      activity.activeCallbackId = null;
+      activity.activeCallbackName = null;
+    }
   }
 
   async function initializePersistence() {
@@ -453,7 +795,9 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
   }
 
   async function currentExportData() {
-    await flush();
+    // A broken/paused page may not complete a persistence flush. Already
+    // persisted rows plus the in-memory tail are still sufficient to export.
+    await flush().catch(() => {});
     const persisted = await persistedSession(sessionId);
     const samples = [...(persisted?.samples || []), ...pendingSamples].sort((left, right) => left.sequence - right.sequence);
     const events = [...(persisted?.events || []), ...pendingEvents].sort((left, right) => left.sequence - right.sequence);
@@ -466,27 +810,31 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
       summary: latestSnapshot || safeSnapshot(),
       samples,
       events,
-      weatherResources
+      weatherResources,
+      latestCallbackException
     };
   }
 
-  async function exportSession(which = 'current') {
+  async function exportSession(which = 'current', { full = false } = {}) {
     const data = which === 'recovered' && recoveredSessionId
       ? await persistedSession(recoveredSessionId)
       : await currentExportData();
     if (!data) return null;
+    const exportSource = full ? data : compactFailureSlice(data);
     const exportData = {
       schemaVersion: 1,
       session: {
-        ...(data.session || data),
-        status: data.session?.cleanlyCompleted ? 'clean' : which === 'recovered' ? 'unclean' : 'active'
+        ...(exportSource.session || exportSource),
+        status: exportSource.session?.cleanlyCompleted ? 'clean' : which === 'recovered' ? 'unclean' : 'active'
       },
-      environment: data.environment || data.session?.environment || {},
+      environment: exportSource.environment || exportSource.session?.environment || {},
       limitations: LIMITATIONS,
-      summary: data.summary || null,
-      samples: data.samples || [],
-      events: data.events || [],
-      weatherResources: data.weatherResources || []
+      summary: exportSource.summary || null,
+      samples: exportSource.samples || [],
+      events: exportSource.events || [],
+      weatherResources: exportSource.weatherResources || [],
+      latestCallbackException: exportSource.latestCallbackException || latestCallbackExceptionFromEvents(exportSource.events) || null,
+      retention: exportSource.retention || { mode: 'full-history' }
     };
     const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
     const filename = `dot-field-diagnostics-${timestamp.slice(0, 15)}.json`;
@@ -506,6 +854,7 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     pendingEvents = [];
     pendingResources = [];
     resources = [];
+    latestCallbackException = null;
     latestSnapshot = null;
     if (database) {
       const transaction = database.transaction(['sessions', 'samples', 'events', 'weatherResources'], 'readwrite');
@@ -562,20 +911,23 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     detailsButton.textContent = 'Details';
     const exportButton = document.createElement('button');
     exportButton.type = 'button';
-    exportButton.textContent = 'Export JSON';
+    exportButton.textContent = 'Export failure slice';
+    const fullExportButton = document.createElement('button');
+    fullExportButton.type = 'button';
+    fullExportButton.textContent = 'Export full history';
     const clearButton = document.createElement('button');
     clearButton.type = 'button';
     clearButton.textContent = 'Clear';
     const recoveredExportButton = document.createElement('button');
     recoveredExportButton.type = 'button';
-    recoveredExportButton.textContent = 'Export recovered';
+    recoveredExportButton.textContent = 'Export recovered failure slice';
     recoveredExportButton.hidden = true;
     const details = document.createElement('pre');
     details.className = 'diagnostics-details';
     details.hidden = true;
     const status = document.createElement('span');
     status.className = 'diagnostics-status';
-    actions.append(detailsButton, exportButton, recoveredExportButton, clearButton, status);
+    actions.append(detailsButton, exportButton, fullExportButton, recoveredExportButton, clearButton, status);
     panel.append(summary, actions, details);
     container.replaceChildren(base, panel);
     detailsButton.addEventListener('click', () => {
@@ -585,7 +937,11 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     });
     exportButton.addEventListener('click', async () => {
       await exportSession('current');
-      status.textContent = 'Exported';
+      status.textContent = 'Failure slice exported';
+    });
+    fullExportButton.addEventListener('click', async () => {
+      await exportSession('current', { full: true });
+      status.textContent = 'Full history exported';
     });
     recoveredExportButton.addEventListener('click', async () => {
       await exportSession('recovered');
@@ -609,10 +965,16 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
   function captureContextEvents() {
     const canvas = getEnvironment?.()?.canvasElement;
     if (canvas?.addEventListener) {
-      canvas.addEventListener('webglcontextlost', () => queueEvent('webgl-context-lost'));
-      canvas.addEventListener('webglcontextrestored', () => queueEvent('webgl-context-restored'));
+      canvas.addEventListener('webglcontextlost', (event) => queueEvent('webgl-context-lost', {
+        statusMessage: clampText(event?.statusMessage || null),
+        ...stallDetails(0)
+      }));
+      canvas.addEventListener('webglcontextrestored', (event) => queueEvent('webgl-context-restored', {
+        statusMessage: clampText(event?.statusMessage || null),
+        ...stallDetails(0)
+      }));
     }
-    document.addEventListener('visibilitychange', () => queueEvent('visibility-change', { visibilityState: document.visibilityState }));
+    document.addEventListener('visibilitychange', () => queueEvent('visibility-change', stallDetails(0)));
     globalThis.addEventListener?.('error', (event) => queueEvent('javascript-error', {
       message: clampText(event.message || event.error?.message),
       name: clampText(event.error?.name || null),
@@ -621,15 +983,25 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
       line: Number.isFinite(event.lineno) ? event.lineno : null,
       column: Number.isFinite(event.colno) ? event.colno : null,
       errorAvailable: Boolean(event.error),
-      errorType: event.error?.constructor?.name || null
+      errorType: event.error?.constructor?.name || null,
+      ...stallDetails(0)
     }));
     globalThis.addEventListener?.('unhandledrejection', (event) => queueEvent('unhandled-rejection', {
       reason: clampText(event.reason instanceof Error ? event.reason.message : event.reason),
       name: clampText(event.reason instanceof Error ? event.reason.name : null),
       stack: clampText(event.reason instanceof Error ? event.reason.stack : null),
-      reasonType: event.reason?.constructor?.name || typeof event.reason
+      reasonType: event.reason?.constructor?.name || typeof event.reason,
+      ...stallDetails(0)
     }));
-    globalThis.addEventListener?.('pagehide', () => { void finish('pagehide').catch(() => {}); }, { once: true });
+    globalThis.addEventListener?.('pagehide', (event) => {
+      queueEvent('pagehide', stallDetails(0, { persisted: Boolean(event?.persisted) }));
+      void finish('pagehide').catch(() => {});
+    }, { once: true });
+    globalThis.addEventListener?.('pageshow', (event) => queueEvent('pageshow', stallDetails(0, { persisted: Boolean(event?.persisted) })));
+    // Page Lifecycle freeze/resume are optional. Do not assume Safari supports
+    // them; observe them only where the browser advertises the event property.
+    if ('onfreeze' in globalThis) globalThis.addEventListener?.('freeze', () => queueEvent('page-freeze', stallDetails(0)));
+    if ('onresume' in globalThis) globalThis.addEventListener?.('resume', () => queueEvent('page-resume', stallDetails(0)));
   }
 
   const sessionStartedAt = now();
@@ -642,6 +1014,15 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
     const timestamp = now();
     const drift = timestamp - nextSampleDue;
     nextSampleDue += SAMPLE_INTERVAL_MS;
+    const timerGapMs = lastDiagnosticTimerAt === null ? 0 : timestamp - lastDiagnosticTimerAt;
+    lastDiagnosticTimerAt = timestamp;
+    const lateByMs = Math.max(0, timerGapMs - SAMPLE_INTERVAL_MS);
+    if (lateByMs > STALL_THRESHOLDS_MS[0]) {
+      queueEvent('diagnostic-timer-gap', stallDetails(lateByMs, {
+        timerIntervalMs: timerGapMs,
+        schedulingDriftMs: drift
+      }));
+    }
     takeSample(drift);
   }, SAMPLE_INTERVAL_MS);
   flushTimer = window.setInterval(() => { void flush(); }, FLUSH_INTERVAL_MS);
@@ -650,6 +1031,21 @@ export function createRuntimeDiagnostics({ enabled = false, getSnapshot, getEnvi
   return {
     enabled: true,
     recordRender,
+    recordInput,
+    recordRepaintRequest,
+    recordWeatherRender,
+    recordCallbackEnter,
+    recordCallbackExit,
+    recordApplicationFrame(timestamp = now(), active = true) {
+      if (!active) return;
+      const previous = activity.lastApplicationFrameAt;
+      activity.applicationFrameCount++;
+      activity.lastApplicationFrameAt = timestamp;
+      if (Number.isFinite(previous)) {
+        const gapMs = timestamp - previous;
+        if (gapMs > STALL_THRESHOLDS_MS[0]) queueEvent('application-raf-gap', stallDetails(gapMs));
+      }
+    },
     recordEvent: queueEvent,
     attachHud,
     currentSnapshot() { return latestSnapshot || safeSnapshot(); },

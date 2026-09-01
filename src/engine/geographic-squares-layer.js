@@ -319,13 +319,14 @@ void main() {
 }
 
 export class GeographicSquaresLayer {
-  constructor(weatherPyramid = new GeographicWeatherPyramid()) {
+  constructor(weatherPyramid = new GeographicWeatherPyramid(), options = {}) {
     this.id = 'geographic-weather-squares';
     this.type = 'custom';
     this.renderingMode = '3d';
     this.active = false;
     this.hazardsVisible = true;
     this.weatherPyramid = weatherPyramid;
+    this.renderDiagnostics = options.renderDiagnostics || null;
     this.topology = weatherPyramid.topology;
     this.levelData = null;
     this.transition = null;
@@ -430,7 +431,7 @@ export class GeographicSquaresLayer {
     this.map?.triggerRepaint();
   }
 
-  setGpuWeatherMode(enabled, time = 0) {
+  setGpuWeatherMode(enabled, time = 0, { rebuildCpu = true, requestRepaint = true } = {}) {
     const next = Boolean(enabled);
     if (this.gpuWeatherMode === next) return;
     this.gpuWeatherMode = next;
@@ -452,8 +453,8 @@ export class GeographicSquaresLayer {
         gl.bufferData(gl.ARRAY_BUFFER, 0, gl.DYNAMIC_DRAW);
       }
       this.instanceDirty = [false, false];
-    } else if (this.active && this.levelData) this.rebuildTemporal(time);
-    this.map?.triggerRepaint();
+    } else if (rebuildCpu && this.active && this.levelData) this.rebuildTemporal(time);
+    if (requestRepaint) this.map?.triggerRepaint();
   }
 
   setGpuWeatherSource(source, { requestRepaint = true } = {}) {
@@ -1002,10 +1003,13 @@ export class GeographicSquaresLayer {
   render(gl, args) {
     if (!this.active) return;
     if (this.gpuWeatherMode && !this.transition && isGpuWeatherLevel(this.levelData?.level) && (this.gpuWeatherSource || this.gpuWeatherTransition)) {
+      this.renderDiagnostics?.enter();
       this.renderGpuWeather(gl, args.shaderData, args.defaultProjectionData);
+      this.renderDiagnostics?.exit();
       return;
     }
     if (!this.temporal) return;
+    this.renderDiagnostics?.enter();
     this.uploadBuffers(gl);
     const activeLayout = this.instanceLayouts[this.transition ? this.transition.fromGroup : this.stableGroup];
     if (this.transition && this.instanceLayouts[this.transition.toGroup] !== activeLayout) throw new Error('Squares transition groups must use one mapped layout.');
@@ -1016,5 +1020,6 @@ export class GeographicSquaresLayer {
       this.renderGroup(gl, entry, args.defaultProjectionData, this.transition.toGroup, this.transitionProgress);
     } else this.renderGroup(gl, entry, args.defaultProjectionData, this.stableGroup, 1);
     gl.disable(gl.POLYGON_OFFSET_FILL); gl.depthMask(true);
+    this.renderDiagnostics?.exit();
   }
 }

@@ -291,11 +291,14 @@ It owns the lightweight top-left HUD, session lifecycle, bounded rolling frame
 timestamps, event collection, Resource Timing observation, IndexedDB
 persistence, recovered-session lookup, and JSON export. It samples at 1 Hz and
 flushes small batches to IndexedDB at approximately 2-second intervals; idle
-maps do not receive a diagnostics-only RAF loop. The persisted session is
-created uncleanly, and a prior session left unclean is exposed as `unclean` /
-`abrupt` after a later diagnostics-enabled load. Retention is bounded to the
-current session plus one previous session, with approximately 15 minutes of
-samples and bounded events/resources.
+maps do not receive a diagnostics-only RAF loop. Periodic samples are an
+explicit compact scalar projection of the live snapshot: histories, resident
+ID lists, lifecycle traces, and detailed renderer/provider trees are not
+repeated in samples. The persisted session is created uncleanly, and a prior
+session left unclean is exposed as `unclean` / `abrupt` after a later
+diagnostics-enabled load. Retention is bounded to the current session plus one
+previous session, with approximately 15 minutes of compact samples and bounded
+events/resources.
 
 The coordinator consumes the existing weather-loader scheduler snapshot,
 application canonical-window timings, `GeographicWeatherPyramid` counters and
@@ -324,8 +327,16 @@ cache counters, validation scans, eviction count, and
 frame and confirm whether its `Float32Array` is the resident source payload;
 RAW does not own a duplicate source frame.
 
-Export uses schema version 1 with session metadata, environment, limitations,
-summary, samples, events, and weather resources. MapTiler keys,
+The normal export is a failure slice containing the most recent 90 seconds of
+compact samples, events in that interval plus a 24-event preceding lifecycle
+tail, and resources in or within 15 seconds of the interval. It works for the
+active session without reload and for the recovered unclean session. A separate
+full-history action remains available for rare deep debugging. Both use schema
+version 1 with session metadata, environment, limitations, summary, samples,
+events, weather resources, and the latest bounded callback-exception detail when
+one exists. Callback exception names, messages, stacks, or safe thrown-value
+representations are event/latest-state data only; they are not repeated in
+periodic samples. MapTiler keys,
 `config.local.json`, MinIO credentials, and resource query strings/fragments
 are not exported. Explicit tracked CPU metrics cover only known Dot Field
 buffers/arrays; GPU values are estimates of Dot Field-owned WebGL buffers;
@@ -702,7 +713,13 @@ published. Since each rain tile contains all 19 rain frames and
 each motion tile contains all motion intervals, this is complete timeline
 availability for the current GPU view; it does not wait for the legacy 19-frame
 Float32 source cache. During CPU LOD transitions, the existing bounded
-source-cache intervals remain the readiness basis.
+source-cache intervals remain the readiness basis. A CPU-reference transition
+preflights its exact current renderer A/B source-frame requirement through the
+existing HIGH source scheduler before changing GPU ownership or evaluating a
+new CPU temporal state. Until that pair is ready, the current stable GPU
+presentation remains active. A readiness completion may start the transition
+only when its level-data, desired LOD, and temporal requirement key still
+match; superseded completions are not published.
 
 ### Experimental GPU physical summaries for L10-L13
 

@@ -39,7 +39,7 @@ import {
 } from './engine/geographic-gpu-weather-presentation.js';
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
-import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
+import { createRuntimeDiagnostics, runDiagnosticCallback as runDiagnosticCallbackWithDiagnostics } from './runtime-diagnostics.js';
 import { createRuntimeCadenceDiagnostics } from './runtime-cadence-diagnostics.js';
 
 const applicationStartupAt = performance.now();
@@ -549,6 +549,8 @@ let lastMapErrorSignature = '';
 let weatherSequencePromise = null;
 let basemapFallbackTimer = null;
 let weatherRequestGeneration = 0;
+let cpuTransitionRequestGeneration = 0;
+let cpuTransitionRequest = null;
 
 const diagnosticsEnabled = queryParameters.get('diagnostics') === '1';
 const cadenceEnabled = queryParameters.get('cadence') === '1';
@@ -718,8 +720,12 @@ function cancelGpuWeatherPendingSpatial() {
 
 function disableGpuWeatherPath(time = state.time / LOOP_SECONDS, reason = null) {
   traceGpuWeatherLifecycle('gpu-disable', { action: 'clear', reason });
-  if (weatherLayer?.gpuWeatherMode) weatherLayer.setGpuWeatherMode(false, time);
-  if (squaresLayer?.gpuWeatherMode) squaresLayer.setGpuWeatherMode(false, time);
+  // A CPU-boundary handoff must clear both renderers before either one starts
+  // rebuilding CPU temporal state. The former Dots-first call could throw
+  // during that synchronous rebuild, leaving Dots disabled while Squares and
+  // application ownership still described a stable GPU source.
+  if (weatherLayer?.gpuWeatherMode) weatherLayer.setGpuWeatherMode(false, time, { rebuildCpu: false, requestRepaint: false });
+  if (squaresLayer?.gpuWeatherMode) squaresLayer.setGpuWeatherMode(false, time, { rebuildCpu: false, requestRepaint: false });
   cancelGpuWeatherPendingSpatial();
   gpuWeatherUsingGpu = false;
   gpuWeatherKeyframes = null;
@@ -728,6 +734,7 @@ function disableGpuWeatherPath(time = state.time / LOOP_SECONDS, reason = null) 
   gpuWeatherInitializationGeneration += 1;
   if (reason) gpuWeatherFallbackReason = reason;
   updateTimelineResidency();
+  map.triggerRepaint();
 }
 
 function releaseGpuWeatherResidency() {
@@ -2294,6 +2301,8 @@ function diagnosticsSnapshot() {
       activeRenderMode: state.renderMode,
       playing: state.playing,
       scrubbing: state.scrubbing,
+      mapMoving: Boolean(map.isMoving?.()),
+      mapZooming: Boolean(map.isZooming?.()),
       normalizedAnimationTime: state.time / LOOP_SECONDS,
       rawFrameIndex: state.rawFrameIndex,
       playbackStalled: state.playbackStalled
@@ -2349,11 +2358,69 @@ function diagnosticsSnapshot() {
   };
 }
 
+// Kept deliberately scalar and allocation-light: runtime diagnostics calls this
+// only after a detected activity gap or browser lifecycle/context event.
+function diagnosticsStallSnapshot() {
+  const source = weatherLoad.diagnostics?.() || null;
+  const gl = gpuWeatherGl();
+  const committedSource = state.renderMode === 'squares'
+    ? squaresLayer?.gpuWeatherSource : weatherLayer?.gpuWeatherSource;
+  return {
+    mapMoving: Boolean(map.isMoving?.()),
+    playing: state.playing,
+    scrubbing: state.scrubbing,
+    rawZoom: map.getZoom?.() ?? null,
+    logicalWeatherZoom: state.logicalSamplingZoom,
+    stableLod: state.lod?.level ?? null,
+    lodTransition: state.lodTransition ? {
+      owner: state.lodTransition.owner || 'cpu',
+      fromLevel: state.lodTransition.fromLevel,
+      toLevel: state.lodTransition.toLevel
+    } : null,
+    canonicalWindow: state.canonicalWindow || null,
+    canonicalWindowTarget: state.canonicalWindowTarget || null,
+    gpuWeatherUsingGpu,
+    activeRenderMode: state.renderMode,
+    committedRendererSource: gpuWeatherPresentationSourceOwnership(committedSource),
+    dotsRendererSource: gpuWeatherPresentationSourceOwnership(weatherLayer?.gpuWeatherSource),
+    squaresRendererSource: gpuWeatherPresentationSourceOwnership(squaresLayer?.gpuWeatherSource),
+    providerResidency: gpuWeatherLifecycleIdentity(gpuWeatherProviderResidency, 'provider-residency'),
+    reconstructionTarget: gpuWeatherLifecycleIdentity(gpuWeatherTileReconstructor, 'reconstruction-target'),
+    pendingSpatial: gpuWeatherPendingSpatial ? {
+      generation: gpuWeatherPendingSpatial.generation,
+      status: gpuWeatherPendingSpatial.status,
+      hasOwner: true
+    } : null,
+    lifecycleGeneration: gpuWeatherLifecycleGeneration,
+    latestLifecycleEventId: gpuWeatherLifecycleTrace.at(-1)?.id ?? null,
+    sourceFrameQueue: source ? {
+      highQueueCount: source.highQueueCount ?? source.highPriorityQueueCount ?? null,
+      lowQueueCount: source.lowQueueCount ?? source.lowPriorityQueueCount ?? null,
+      pendingFetchCount: source.pendingFetchCount ?? source.fetchConcurrency ?? null,
+      residentSourceFrameCount: source.residentSourceFrameCount ?? null
+    } : null,
+    webglContextLost: gl && typeof gl.isContextLost === 'function' ? gl.isContextLost() : null
+  };
+}
+
 const runtimeDiagnostics = createRuntimeDiagnostics({
   enabled: diagnosticsEnabled,
   getSnapshot: diagnosticsSnapshot,
-  getEnvironment: diagnosticsEnvironment
+  getEnvironment: diagnosticsEnvironment,
+  getStallSnapshot: diagnosticsStallSnapshot
 });
+function runDiagnosticCallback(name, callback) {
+  return runDiagnosticCallbackWithDiagnostics(name, callback, runtimeDiagnostics);
+}
+if (runtimeDiagnostics) {
+  // Probe MapLibre's existing repaint gate without changing its scheduling
+  // semantics. The wrapper is installed only for a diagnostics capture.
+  const triggerRepaint = map.triggerRepaint.bind(map);
+  map.triggerRepaint = (...args) => {
+    runtimeDiagnostics.recordRepaintRequest();
+    return triggerRepaint(...args);
+  };
+}
 if (runtimeCadence) window.__dotFieldCadence = runtimeCadence;
 const diagnosticsHud = runtimeDiagnostics?.attachHud(lodDiagnostics) || null;
 if (runtimeDiagnostics) window.__dotFieldDiagnostics = runtimeDiagnostics;
@@ -2911,8 +2978,15 @@ function tryInitializeWeatherLayer() {
     Float32Array,
     new GeographicLodTopology(initialWindow, lodRangeForStableLevel(initialLevel), null, { deferTransitionParents: true })
   );
-  weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid, { legacyHierarchicalLodMorph: legacyHierarchicalDotsLodMorph });
-  squaresLayer = new GeographicSquaresLayer(geographicWeatherPyramid);
+  const renderDiagnosticsFor = (type) => runtimeDiagnostics ? {
+    enter: () => runtimeDiagnostics.recordWeatherRender(type, 'enter'),
+    exit: () => runtimeDiagnostics.recordWeatherRender(type, 'exit')
+  } : null;
+  weatherLayer = new GeographicDotsLayer(geographicWeatherPyramid, {
+    legacyHierarchicalLodMorph: legacyHierarchicalDotsLodMorph,
+    renderDiagnostics: renderDiagnosticsFor('dots')
+  });
+  squaresLayer = new GeographicSquaresLayer(geographicWeatherPyramid, { renderDiagnostics: renderDiagnosticsFor('squares') });
   weatherLayer.setGpuWeatherPresentationEnabled(gpuWeatherPresentationMode !== 'maplibre-only');
   squaresLayer.setGpuWeatherPresentationEnabled(gpuWeatherPresentationMode !== 'maplibre-only');
   weatherLayer.setGpuWeatherTimingEnabled(diagnosticsEnabled);
@@ -3157,6 +3231,77 @@ function promoteGpuWeatherLodTransition(transition) {
   return true;
 }
 
+function cpuTransitionSourcesAreAvailable(requirements) {
+  return activeWeatherField?.frameCount === undefined
+    || requirements.sourceFrames.every((frameIndex) => activeWeatherField.isSourceFrameAvailable(frameIndex));
+}
+
+function requestCpuTransitionSourceFrames(level, now, requirements) {
+  const fromLevelData = state.levelData;
+  const request = {
+    id: ++cpuTransitionRequestGeneration,
+    fromLevel: state.lod.level,
+    toLevel: level,
+    fromLevelData,
+    requirements
+  };
+  if (cpuTransitionRequest
+    && cpuTransitionRequest.fromLevel === request.fromLevel
+    && cpuTransitionRequest.toLevel === request.toLevel
+    && cpuTransitionRequest.fromLevelData === request.fromLevelData
+    && cpuTransitionRequest.requirements.key === request.requirements.key) return false;
+  cpuTransitionRequest = request;
+  runtimeDiagnostics?.recordEvent('cpu-lod-transition-source-request', {
+    requestId: request.id,
+    fromLevel: request.fromLevel,
+    toLevel: request.toLevel,
+    sourceFrames: requirements.sourceFrames,
+    temporalKey: requirements.key,
+    requestedAt: now
+  });
+  const promise = weatherLoad.requestTimes(requirements.times, {
+    priority: 'high',
+    replaceKey: 'cpu-lod-transition',
+    latestTargetGeneration: request.id
+  }).then(({ result } = {}) => {
+    if (cpuTransitionRequest !== request) return result;
+    cpuTransitionRequest = null;
+    state.cpuFallbackTransitionPromise = null;
+    if (result?.status === 'superseded') {
+      if (state.desiredLevel !== state.lod.level) startAdjacentTransition(state.desiredLevel, performance.now());
+      return result;
+    }
+    const currentRequirements = rendererTemporalRequirements(state.time / LOOP_SECONDS);
+    const current = state.desiredLevel === request.toLevel
+      && state.lod.level === request.fromLevel
+      && state.levelData === request.fromLevelData
+      && !state.lodTransition
+      && currentRequirements.key === request.requirements.key
+      && cpuTransitionSourcesAreAvailable(currentRequirements);
+    if (!current) {
+      if (state.desiredLevel !== state.lod.level) startAdjacentTransition(state.desiredLevel, performance.now());
+      return result;
+    }
+    startAdjacentTransition(request.toLevel, performance.now());
+    return result;
+  }).catch((error) => {
+    if (cpuTransitionRequest === request) {
+      cpuTransitionRequest = null;
+      state.cpuFallbackTransitionPromise = null;
+      runtimeDiagnostics?.recordEvent('cpu-lod-transition-source-failed', {
+        requestId: request.id,
+        fromLevel: request.fromLevel,
+        toLevel: request.toLevel,
+        sourceFrames: request.requirements.sourceFrames,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+    return null;
+  });
+  state.cpuFallbackTransitionPromise = promise;
+  return true;
+}
+
 function startAdjacentTransition(level, now) {
   const currentLevelData = state.levelData;
   const nextLevel = currentLevelData ? currentLevelData.level + Math.sign(level - currentLevelData.level) : null;
@@ -3228,30 +3373,16 @@ function startAdjacentTransition(level, now) {
     wakeApplicationFrame();
     return;
   }
-  // Stable GPU direct levels have no CPU temporal summary after ownership is
-  // detached. Before morphing to a lower level, reacquire only the current
-  // renderer pair through
-  // the existing HIGH-priority scheduler while continuing to present the last
-  // valid GPU weather. This avoids both blank weather and full-sequence
-  // fallback residency.
-  if (gpuWeatherUsingGpu && isGpuWeatherLevel(state.lod.level) && level < state.lod.level) {
-    if (!state.cpuFallbackTransitionPromise) {
-      const requirements = rendererTemporalRequirements(state.time / LOOP_SECONDS);
-      runtimeDiagnostics?.recordEvent('gpu-direct-level-to-cpu-source-request', { fromLevel: state.lod.level, toLevel: level, sourceFrames: requirements.sourceFrames });
-      state.cpuFallbackTransitionPromise = weatherLoad.requestTimes(requirements.times, {
-        priority: 'high', replaceKey: 'gpu-l14-to-cpu-transition'
-      }).then(({ result } = {}) => {
-        if (result?.status === 'superseded' || state.desiredLevel >= state.lod.level
-          || !isGpuWeatherLevel(state.lod.level) || !gpuWeatherUsingGpu) return;
-        disableGpuWeatherPath(state.time / LOOP_SECONDS, `CPU reference fallback during LOD transition to L${level}`);
-        releaseGpuWeatherResidency();
-        startAdjacentTransition(level, performance.now());
-      }).catch((error) => console.error('Unable to load CPU fallback frames for L14 transition.', error))
-        .finally(() => { state.cpuFallbackTransitionPromise = null; });
-    }
+  const cpuRequirements = rendererTemporalRequirements(state.time / LOOP_SECONDS);
+  if (!cpuTransitionSourcesAreAvailable(cpuRequirements)) {
+    requestCpuTransitionSourceFrames(level, now, cpuRequirements);
     return;
   }
-  if (gpuWeatherUsingGpu) disableGpuWeatherPath(state.time / LOOP_SECONDS, `CPU reference fallback during LOD transition to L${level}`);
+  if (gpuWeatherUsingGpu) {
+    const leavingGpuLevelDownward = isGpuWeatherLevel(state.lod.level) && level < state.lod.level;
+    disableGpuWeatherPath(state.time / LOOP_SECONDS, `CPU reference fallback during LOD transition to L${level}`);
+    if (leavingGpuLevelDownward) releaseGpuWeatherResidency();
+  }
   const direction = Math.sign(level - state.lod.level);
   const toLevel = state.lod.level + direction;
   const toLevelData = geographicWeatherPyramid.levelDataFor(toLevel);
@@ -3389,13 +3520,13 @@ function queueWeatherUpdate() {
     return;
   }
   state.weatherQueued = true;
-  requestAnimationFrame((presentationTimestamp) => {
+  requestAnimationFrame((presentationTimestamp) => runDiagnosticCallback('weather-update-raf-callback', () => {
     state.weatherQueued = false;
     if (!state.mapReady || !activeWeatherField) return;
     const time = state.time / LOOP_SECONDS;
     if (state.renderMode === 'raw') return;
     requestWeatherTime(time, { playback: state.playing, presentationTimestamp });
-  });
+  }));
 }
 
 function rendererTemporalRequirements(normalizedTime) {
@@ -3665,7 +3796,7 @@ function updateTimelineFromPointer(clientX) {
 }
 
 let scrubbingPointerId = null;
-playPause.addEventListener('click', () => {
+playPause.addEventListener('click', () => runDiagnosticCallback('playback-button-callback', () => {
   if (state.renderMode === 'raw') return;
   if (!state.playing && state.time >= LOOP_SECONDS) {
     state.time = 0;
@@ -3673,9 +3804,9 @@ playPause.addEventListener('click', () => {
     queueWeatherUpdate();
   }
   setPlaying(!state.playing);
-});
-zoomIn.addEventListener('click', () => map.zoomIn());
-zoomOut.addEventListener('click', () => map.zoomOut());
+}));
+zoomIn.addEventListener('click', () => runDiagnosticCallback('zoom-in-button-callback', () => map.zoomIn()));
+zoomOut.addEventListener('click', () => runDiagnosticCallback('zoom-out-button-callback', () => map.zoomOut()));
 function resetMapView() {
   if (state.resettingView) return;
   state.resettingView = true;
@@ -3710,7 +3841,8 @@ function finishTimelineScrub(pointerId) {
   runtimeDiagnostics?.recordEvent('scrub-end');
   if (timeSlider.hasPointerCapture(activePointerId)) timeSlider.releasePointerCapture(activePointerId);
 }
-timeSlider.addEventListener('pointerdown', (event) => {
+timeSlider.addEventListener('pointerdown', (event) => runDiagnosticCallback('timeline-pointerdown-callback', () => {
+  runtimeDiagnostics?.recordInput('timeline-pointerdown');
   event.preventDefault();
   timeSlider.focus({ preventScroll: true });
   if (state.playing) setPlaying(false);
@@ -3719,17 +3851,20 @@ timeSlider.addEventListener('pointerdown', (event) => {
   scrubbingPointerId = event.pointerId;
   timeSlider.setPointerCapture(event.pointerId);
   updateTimelineFromPointer(event.clientX);
-});
-timeSlider.addEventListener('pointermove', (event) => {
+}));
+timeSlider.addEventListener('pointermove', (event) => runDiagnosticCallback('timeline-pointermove-callback', () => {
+  runtimeDiagnostics?.recordInput('timeline-pointermove');
   if (event.pointerId === scrubbingPointerId) updateTimelineFromPointer(event.clientX);
-});
-timeSlider.addEventListener('input', () => {
+}));
+timeSlider.addEventListener('input', () => runDiagnosticCallback('timeline-input-callback', () => {
+  runtimeDiagnostics?.recordInput('timeline-input');
   updateTimeFromTimelineValue(timeSlider.value);
-});
+}));
 for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
-  timeSlider.addEventListener(eventName, (event) => {
+  timeSlider.addEventListener(eventName, (event) => runDiagnosticCallback(`timeline-${eventName}-callback`, () => {
+    runtimeDiagnostics?.recordInput(`timeline-${eventName}`);
     finishTimelineScrub(event.pointerId);
-  });
+  }));
 }
 
 function markInitialBasemapVisible(trigger) {
@@ -3768,12 +3903,12 @@ map.on('style.load', () => {
     startWeatherSequence('readiness-timeout');
   }, 5000);
 });
-map.on('render', () => {
+map.on('render', () => runDiagnosticCallback('map-render-callback', () => {
   runtimeDiagnostics?.recordRender();
   if (state.styleReady) markStartup('first-map-render-after-style');
   observeInitialBasemapReadiness();
   if (state.mapReady) markStartup('first-weather-layer-render');
-});
+}));
 map.on('sourcedata', (event) => {
   if (!state.styleReady || !event?.sourceId) return;
   markStartup('initial-map-source-data');
@@ -3781,15 +3916,17 @@ map.on('sourcedata', (event) => {
 });
 map.on('mousemove', updateRawHover);
 map.on('click', selectRawCell);
-map.on('dragstart', () => {
+map.on('dragstart', () => runDiagnosticCallback('map-dragstart-callback', () => {
+  runtimeDiagnostics?.recordInput('dragstart');
   runtimeDiagnostics?.recordEvent('drag-start');
   rawMapDragging = true;
   dismissRawTooltip();
-});
-map.on('dragend', () => {
+}));
+map.on('dragend', () => runDiagnosticCallback('map-dragend-callback', () => {
+  runtimeDiagnostics?.recordInput('dragend');
   runtimeDiagnostics?.recordEvent('drag-end');
   rawMapDragging = false;
-});
+}));
 map.on('mouseout', () => {
   if (!selectedRawCell) dismissRawTooltip();
 });
@@ -3804,16 +3941,21 @@ function updateResetViewControl() {
     || Math.abs(map.getPitch()) > 0.1;
   resetView.hidden = !differs;
 }
-map.on('move', updateLogicalSamplingZoom);
+map.on('move', (event) => runDiagnosticCallback('map-move-callback', () => {
+  runtimeDiagnostics?.recordInput('move');
+  updateLogicalSamplingZoom(event);
+}));
 map.on('move', updateRawTooltipPosition);
 map.on('move', updateResetViewControl);
 map.on('rotate', updateResetViewControl);
 map.on('pitch', updateResetViewControl);
-map.on('movestart', () => {
+map.on('movestart', () => runDiagnosticCallback('map-movestart-callback', () => {
+  runtimeDiagnostics?.recordInput('movestart');
   runtimeDiagnostics?.recordEvent('map-movestart');
   weatherLoad.setBackgroundPrefetchPaused(true);
-});
-map.on('moveend', () => {
+}));
+map.on('moveend', () => runDiagnosticCallback('map-moveend-callback', () => {
+  runtimeDiagnostics?.recordInput('moveend');
   runtimeDiagnostics?.recordEvent('map-moveend');
   weatherLoad.setBackgroundPrefetchPaused(false);
   if (!state.resettingView) return;
@@ -3826,9 +3968,15 @@ map.on('moveend', () => {
   updateCanonicalWindow();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
   updateResetViewControl();
-});
-map.on('zoomstart', () => runtimeDiagnostics?.recordEvent('map-zoomstart'));
-map.on('zoomend', () => runtimeDiagnostics?.recordEvent('map-zoomend'));
+}));
+map.on('zoomstart', () => runDiagnosticCallback('map-zoomstart-callback', () => {
+  runtimeDiagnostics?.recordInput('zoomstart');
+  runtimeDiagnostics?.recordEvent('map-zoomstart');
+}));
+map.on('zoomend', () => runDiagnosticCallback('map-zoomend-callback', () => {
+  runtimeDiagnostics?.recordInput('zoomend');
+  runtimeDiagnostics?.recordEvent('map-zoomend');
+}));
 map.on('load', () => {
   markStartup('maplibre-load');
   markInitialBasemapVisible('map-load');
@@ -3901,7 +4049,12 @@ function waitForPlaybackRequirements(normalizedTime) {
 }
 
 function frame(now) {
+  return runDiagnosticCallback('application-raf-callback', () => frameBody(now));
+}
+
+function frameBody(now) {
   applicationFrameQueued = false;
+  runtimeDiagnostics?.recordApplicationFrame(now, Boolean(state.playing || state.lodTransition));
   if (gpuWeatherExperimentEnabled) gpuWeatherTimelineStats.playbackRafCount++;
   const delta = Math.min((now - state.lastFrame) / 1000, 0.1) * diagnosticPlaybackRate;
   state.lastFrame = now;

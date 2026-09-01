@@ -821,6 +821,7 @@ export class GeographicDotsLayer {
     this.bufferCapacity = { rain: 0, strong: 0, storm: 0, hail: 0 };
     this.weatherPyramid = weatherPyramid;
     this.legacyHierarchicalLodMorph = options.legacyHierarchicalLodMorph === true;
+    this.renderDiagnostics = options.renderDiagnostics || null;
     this.topology = weatherPyramid.topology;
     this.levelData = null;
     this.transition = null;
@@ -918,7 +919,7 @@ export class GeographicDotsLayer {
     if (this.active) this.map?.triggerRepaint();
   }
 
-  setGpuWeatherMode(enabled, time = 0) {
+  setGpuWeatherMode(enabled, time = 0, { rebuildCpu = true, requestRepaint = true } = {}) {
     const next = Boolean(enabled);
     if (this.gpuWeatherMode === next) return;
     this.gpuWeatherMode = next;
@@ -940,8 +941,8 @@ export class GeographicDotsLayer {
         gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STREAM_DRAW);
       }
       this.buffersDirty = false;
-    } else if (this.active && this.levelData) this.rebuildTemporal(time);
-    this.map?.triggerRepaint();
+    } else if (rebuildCpu && this.active && this.levelData) this.rebuildTemporal(time);
+    if (requestRepaint) this.map?.triggerRepaint();
   }
 
   setGpuWeatherSource(source, { requestRepaint = true } = {}) {
@@ -1563,9 +1564,12 @@ export class GeographicDotsLayer {
   render(gl, args) {
     if (!this.active) return;
     if (this.gpuWeatherMode && !this.transition && isGpuWeatherLevel(this.levelData?.level) && (this.gpuWeatherSource || this.gpuWeatherTransition)) {
+      this.renderDiagnostics?.enter();
       this.renderGpuWeather(gl, args.shaderData, args.defaultProjectionData);
+      this.renderDiagnostics?.exit();
       return;
     }
+    this.renderDiagnostics?.enter();
     this.uploadBuffers(gl);
     const programs = this.programsFor(gl, args.shaderData);
     gl.enable(gl.BLEND);
@@ -1578,5 +1582,6 @@ export class GeographicDotsLayer {
     if (this.hazardsVisible) this.renderInstances(gl, programs.hazard, args.defaultProjectionData, ['storm', 'hail']);
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.depthMask(true);
+    this.renderDiagnostics?.exit();
   }
 }
