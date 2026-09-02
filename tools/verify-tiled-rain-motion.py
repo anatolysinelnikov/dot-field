@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-light synthetic verification for Phase 0B1 MotionField."""
+"""Dependency-light synthetic verification for the tiled-rain MotionField."""
 
 from __future__ import annotations
 
@@ -104,6 +104,15 @@ def verify_generated_assets(
     quality = manifest["quality_diagnostics"]
     for interval in quality["intervals"]:
         relevant = int(interval["motion_relevant_node_count"])
+        local_accepted = int(interval["relevant_local_accepted_count"])
+        recovered = int(interval["recovered_weak_regional_proposal_count"])
+        accepted_under_regional = int(
+            interval["relevant_local_accepted_under_accepted_regional_prior_count"]
+        )
+        if accepted_under_regional + recovered != local_accepted:
+            raise AssertionError(f"interval {interval['index']} local recovery classes do not add up")
+        if recovered > relevant:
+            raise AssertionError(f"interval {interval['index']} recovered more nodes than relevant")
         relevant_classes = (
             int(interval["relevant_local_accepted_count"])
             + int(interval["relevant_regional_fallback_count"])
@@ -124,6 +133,10 @@ def verify_generated_assets(
             raise AssertionError(f"interval {interval['index']} relevant rejection percentage is inconsistent")
     aggregate = quality["aggregate"]
     aggregate_relevant = int(aggregate["motion_relevant_node_count"])
+    if int(aggregate["relevant_local_accepted_under_accepted_regional_prior_count"]) + int(
+        aggregate["recovered_weak_regional_proposal_count"]
+    ) != int(aggregate["relevant_local_accepted_count"]):
+        raise AssertionError("aggregate local recovery classes do not add up")
     aggregate_relevant_classes = (
         int(aggregate["relevant_local_accepted_count"])
         + int(aggregate["relevant_regional_fallback_count"])
@@ -197,6 +210,47 @@ def estimate(source: np.ndarray, dx: int, dy: int, nodes: list[tuple[int, int]] 
     node_y = np.asarray(sorted({y for _, y in nodes}), dtype=np.int64)
     field, diagnostics = MOTION.estimate_interval(source, target, 0, 0, node_x, node_y)
     return field, diagnostics, node_x, node_y
+
+
+def estimate_with_forced_rejected_regional_proposal(
+    source: np.ndarray,
+    dx: int,
+    dy: int,
+    proposal_dx: int,
+    proposal_dy: int,
+):
+    """Exercise the B3A gate with an ambiguous regional result and real local matching."""
+
+    target = translated(source, dx, dy)
+    node_x = np.asarray([128], dtype=np.int64)
+    node_y = np.asarray([128], dtype=np.int64)
+    original_choose_hypothesis = MOTION.choose_hypothesis
+    regional_calls = 0
+
+    def forced_regional_rejection(*args, **kwargs):
+        nonlocal regional_calls
+        if regional_calls < 2:
+            regional_calls += 1
+            return {
+                "state": "rejected",
+                "reason": "weak-evidence",
+                "dx": proposal_dx,
+                "dy": proposal_dy,
+                "confidence": 0.0,
+                "informative_count": MOTION.MIN_REGIONAL_INFORMATIVE,
+                "valid_count": args[3].size,
+                "signal_sum": MOTION.MIN_SIGNAL_LOG_SUM,
+            }
+        return original_choose_hypothesis(*args, **kwargs)
+
+    MOTION.choose_hypothesis = forced_regional_rejection
+    try:
+        field, diagnostics = MOTION.estimate_interval(
+            source, target, 0, 0, node_x, node_y
+        )
+    finally:
+        MOTION.choose_hypothesis = original_choose_hypothesis
+    return field, diagnostics
 
 
 def require_translation(source: np.ndarray, dx: int, dy: int) -> dict:
@@ -275,6 +329,35 @@ def main() -> None:
     if repetitive_field[0, 0, 2] != 0.0:
         raise AssertionError("ambiguous repetitive structure was accepted")
 
+    # A deliberately ambiguous regional result is only a proposal: a locally
+    # asymmetric footprint can recover the translation independently.
+    regional_ambiguous_source = np.ones((320, 320), dtype=np.float32)
+    y, x = np.mgrid[:320, :320]
+    local_structure = (x >= 112) & (x <= 144) & (y >= 112) & (y <= 144)
+    regional_ambiguous_source[local_structure] += (
+        0.17 * (x[local_structure] - 112) + 0.23 * (y[local_structure] - 112)
+    )
+    recovered_field, recovered_diag = estimate_with_forced_rejected_regional_proposal(
+        regional_ambiguous_source, 5, 3, 4, 2
+    )
+    if tuple(recovered_field[0, 0, :2].astype(int)) != (5, 3):
+        raise AssertionError("locally asymmetric node did not recover from rejected regional proposal")
+    if recovered_diag["recovered_weak_regional_proposal_count"] != 1:
+        raise AssertionError("rejected regional proposal recovery was not diagnosed")
+    if recovered_diag["regional_fallback_count"] != 0:
+        raise AssertionError("rejected regional result incorrectly produced fallback")
+
+    # The same rejected proposal cannot copy a vector into an ambiguous local
+    # footprint: local acceptance remains authoritative.
+    ambiguous_local_source = np.ones((320, 320), dtype=np.float32)
+    ambiguous_field, ambiguous_diag = estimate_with_forced_rejected_regional_proposal(
+        ambiguous_local_source, 5, 3, 4, 2
+    )
+    if not np.array_equal(ambiguous_field[0, 0], np.zeros(3, dtype=np.float32)):
+        raise AssertionError("rejected regional proposal copied into ambiguous local node")
+    if ambiguous_diag["recovered_weak_regional_proposal_count"] != 0:
+        raise AssertionError("ambiguous local node was incorrectly counted as recovered")
+
     # Package two adjacent rain tiles from one global field and compare the
     # shared x=128 node bytes.  This catches per-tile re-estimation/rounding.
     packaged_field = np.zeros((1, 5, 3), dtype="<f4")
@@ -311,6 +394,13 @@ def main() -> None:
         "dry_rejected": dry_diag["rejected_zero_confidence_count"] > 0,
         "nodata_rejected": nodata_diag["rejected_zero_confidence_count"] > 0,
         "ambiguous_rejected": repetitive_diag["rejected_zero_confidence_count"] > 0,
+        "rejected_regional_proposal_local_recovery": {
+            "recovered": True,
+            "actual": [int(recovered_field[0, 0, 0]), int(recovered_field[0, 0, 1])],
+            "confidence": float(recovered_field[0, 0, 2]),
+            "validation": recovered_diag["validation"],
+        },
+        "rejected_regional_proposal_ambiguous_local_rejected": True,
         "shared_boundary_bytes_identical": True,
         "deterministic_rerun": True,
     }

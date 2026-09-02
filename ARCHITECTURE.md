@@ -127,17 +127,20 @@ evidence is represented by zero displacement and zero confidence.
 
 The v1 estimator uses deterministic globally anchored approximately 512-sample
 regional coarse searches, regional refinement, and a small local
-approximately 16-sample-radius footprint search around each regional vector.
-Regions can therefore obtain different bounded vectors; no single global vector
-is imposed on the field. It matches `log1p(rain_mmh)` with valid/NoData-aware
-mean absolute error, requires rain structure, and derives confidence from
-overlap, signal, improvement over a zero-motion baseline, and ambiguity margin.
-A corresponding strong regional vector may be used only as an explicitly
-reduced-confidence fallback when local evidence is insufficient; there is no
-nearest-neighbor fill across dry or unsupported regions. Estimator details and
-thresholds are recorded in the separate motion manifest, so a future
-radar-history, model-wind, DARTS, or hybrid estimator can replace it without
-changing the MotionField contract.
+approximately 16-sample-radius footprint search around each regional proposal.
+Regions can therefore obtain different bounded proposals; no single global
+vector is imposed on the field. A finite regional candidate is only a local
+search proposal: local evidence may accept a motion-relevant node even when the
+regional match itself was rejected, while an unaccepted regional result never
+populates the MotionField directly. A strong accepted regional vector may still
+be used only as the explicitly reduced-confidence fallback when local evidence
+is insufficient. There is no nearest-neighbor fill across dry or unsupported
+regions. It matches `log1p(rain_mmh)` with valid/NoData-aware mean absolute
+error, requires rain structure, and derives confidence from overlap, signal,
+improvement over a zero-motion baseline, and ambiguity margin. Estimator
+details and thresholds are recorded in the separate motion manifest, so a
+future radar-history, model-wind, DARTS, or hybrid estimator can replace it
+without changing the MotionField contract.
 
 Motion assets live under the ignored
 `data/generated/tiled-rain-motion/current/` root, separately from Phase 0A

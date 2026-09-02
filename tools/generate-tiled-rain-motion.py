@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the experimental Phase 0B1 tiled-rain MotionField.
+"""Generate the experimental tiled-rain MotionField.
 
 The estimator consumes the exact physical Float32 L13 reconstruction used by
 ``generate-tiled-rain.py``.  Motion is estimated once on a globally anchored
@@ -435,6 +435,66 @@ def region_coordinates(
     return np.meshgrid(x_values, y_values)
 
 
+def validation_metrics(
+    source_log: np.ndarray,
+    target_log: np.ndarray,
+    minimum_x: int,
+    minimum_y: int,
+    node_x_values: np.ndarray,
+    node_y_values: np.ndarray,
+    field: np.ndarray,
+    include_mask: np.ndarray | None = None,
+) -> dict[str, float | int]:
+    """Measure selected-field alignment on the same, non-weaker node footprint."""
+
+    zero_errors: list[float] = []
+    selected_errors: list[float] = []
+    improved_count = 0
+    for row, global_y in enumerate(node_y_values):
+        for column, global_x in enumerate(node_x_values):
+            if include_mask is not None and not include_mask[row, column]:
+                continue
+            dx, dy, confidence = field[row, column]
+            if confidence <= 0.0:
+                continue
+            local_x = int(global_x - minimum_x)
+            local_y = int(global_y - minimum_y)
+            y0 = local_y - MOTION_FOOTPRINT_RADIUS
+            y1 = local_y + MOTION_FOOTPRINT_RADIUS
+            x0 = local_x - MOTION_FOOTPRINT_RADIUS
+            x1 = local_x + MOTION_FOOTPRINT_RADIUS
+            xs, ys = np.meshgrid(
+                np.arange(x0, x1 + 1, dtype=np.int64),
+                np.arange(y0, y1 + 1, dtype=np.int64),
+            )
+            zero = score_samples(source_log, target_log, xs, ys, 0, 0, 1)
+            selected = score_samples(
+                source_log,
+                target_log,
+                xs,
+                ys,
+                int(round(float(dx))),
+                int(round(float(dy))),
+                1,
+            )
+            if zero is None or selected is None:
+                continue
+            zero_error = float(zero["error"])
+            selected_error = float(selected["error"])
+            zero_errors.append(zero_error)
+            selected_errors.append(selected_error)
+            if selected_error < zero_error:
+                improved_count += 1
+    evaluated_count = len(selected_errors)
+    return {
+        "evaluated_count": evaluated_count,
+        "zero_motion_mae": float(np.mean(zero_errors)) if zero_errors else 0.0,
+        "selected_motion_mae": float(np.mean(selected_errors)) if selected_errors else 0.0,
+        "improved_over_zero_count": improved_count,
+        "improved_over_zero_percentage": 100.0 * improved_count / max(1, evaluated_count),
+    }
+
+
 def estimate_interval(
     frame_a: np.ndarray,
     frame_b: np.ndarray,
@@ -445,6 +505,7 @@ def estimate_interval(
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Estimate one A -> B field and deterministic quality diagnostics."""
 
+    estimator_start = time.perf_counter()
     source_log = log_signal(frame_a)
     target_log = log_signal(frame_b)
     height, width = source_log.shape
@@ -518,6 +579,14 @@ def estimate_interval(
     relevant_local_accepted_count = 0
     relevant_regional_fallback_count = 0
     relevant_rejected_count = 0
+    relevant_local_accepted_under_accepted_regional_prior_count = 0
+    recovered_weak_regional_proposal_count = 0
+    recovered_confidences: list[float] = []
+    recovered_dx: list[float] = []
+    recovered_dy: list[float] = []
+    recovered_magnitudes: list[float] = []
+    recovered_bound_hits = 0
+    local_accepted_mask = np.zeros(field.shape[:2], dtype=bool)
     for row, global_y in enumerate(node_y_values):
         for column, global_x in enumerate(node_x_values):
             local_x = int(global_x - minimum_x)
@@ -538,13 +607,27 @@ def estimate_interval(
                 math.floor(int(global_y) / MOTION_REGION_SIZE),
             )
             regional_result = regional.get(region_key, {"state": "rejected"})
-            if regional_result.get("state") != "accepted":
+            regional_accepted = regional_result.get("state") == "accepted"
+            try:
+                regional_dx = int(regional_result["dx"])
+                regional_dy = int(regional_result["dy"])
+                regional_proposal = (
+                    math.isfinite(float(regional_dx))
+                    and math.isfinite(float(regional_dy))
+                    and abs(regional_dx) <= MAX_COMPONENT_DISPLACEMENT
+                    and abs(regional_dy) <= MAX_COMPONENT_DISPLACEMENT
+                )
+            except (KeyError, TypeError, ValueError, OverflowError):
+                regional_dx = 0
+                regional_dy = 0
+                regional_proposal = False
+            # A rejected but scored regional match is only a local search
+            # proposal.  It cannot populate the field or provide fallback.
+            if not regional_accepted and (not regional_proposal or not relevance["relevant"]):
                 if relevance["relevant"]:
                     relevant_rejected_count += 1
                 rejected += 1
                 continue
-            regional_dx = int(regional_result["dx"])
-            regional_dy = int(regional_result["dy"])
             local_hypotheses = [
                 (dx, dy)
                 for dy in range(regional_dy - LOCAL_SEARCH_RADIUS, regional_dy + LOCAL_SEARCH_RADIUS + 1)
@@ -578,10 +661,21 @@ def estimate_interval(
                 dy = int(local_result["dy"])
                 confidence = float(local_result["confidence"])
                 local_accepted += 1
+                local_accepted_mask[row, column] = True
                 if relevance["relevant"]:
                     relevant_local_accepted_count += 1
+                    if regional_accepted:
+                        relevant_local_accepted_under_accepted_regional_prior_count += 1
+                    else:
+                        recovered_weak_regional_proposal_count += 1
+                        recovered_confidences.append(confidence)
+                        recovered_dx.append(float(dx))
+                        recovered_dy.append(float(dy))
+                        recovered_magnitudes.append(math.hypot(dx, dy))
+                        if abs(dx) >= MAX_COMPONENT_DISPLACEMENT or abs(dy) >= MAX_COMPONENT_DISPLACEMENT:
+                            recovered_bound_hits += 1
             elif (
-                regional_result.get("state") == "accepted"
+                regional_accepted
                 and regional_result.get("confidence", 0.0) > 0.0
                 and local_result.get("informative_count", 0) < MIN_LOCAL_INFORMATIVE
                 and local_evidence is not None
@@ -610,6 +704,43 @@ def estimate_interval(
     dx_values = np.asarray(accepted_dx, dtype=np.float64)
     dy_values = np.asarray(accepted_dy, dtype=np.float64)
     magnitude_values = np.asarray(accepted_magnitudes, dtype=np.float64)
+    recovered_confidence_values = np.asarray(recovered_confidences, dtype=np.float64)
+    recovered_dx_values = np.asarray(recovered_dx, dtype=np.float64)
+    recovered_dy_values = np.asarray(recovered_dy, dtype=np.float64)
+    recovered_magnitude_values = np.asarray(recovered_magnitudes, dtype=np.float64)
+
+    def distribution(values: np.ndarray, include_tail: bool = False) -> dict[str, float]:
+        result = {
+            "min": float(np.min(values)) if values.size else 0.0,
+            "mean": float(np.mean(values)) if values.size else 0.0,
+            "median": percentile(values, 50),
+            "max": float(np.max(values)) if values.size else 0.0,
+        }
+        if include_tail:
+            result.update({"p90": percentile(values, 90), "p99": percentile(values, 99)})
+        return result
+
+    validation_start = time.perf_counter()
+    field_validation = validation_metrics(
+        source_log,
+        target_log,
+        minimum_x,
+        minimum_y,
+        node_x_values,
+        node_y_values,
+        field,
+    )
+    local_validation = validation_metrics(
+        source_log,
+        target_log,
+        minimum_x,
+        minimum_y,
+        node_x_values,
+        node_y_values,
+        field,
+        local_accepted_mask,
+    )
+    validation_seconds = time.perf_counter() - validation_start
     diagnostics = {
         "node_count": int(field.shape[0] * field.shape[1]),
         "motion_relevant_node_count": motion_relevant_node_count,
@@ -618,6 +749,8 @@ def estimate_interval(
         "rejected_zero_confidence_count": rejected,
         "accepted_count": local_accepted + regional_fallback_count,
         "relevant_local_accepted_count": relevant_local_accepted_count,
+        "relevant_local_accepted_under_accepted_regional_prior_count": relevant_local_accepted_under_accepted_regional_prior_count,
+        "recovered_weak_regional_proposal_count": recovered_weak_regional_proposal_count,
         "relevant_regional_fallback_count": relevant_regional_fallback_count,
         "relevant_rejected_zero_confidence_count": relevant_rejected_count,
         "relevant_accepted_plus_fallback_percentage": 100.0 * (
@@ -655,6 +788,20 @@ def estimate_interval(
             "max": float(np.max(magnitude_values)) if magnitude_values.size else 0.0,
         },
         "bound_hit_count": bound_hits,
+        "recovered_weak_regional_proposal_percentage": 100.0 * recovered_weak_regional_proposal_count / max(1, motion_relevant_node_count),
+        "recovered_confidence": distribution(recovered_confidence_values, include_tail=True),
+        "recovered_dx": distribution(recovered_dx_values),
+        "recovered_dy": distribution(recovered_dy_values),
+        "recovered_magnitude": distribution(recovered_magnitude_values, include_tail=True),
+        "recovered_bound_hit_count": recovered_bound_hits,
+        "validation": field_validation,
+        "local_validation": local_validation,
+        "_recovered_confidences": recovered_confidences,
+        "_recovered_dx": recovered_dx,
+        "_recovered_dy": recovered_dy,
+        "_recovered_magnitudes": recovered_magnitudes,
+        "_estimator_seconds": validation_start - estimator_start,
+        "_validation_seconds": validation_seconds,
     }
     return field, diagnostics
 
@@ -678,6 +825,15 @@ def aggregate_quality(
     relevant_local_accepted = int(
         sum(item["relevant_local_accepted_count"] for item in interval_diagnostics)
     )
+    relevant_local_accepted_under_accepted_regional_prior = int(
+        sum(
+            item["relevant_local_accepted_under_accepted_regional_prior_count"]
+            for item in interval_diagnostics
+        )
+    )
+    recovered_weak_regional_proposal = int(
+        sum(item["recovered_weak_regional_proposal_count"] for item in interval_diagnostics)
+    )
     relevant_regional_fallback = int(
         sum(item["relevant_regional_fallback_count"] for item in interval_diagnostics)
     )
@@ -691,6 +847,22 @@ def aggregate_quality(
     dx_values = accepted_values[:, 0].astype(np.float64, copy=False)
     dy_values = accepted_values[:, 1].astype(np.float64, copy=False)
     magnitudes = np.hypot(dx_values, dy_values)
+    recovered_confidences = np.asarray(
+        [value for item in interval_diagnostics for value in item["_recovered_confidences"]],
+        dtype=np.float64,
+    )
+    recovered_dx = np.asarray(
+        [value for item in interval_diagnostics for value in item["_recovered_dx"]],
+        dtype=np.float64,
+    )
+    recovered_dy = np.asarray(
+        [value for item in interval_diagnostics for value in item["_recovered_dy"]],
+        dtype=np.float64,
+    )
+    recovered_magnitudes = np.asarray(
+        [value for item in interval_diagnostics for value in item["_recovered_magnitudes"]],
+        dtype=np.float64,
+    )
 
     def distribution(values: np.ndarray, include_tail: bool = False) -> dict[str, float]:
         result = {
@@ -702,6 +874,27 @@ def aggregate_quality(
         if include_tail:
             result.update({"p90": percentile(values, 90), "p99": percentile(values, 99)})
         return result
+
+    def aggregate_validation(key: str) -> dict[str, float | int]:
+        evaluated = int(sum(int(item[key]["evaluated_count"]) for item in interval_diagnostics))
+        zero_mae = sum(
+            float(item[key]["zero_motion_mae"]) * int(item[key]["evaluated_count"])
+            for item in interval_diagnostics
+        )
+        selected_mae = sum(
+            float(item[key]["selected_motion_mae"]) * int(item[key]["evaluated_count"])
+            for item in interval_diagnostics
+        )
+        improved = int(
+            sum(int(item[key]["improved_over_zero_count"]) for item in interval_diagnostics)
+        )
+        return {
+            "evaluated_count": evaluated,
+            "zero_motion_mae": zero_mae / max(1, evaluated),
+            "selected_motion_mae": selected_mae / max(1, evaluated),
+            "improved_over_zero_count": improved,
+            "improved_over_zero_percentage": 100.0 * improved / max(1, evaluated),
+        }
 
     return {
         "evaluated_node_intervals": node_count,
@@ -715,12 +908,22 @@ def aggregate_quality(
         },
         "motion_relevant_node_count": motion_relevant,
         "relevant_local_accepted_count": relevant_local_accepted,
+        "relevant_local_accepted_under_accepted_regional_prior_count": relevant_local_accepted_under_accepted_regional_prior,
+        "recovered_weak_regional_proposal_count": recovered_weak_regional_proposal,
         "relevant_regional_fallback_count": relevant_regional_fallback,
         "relevant_rejected_zero_confidence_count": relevant_rejected,
         "relevant_accepted_plus_fallback_percentage": 100.0 * (
             relevant_local_accepted + relevant_regional_fallback
         ) / max(1, motion_relevant),
         "relevant_rejected_percentage": 100.0 * relevant_rejected / max(1, motion_relevant),
+        "recovered_weak_regional_proposal_percentage": 100.0 * recovered_weak_regional_proposal / max(1, motion_relevant),
+        "recovered_confidence": distribution(recovered_confidences, include_tail=True),
+        "recovered_dx": distribution(recovered_dx),
+        "recovered_dy": distribution(recovered_dy),
+        "recovered_magnitude": distribution(recovered_magnitudes, include_tail=True),
+        "recovered_bound_hit_count": int(sum(item["recovered_bound_hit_count"] for item in interval_diagnostics)),
+        "validation": aggregate_validation("validation"),
+        "local_validation": aggregate_validation("local_validation"),
         "nonzero_confidence_count": int(confidences.size),
         "confidence": distribution(confidences, include_tail=True),
         "dx": distribution(dx_values),
@@ -792,7 +995,12 @@ def main() -> None:
     output = args.output.resolve()
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     rain_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
-    validate_source_contract(metadata, rain_manifest)
+    validate_source_contract(
+        metadata,
+        rain_manifest,
+        args.expected_generation_id,
+        args.expected_source_filename,
+    )
     source_manifest_sha256 = sha256_bytes(source_manifest_path)
     source_frames = load_source_frames(metadata_path, metadata)
     phase_0a = load_phase_0a_reconstructor()
@@ -823,7 +1031,8 @@ def main() -> None:
     interval_fields: list[np.ndarray] = []
     interval_diagnostics: list[dict[str, Any]] = []
     interval_seconds: list[float] = []
-    generation_start = time.perf_counter()
+    estimator_interval_seconds: list[float] = []
+    validation_interval_seconds: list[float] = []
     for interval in range(len(rain_frames) - 1):
         interval_start = time.perf_counter()
         field, diagnostics = estimate_interval(
@@ -835,6 +1044,8 @@ def main() -> None:
             node_y_values,
         )
         interval_seconds.append(time.perf_counter() - interval_start)
+        estimator_interval_seconds.append(float(diagnostics["_estimator_seconds"]))
+        validation_interval_seconds.append(float(diagnostics["_validation_seconds"]))
         diagnostics = {
             "index": interval,
             "from": metadata["time"]["timestamps"][interval],
@@ -843,17 +1054,22 @@ def main() -> None:
         }
         interval_fields.append(field)
         interval_diagnostics.append(diagnostics)
-        print(json.dumps({"interval": interval, **diagnostics}, separators=(",", ":")), flush=True)
-    estimation_seconds = time.perf_counter() - generation_start
+        public_diagnostics = {
+            key: value for key, value in diagnostics.items() if not key.startswith("_")
+        }
+        print(json.dumps({"interval": interval, **public_diagnostics}, separators=(",", ":")), flush=True)
+    estimation_seconds = sum(estimator_interval_seconds)
+    validation_seconds = sum(validation_interval_seconds)
 
     if output.exists() and not output.is_dir():
         raise SystemExit(f"output path is not a directory: {output}")
     output.mkdir(parents=True, exist_ok=True)
+    packaging_start = time.perf_counter()
     assets, raw_total, gzip_total = build_asset_payloads(
         interval_fields, rain_manifest, output
     )
-    packaging_seconds = time.perf_counter() - generation_start - estimation_seconds
     quality_aggregate = aggregate_quality(interval_diagnostics, interval_fields)
+    packaging_seconds = time.perf_counter() - packaging_start
     manifest = {
         "schema": SCHEMA,
         "version": VERSION,
@@ -894,7 +1110,7 @@ def main() -> None:
         "intervals": interval_pairs(metadata["time"]["timestamps"]),
         "estimator": {
             "provenance": "radar-derived",
-            "algorithm": "deterministic hierarchical block matcher; globally anchored regional coarse search/refinement followed by sparse local node refinement",
+            "algorithm": "deterministic hierarchical block matcher; globally anchored regional coarse search/refinement provides bounded local proposals, followed by sparse local node refinement",
             "matching_signal": "log1p(rain_mmh); stored physical rain is unchanged",
             "coarse_displacement_step": COARSE_DISPLACEMENT_STEP,
             "regional_size_l13_samples": MOTION_REGION_SIZE,
@@ -918,11 +1134,18 @@ def main() -> None:
             "regional_fallback_confidence_scale": REGIONAL_FALLBACK_CONFIDENCE_SCALE,
             "metric": "mean absolute difference over valid overlapping informative samples; deterministic row-major candidate order with lexicographic tie-break",
             "fallback": "corresponding strong regional vector at half regional confidence only when local informative evidence is insufficient",
+            "rejected_regional_proposal": "a finite scored regional candidate may seed local refinement only for a motion-relevant node; local acceptance is required and regional fallback is forbidden",
+            "validation": "same 33x33 local footprint as matching; log-space MAE for each nonzero field vector and accepted local vector versus zero motion",
         },
         "quality_diagnostics": {
             "unique_global_motion_nodes": int(node_x_values.size * node_y_values.size),
             "aggregate": quality_aggregate,
-            "intervals": interval_diagnostics,
+            "intervals": [
+                {
+                    key: value for key, value in diagnostics.items() if not key.startswith("_")
+                }
+                for diagnostics in interval_diagnostics
+            ],
         },
         "tiles": assets,
         "tile_count": len(assets),
@@ -942,6 +1165,9 @@ def main() -> None:
         "packaging_seconds": packaging_seconds,
         "total_seconds": time.perf_counter() - total_start,
         "interval_seconds": interval_seconds,
+        "estimator_interval_seconds": estimator_interval_seconds,
+        "validation_interval_seconds": validation_interval_seconds,
+        "validation_seconds": validation_seconds,
         "interval_count": len(interval_fields),
         "unique_global_motion_nodes": int(node_x_values.size * node_y_values.size),
         "quality_aggregate": quality_aggregate,
