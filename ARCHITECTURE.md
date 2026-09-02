@@ -97,6 +97,62 @@ Phase 0A intentionally does not solve temporal motion: the shader uses direct
 model motion, single/double warp, and materialized subframes remain deferred to
 Phase 0B.
 
+## Experimental tiled-rain Phase 0B1 — offline MotionField, non-default
+
+Phase 0B1 adds a separate physical motion channel without changing the
+browser/runtime path. Its boundary is intentionally replaceable:
+
+```text
+normalized rain frames + timestamps
+        ↓ offline MotionEstimator (radar-derived v1 block matcher)
+globally anchored sparse L13 MotionField
+        ↓ compact per-spatial-rain-tile assets
+future browser GPU temporal warp (Phase 0B2)
+```
+
+`MotionEstimator` consumes the physical Float32 L13 reconstruction produced by
+the exact Phase 0A `reconstruct_frame` implementation. It does not operate on
+the provider longitude/latitude grid, UInt16 transport values, presentation
+colors, or browser tiles. The resulting `MotionField` is an independent
+renderer-facing contract containing one forward `dx`, `dy`, and `confidence`
+triple for every adjacent source-frame interval. It uses the same globally
+anchored L13 integer sample identity as rain, with one node every 64 L13
+samples. Displacements cover the complete source interval, are measured in L13
+samples, and use increasing global x/east and increasing global y/south signs.
+Each component is bounded to ±12 samples. Float32 little-endian assets store
+interleaved `dx, dy, confidence`; unsupported, dry, ambiguous, or insufficient
+evidence is represented by zero displacement and zero confidence.
+
+The v1 estimator uses a deterministic shared sparse coarse search, globally
+anchored approximately 512-sample regional refinement, and a small local
+approximately 16-sample-radius footprint search around the regional prior. It
+matches `log1p(rain_mmh)` with valid/NoData-aware mean absolute error, requires
+rain structure, and derives confidence from overlap, signal, improvement over a
+zero-motion baseline, and ambiguity margin. A corresponding strong regional
+vector may be used only as an explicitly reduced-confidence fallback when local
+evidence is insufficient; there is no nearest-neighbor fill across dry or
+unsupported regions. Estimator details and thresholds are recorded in the
+separate motion manifest, so a future radar-history, model-wind, DARTS, or
+hybrid estimator can replace it without changing the MotionField contract.
+
+Motion assets live under the ignored
+`data/generated/tiled-rain-motion/current/` root, separately from Phase 0A
+UInt16 rain assets. The motion manifest binds its content to both the normalized
+`source_generation_id` and the SHA-256 of the exact Phase 0A rain manifest used
+as the RainField basis. Each 128 × 128 rain tile packages the shared global
+motion nodes at its 3 × 3 boundary-inclusive footprint; duplicated boundary
+nodes are byte-identical because estimation occurs before tile packaging.
+Deterministic gzip sidecars and reproducible per-interval quality diagnostics
+are emitted alongside the raw Float32 payloads. Benchmark timings are kept out
+of deterministic artifact content.
+
+The browser remains unchanged in Phase 0B1 and continues to perform direct A/B
+rain interpolation in the Phase 0A tiled path. No browser motion computation,
+GPU warp, rain halo, model wind, radar-history prior, or materialized subframe
+is introduced here. Future Phase 0B2 will consume this MotionField for GPU
+temporal warp while preserving the browser as a bounded tile-residency and
+GPU-presentation client.
+
 The current data/runtime sequence is: (1) mutable discovery metadata pointing
 to an immutable generation containing the full support sidecar and independently
 delivered exact source frames, (2) viewport- and

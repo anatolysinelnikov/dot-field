@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Dependency-light synthetic verification for Phase 0B1 MotionField."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+
+sys.dont_write_bytecode = True
+MODULE_PATH = Path(__file__).with_name("generate-tiled-rain-motion.py")
+SPEC = importlib.util.spec_from_file_location("tiled_rain_motion", MODULE_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise SystemExit(f"cannot load {MODULE_PATH}")
+MOTION = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MOTION)
+
+
+def sha256_bytes(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_generated_assets(generated: Path) -> dict:
+    manifest_path = generated / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest["source_generation_id"] != MOTION.EXPECTED_GENERATION_ID:
+        raise AssertionError("generated motion has the wrong frozen generation")
+    if manifest["interval_count"] != 18 or len(manifest["intervals"]) != 18:
+        raise AssertionError("generated motion does not contain 18 adjacent intervals")
+    if manifest["rain_tile_size"] != 128:
+        raise AssertionError("generated motion has the wrong rain tile size")
+    if manifest["motion_grid"]["node_spacing_l13_samples"] != 64:
+        raise AssertionError("generated motion has the wrong node spacing")
+    source_manifest = (generated / manifest["source_tiled_rain_manifest"]).resolve()
+    if sha256_bytes(source_manifest) != manifest["source_tiled_rain_manifest_sha256"]:
+        raise AssertionError("motion is not bound to the exact current Phase 0A manifest")
+
+    tile_by_coordinate = {}
+    raw_total = 0
+    gzip_total = 0
+    for descriptor in manifest["tiles"]:
+        x = int(descriptor["x"])
+        y = int(descriptor["y"])
+        node_width = int(descriptor["node_width"])
+        node_height = int(descriptor["node_height"])
+        if (node_width, node_height) != (3, 3):
+            raise AssertionError(f"tile {x},{y} does not have the expected 3x3 node footprint")
+        asset = generated / descriptor["asset"]
+        payload = np.fromfile(asset, dtype="<f4")
+        expected_values = 18 * node_width * node_height * 3
+        if payload.size != expected_values or descriptor["byte_length"] != payload.nbytes:
+            raise AssertionError(f"tile {x},{y} has an invalid payload length")
+        values = payload.reshape(18, node_height, node_width, 3)
+        if np.any(~np.isfinite(values)):
+            raise AssertionError(f"tile {x},{y} contains non-finite motion")
+        if np.any(np.abs(values[:, :, :, :2]) > MOTION.MAX_COMPONENT_DISPLACEMENT):
+            raise AssertionError(f"tile {x},{y} exceeds the component displacement bound")
+        confidence = values[:, :, :, 2]
+        if np.any((confidence < 0) | (confidence > 1)):
+            raise AssertionError(f"tile {x},{y} contains out-of-range confidence")
+        zero_confidence = confidence == 0
+        if np.any(values[:, :, :, :2][zero_confidence] != 0):
+            raise AssertionError(f"tile {x},{y} has nonzero displacement at zero confidence")
+        gzip_asset = generated / descriptor["gzip_asset"]
+        if descriptor["gzip_byte_length"] != gzip_asset.stat().st_size:
+            raise AssertionError(f"tile {x},{y} has an invalid gzip length")
+        tile_by_coordinate[(x, y)] = values
+        raw_total += payload.nbytes
+        gzip_total += gzip_asset.stat().st_size
+
+    bounds = manifest["motion_grid"]
+    expected_node_count = int(bounds["node_width"]) * int(bounds["node_height"])
+    if manifest["quality_diagnostics"]["unique_global_motion_nodes"] != expected_node_count:
+        raise AssertionError("manifest global motion-node count is inconsistent")
+    if manifest["payload_totals"] != {"raw_f32_bytes": raw_total, "gzip_bytes": gzip_total}:
+        raise AssertionError("manifest payload totals are inconsistent")
+    for (x, y), values in tile_by_coordinate.items():
+        right = tile_by_coordinate.get((x + 1, y))
+        if right is not None and not np.array_equal(values[:, :, -1, :], right[:, :, 0, :]):
+            raise AssertionError(f"horizontal boundary node mismatch at {x + 1},{y}")
+        below = tile_by_coordinate.get((x, y + 1))
+        if below is not None and not np.array_equal(values[:, -1, :, :], below[:, 0, :, :]):
+            raise AssertionError(f"vertical boundary node mismatch at {x},{y + 1}")
+    return {
+        "tile_count": len(tile_by_coordinate),
+        "interval_count": manifest["interval_count"],
+        "unique_global_motion_nodes": expected_node_count,
+        "raw_motion_bytes": raw_total,
+        "gzip_motion_bytes": gzip_total,
+        "shared_boundary_nodes": True,
+    }
+
+
+def make_pattern(height: int = 320, width: int = 320) -> np.ndarray:
+    """Make asymmetric rain structure with a quiet/dry area and NoData edge."""
+
+    y, x = np.mgrid[:height, :width]
+    rain = np.zeros((height, width), dtype=np.float32)
+    main = ((x - 128) / 34) ** 2 + ((y - 128) / 28) ** 2 <= 1
+    rain[main] = 1.0 + 0.005 * (x[main] - 90) + 0.008 * (y[main] - 100)
+    lobe = ((x - 163) / 11) ** 2 + ((y - 110) / 7) ** 2 <= 1
+    rain[lobe] += 8.0
+    notch = ((x - 111) / 8) ** 2 + ((y - 146) / 5) ** 2 <= 1
+    rain[notch] *= 0.12
+    tail = (x >= 91) & (x <= 178) & (y >= 150) & (y <= 158)
+    rain[tail] += (x[tail] - 90) / 40.0
+    # A second distinct system lets the multi-node test prove shared global
+    # identity without making the local matcher depend on one generic blob.
+    second = ((x - 222) / 18) ** 2 + ((y - 224) / 23) ** 2 <= 1
+    rain[second] += 2.0 + 0.01 * (x[second] - 205) + 0.02 * (y[second] - 202)
+    rain[:4, :] = np.nan
+    rain[:, :4] = np.nan
+    return rain
+
+
+def translated(source: np.ndarray, dx: int, dy: int) -> np.ndarray:
+    target = np.zeros_like(source)
+    source_height, source_width = source.shape
+    source_x0 = max(0, -dx)
+    source_x1 = min(source_width, source_width - dx) if dx >= 0 else source_width
+    source_y0 = max(0, -dy)
+    source_y1 = min(source_height, source_height - dy) if dy >= 0 else source_height
+    target_x0 = source_x0 + dx
+    target_x1 = source_x1 + dx
+    target_y0 = source_y0 + dy
+    target_y1 = source_y1 + dy
+    target[target_y0:target_y1, target_x0:target_x1] = source[source_y0:source_y1, source_x0:source_x1]
+    target[:4, :] = np.nan
+    target[:, :4] = np.nan
+    return target
+
+
+def estimate(source: np.ndarray, dx: int, dy: int, nodes: list[tuple[int, int]] | None = None):
+    target = translated(source, dx, dy)
+    if nodes is None:
+        nodes = [(128, 128)]
+    node_x = np.asarray(sorted({x for x, _ in nodes}), dtype=np.int64)
+    node_y = np.asarray(sorted({y for _, y in nodes}), dtype=np.int64)
+    field, diagnostics = MOTION.estimate_interval(source, target, 0, 0, node_x, node_y)
+    return field, diagnostics, node_x, node_y
+
+
+def require_translation(source: np.ndarray, dx: int, dy: int) -> dict:
+    field, diagnostics, node_x, node_y = estimate(source, dx, dy)
+    column = int(np.where(node_x == 128)[0][0])
+    row = int(np.where(node_y == 128)[0][0])
+    result = field[row, column]
+    if int(result[0]) != dx or int(result[1]) != dy:
+        raise AssertionError(f"expected ({dx},{dy}), got ({result[0]},{result[1]})")
+    if dx or dy:
+        if not result[2] > 0:
+            raise AssertionError(f"expected positive confidence for ({dx},{dy})")
+    return {
+        "expected": [dx, dy],
+        "actual": [int(result[0]), int(result[1])],
+        "confidence": float(result[2]),
+        "accepted": diagnostics["accepted_count"],
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--generated",
+        type=Path,
+        default=None,
+        help="also validate a generated MotionField directory",
+    )
+    args = parser.parse_args()
+    source = make_pattern()
+    translations = [
+        (0, 0),
+        (5, 0),
+        (-5, 0),
+        (0, 5),
+        (0, -5),
+        (6, -7),
+        (12, -12),
+    ]
+    translation_results = [require_translation(source, dx, dy) for dx, dy in translations]
+
+    # A boundary-crossing system and three globally anchored nodes exercise
+    # node identity independently of a 128-sample rain-tile boundary.
+    boundary_source = np.zeros((320, 320), dtype=np.float32)
+    boundary_source[96:160, 104:160] = source[96:160, 104:160]
+    boundary_field, boundary_diag, node_x, node_y = estimate(
+        boundary_source, 7, 3, [(64, 128), (128, 128), (192, 128)]
+    )
+    boundary_row = int(np.where(node_y == 128)[0][0])
+    boundary_column = int(np.where(node_x == 128)[0][0])
+    boundary_result = boundary_field[boundary_row, boundary_column]
+    if tuple(boundary_result[:2].astype(int)) != (7, 3):
+        raise AssertionError(f"tile boundary translation failed: {boundary_result}")
+
+    # A fully dry node is never regional-filled, even when another node in the
+    # same global region has strong rain evidence.
+    dry_field, dry_diag, dry_x, dry_y = estimate(source, 5, 2, [(128, 128), (240, 64)])
+    dry_row = int(np.where(dry_y == 64)[0][0])
+    dry_column = int(np.where(dry_x == 240)[0][0])
+    if not np.array_equal(dry_field[dry_row, dry_column], np.zeros(3, dtype=np.float32)):
+        raise AssertionError("valid dry region received a motion fallback")
+
+    # An all-NoData edge is rejected.
+    nodata = np.full((96, 96), np.nan, dtype=np.float32)
+    nodata_field, nodata_diag, _, _ = estimate(nodata, 0, 0, [(48, 48)])
+    if not np.array_equal(nodata_field[0, 0], np.zeros(3, dtype=np.float32)):
+        raise AssertionError("NoData node was not rejected")
+
+    # A repetitive checkerboard has several equally good hypotheses and must
+    # not be converted into a confident arbitrary vector.
+    repetitive = np.zeros((320, 320), dtype=np.float32)
+    repetitive[96:160, 96:160] = ((np.indices((64, 64)).sum(axis=0) % 2) + 1).astype(np.float32)
+    repetitive_field, repetitive_diag, _, _ = estimate(repetitive, 4, 0, [(128, 128)])
+    if repetitive_field[0, 0, 2] != 0.0:
+        raise AssertionError("ambiguous repetitive structure was accepted")
+
+    # Package two adjacent rain tiles from one global field and compare the
+    # shared x=128 node bytes.  This catches per-tile re-estimation/rounding.
+    packaged_field = np.zeros((1, 5, 3), dtype="<f4")
+    packaged_field[0, :, :] = np.asarray(
+        [[0.0, 1.0, 0.1], [2.0, 3.0, 0.2], [4.0, 5.0, 0.3], [6.0, 7.0, 0.4], [8.0, 9.0, 0.5]],
+        dtype="<f4",
+    )
+    package_manifest = {"tile_index_bounds": {"min_x": 0, "max_x": 1, "min_y": 0, "max_y": 0}}
+    with tempfile.TemporaryDirectory(prefix="dot-field-motion-verify-") as temporary:
+        assets, _, _ = MOTION.build_asset_payloads(
+            [packaged_field], package_manifest, Path(temporary)
+        )
+        first = (Path(temporary) / assets[0]["asset"]).read_bytes()
+        second = (Path(temporary) / assets[1]["asset"]).read_bytes()
+        # One node is 12 bytes and is the third node in tile 0 / first node in tile 1.
+        if first[2 * 12:3 * 12] != second[:12]:
+            raise AssertionError("shared boundary motion node bytes differ")
+
+    # Deterministic estimator output is byte-identical across independent runs.
+    first_bytes = estimate(source, 6, -7)[0].tobytes()
+    second_bytes = estimate(source, 6, -7)[0].tobytes()
+    if first_bytes != second_bytes:
+        raise AssertionError("synthetic rerun is not byte deterministic")
+
+    result = {
+        "status": "passed",
+        "translation_cases": translation_results,
+        "boundary_crossing": {
+            "expected": [7, 3],
+            "actual": [int(boundary_result[0]), int(boundary_result[1])],
+            "confidence": float(boundary_result[2]),
+            "accepted": boundary_diag["accepted_count"],
+        },
+        "dry_rejected": dry_diag["rejected_zero_confidence_count"] > 0,
+        "nodata_rejected": nodata_diag["rejected_zero_confidence_count"] > 0,
+        "ambiguous_rejected": repetitive_diag["rejected_zero_confidence_count"] > 0,
+        "shared_boundary_bytes_identical": True,
+        "deterministic_rerun": True,
+    }
+    if args.generated is not None:
+        result["generated_assets"] = verify_generated_assets(args.generated.resolve())
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
