@@ -11,12 +11,8 @@ export const TILED_RAIN_SCHEMA = 'dot-field-tiled-rain-v0';
 export const TILED_RAIN_LOD_LEVEL = 13;
 export const TILED_RAIN_TILE_SIZE = 128;
 export const TILED_RAIN_GRID_SIZE = 2 ** TILED_RAIN_LOD_LEVEL;
-// This is a hard ready-block ceiling. Current visible target pairs fit within
-// it; fallback blocks are best-effort when a large jump would exceed it.
-const MAX_RESIDENT_BLOCKS = 320;
-const MAX_BLOCK_BYTES = TILED_RAIN_TILE_SIZE * TILED_RAIN_TILE_SIZE * 4 * Uint16Array.BYTES_PER_ELEMENT;
-const MAX_CPU_RESIDENT_BYTES = MAX_RESIDENT_BLOCKS * MAX_BLOCK_BYTES;
-const MAX_GPU_RESIDENT_BYTES = MAX_CPU_RESIDENT_BYTES;
+// The LRU returns toward this target whenever the required target permits it.
+const READY_CACHE_BLOCK_LIMIT = 320;
 export const TILED_RAIN_MAX_CONCURRENT_FETCHES = 8;
 const VIEWPORT_OVERSCAN_SAMPLES = 64;
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
@@ -138,9 +134,6 @@ export class TiledRainTileStore {
       evictions: 0,
       staleDesiredStates: 0,
       sourceFrameStackFetched: false,
-      maxResidentBlocks: MAX_RESIDENT_BLOCKS,
-      maxCpuResidentBytes: MAX_CPU_RESIDENT_BYTES,
-      maxGpuTextureBytes: MAX_GPU_RESIDENT_BYTES,
       peakResidentBlockCount: 0,
       peakLogicalUInt16ResidentBytes: 0,
       peakEstimatedGpuTextureBytes: 0,
@@ -149,6 +142,12 @@ export class TiledRainTileStore {
       abortedObsoleteRequestCount: 0,
       maxConcurrentFetches: TILED_RAIN_MAX_CONCURRENT_FETCHES,
       peakInFlightFetchCount: 0,
+      gzipResponseCount: 0,
+      identityResponseCount: 0,
+      unknownEncodingResponseCount: 0,
+      responseContentLengthBytes: 0,
+      logicalFetchedBytes: 0,
+      latestContentEncoding: null,
       lastError: null
     };
     this.fetchQueue = [];
@@ -156,7 +155,16 @@ export class TiledRainTileStore {
     this.latestUsefulBlockKeys = new Set();
     this.protectedBlockKeys = new Set();
     this.maxTargetBlocks = this.tiles.size * 2;
-    this.maxTrackedBlocks = MAX_RESIDENT_BLOCKS + this.maxTargetBlocks + TILED_RAIN_MAX_CONCURRENT_FETCHES;
+    const blockByteLengths = [...this.tiles.values()].flatMap((tile) => tile.blocks.map((block) => block.byte_length));
+    this.maxBlockBytes = Math.max(0, ...blockByteLengths);
+    this.hardReadyBlockLimit = Math.max(READY_CACHE_BLOCK_LIMIT, this.maxTargetBlocks);
+    this.maxTrackedBlocks = this.hardReadyBlockLimit + this.maxTargetBlocks + TILED_RAIN_MAX_CONCURRENT_FETCHES;
+    this.diagnosticsState.readyCacheBlockLimit = READY_CACHE_BLOCK_LIMIT;
+    this.diagnosticsState.hardReadyBlockLimit = this.hardReadyBlockLimit;
+    this.diagnosticsState.maxTargetBlockCount = this.maxTargetBlocks;
+    this.diagnosticsState.readyCacheByteTarget = READY_CACHE_BLOCK_LIMIT * this.maxBlockBytes;
+    this.diagnosticsState.hardCpuResidentByteLimit = this.hardReadyBlockLimit * this.maxBlockBytes;
+    this.diagnosticsState.hardGpuResidentByteLimit = this.diagnosticsState.hardCpuResidentByteLimit;
     this.diagnosticsState.maxPendingBlocks = this.maxTargetBlocks + TILED_RAIN_MAX_CONCURRENT_FETCHES;
     this.diagnosticsState.maxTrackedBlocks = this.maxTrackedBlocks;
     this.diagnosticsState.trackedBlockCount = 0;
@@ -244,9 +252,17 @@ export class TiledRainTileStore {
     void fetch(url, { signal: state.controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`Unable to load tiled rain block ${url} (${response.status}).`);
+        const contentEncoding = response.headers?.get?.('Content-Encoding')?.toLowerCase() || null;
+        if (contentEncoding === 'gzip') this.diagnosticsState.gzipResponseCount++;
+        else if (!contentEncoding || contentEncoding === 'identity') this.diagnosticsState.identityResponseCount++;
+        else this.diagnosticsState.unknownEncodingResponseCount++;
+        this.diagnosticsState.latestContentEncoding = contentEncoding || 'identity';
+        const contentLength = Number(response.headers?.get?.('Content-Length'));
+        if (Number.isFinite(contentLength) && contentLength >= 0) this.diagnosticsState.responseContentLengthBytes += contentLength;
         return response.arrayBuffer();
       })
       .then((payload) => {
+        this.diagnosticsState.logicalFetchedBytes += payload.byteLength;
         if (state.obsolete || !this.latestUsefulBlockKeys.has(state.key)) {
           state.status = 'aborted';
           state.resolve(null);
@@ -292,7 +308,8 @@ export class TiledRainTileStore {
       .filter((state) => state.status === 'ready' && !keepKeys.has(state.key))
       .sort((left, right) => left.lastUsed - right.lastUsed);
     let readyBlockCount = [...this.blocks.values()].filter((state) => state.status === 'ready').length;
-    while (readyBlockCount > MAX_RESIDENT_BLOCKS && candidates.length) {
+    const readyCacheLimit = Math.min(this.hardReadyBlockLimit, Math.max(READY_CACHE_BLOCK_LIMIT, keepKeys.size));
+    while (readyBlockCount > readyCacheLimit && candidates.length) {
       const state = candidates.shift();
       if (state.gpuTexture && this.gl) this.gl.deleteTexture(state.gpuTexture);
       this.blocks.delete(state.key);

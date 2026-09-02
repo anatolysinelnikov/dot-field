@@ -76,14 +76,17 @@ The tiled loader selects the conservative visible Mercator tile envelope with a
 small deterministic L13 overscan, requests only the current frame pair's
 blocks, and keeps a committed renderable frame pair while a newer requested
 pair loads. A bounded eight-fetch queue cancels obsolete queued and in-flight
-blocks; stale completions cannot commit. Ready CPU/GPU blocks have a hard
-320-block LRU ceiling (with matching worst-case byte ceilings); only the
-newest target is fetched, while already-resident committed fallback blocks are
-kept for ordinary adjacent transitions. Pending ownership is separately
-bounded to the maximum manifest-visible target pair plus eight aborting
-in-flight requests, and total tracked block state has an explicit ceiling.
-Large jumps therefore evict fallback state rather than allowing target and
-fallback residency to grow without limit. It uploads block payloads directly as
+blocks; stale completions cannot commit. The ready-block LRU has a normal
+320-block cache target, but its true hard ceiling is derived from the manifest:
+`max(tile_count * 2, 320)`, because an atomic frame pair can require two blocks
+per spatial tile. CPU and estimated GPU byte ceilings use the actual maximum
+block payload size and this hard ready-block limit. The newest target has
+priority; already-resident committed fallback blocks are kept for ordinary
+adjacent transitions and evicted before required target data. Pending ownership
+and total tracked block state are separately bounded. Large cross-boundary
+transitions may therefore reach the derived hard ceiling, after which fallback
+cannot add more ready blocks; once the target shrinks, LRU eviction returns
+toward the 320-block cache target. It uploads block payloads directly as
 WebGL2 integer texture arrays without expanding the tile to Float32 arrays or
 constructing per-sample JavaScript positions. Camera movement changes tile
 orchestration; it does not reconstruct a weather field or rebuild a geographic
@@ -343,11 +346,14 @@ source generation, visible/resident tile and block counts, pending requests,
 logical UInt16 bytes, estimated GPU texture bytes, tile request/fetch/upload
 counters, latest and cumulative texture upload timing, first tiled-weather
 visible timing, evictions, the current source frame pair and shader progress,
-and `sourceFrameStackFetched: false`. The normal source loader, RAW, Squares,
-and `GeographicWeatherPyramid` are not instantiated on this path.
-The tiled snapshot also exposes the eight-fetch concurrency ceiling, current
-in-flight and queued work, ready/pending/total residency ceilings, peak
-in-flight and residency, and aborted obsolete requests.
+and `sourceFrameStackFetched: false`. It also records direct tiled response
+transport evidence: gzip/identity/unknown-encoding response counts, cumulative
+`Content-Length` when exposed, logical fetched bytes, and the latest response
+encoding. The normal source loader, RAW, Squares, and
+`GeographicWeatherPyramid` are not instantiated on this path. The tiled
+snapshot also exposes the eight-fetch concurrency ceiling, current in-flight
+and queued work, ready/pending/total residency ceilings, peak in-flight and
+residency, and aborted obsolete requests.
 
 Export uses schema version 1 with session metadata, environment, limitations,
 summary, samples, events, and weather resources. MapTiler keys,
