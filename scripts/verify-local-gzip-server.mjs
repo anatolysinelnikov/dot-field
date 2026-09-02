@@ -1,5 +1,5 @@
 import { request } from 'node:http';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
@@ -7,10 +7,6 @@ import { tmpdir } from 'node:os';
 import { createLocalServer } from './serve-local.mjs';
 
 const compress = promisify(gzip);
-const currentRoot = new URL('../data/generated/current/', import.meta.url);
-const currentMetadata = JSON.parse(await readFile(new URL('metadata.json', currentRoot), 'utf8'));
-const originalFrameFile = new URL(currentMetadata.rain.frame_assets[0], currentRoot);
-const originalSupportFile = new URL(currentMetadata.support_mask.asset, currentRoot);
 const fixtureRoot = await mkdtemp(join(tmpdir(), 'dot-field-gzip-verifier-'));
 const framePath = 'data/generated/generation-gzip-test/rain/frame-000.f32';
 const supportPath = 'data/generated/generation-gzip-test/support.mask';
@@ -37,16 +33,17 @@ function rawRequest(port, path, headers) {
   });
 }
 
-const original = await readFile(originalFrameFile);
+const original = Buffer.alloc(16 * Float32Array.BYTES_PER_ELEMENT);
+for (let index = 0; index < 16; index++) original.writeFloatLE((index - 3) * 0.25, index * Float32Array.BYTES_PER_ELEMENT);
 await writeFile(frameFile, original);
 const sidecar = await compress(original, { level: 9 });
 await writeFile(`${frameFile}.gz`, sidecar);
-const originalSupport = await readFile(originalSupportFile);
+const originalSupport = Buffer.from([0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0]);
 await writeFile(supportFile, originalSupport);
 const supportSidecar = await compress(originalSupport, { level: 9 });
 await writeFile(`${supportFile}.gz`, supportSidecar);
-const originalU16 = Buffer.alloc(128 * 128 * 2);
-for (let index = 0; index < 128 * 128; index++) originalU16.writeUInt16LE((index * 17) % 65536, index * 2);
+const originalU16 = Buffer.alloc(16 * Uint16Array.BYTES_PER_ELEMENT);
+for (let index = 0; index < 16; index++) originalU16.writeUInt16LE((index * 4097) % 65536, index * Uint16Array.BYTES_PER_ELEMENT);
 await writeFile(u16File, originalU16);
 const u16Sidecar = await compress(originalU16, { level: 9 });
 await writeFile(`${u16File}.gz`, u16Sidecar);
