@@ -1,5 +1,6 @@
 import { setGeographicProjection } from './geographic-layer-utils.js';
 import {
+  DOTS_BASE_RAIN_MAX_RADIUS_FRACTION,
   DOTS_STRONG_RAIN_FULL_MMH,
   DOTS_STRONG_RAIN_ONSET_MMH,
   DOTS_STRONG_RAIN_SHAPE_ANCHORS,
@@ -10,9 +11,12 @@ export const TILED_RAIN_SCHEMA = 'dot-field-tiled-rain-v0';
 export const TILED_RAIN_LOD_LEVEL = 13;
 export const TILED_RAIN_TILE_SIZE = 128;
 export const TILED_RAIN_GRID_SIZE = 2 ** TILED_RAIN_LOD_LEVEL;
-// This fixed bound is intentionally large enough for the current support's
-// visible pair while remaining independent of the source Float32 sequence.
+// This is a hard ready-block ceiling. Current visible target pairs fit within
+// it; fallback blocks are best-effort when a large jump would exceed it.
 const MAX_RESIDENT_BLOCKS = 320;
+const MAX_BLOCK_BYTES = TILED_RAIN_TILE_SIZE * TILED_RAIN_TILE_SIZE * 4 * Uint16Array.BYTES_PER_ELEMENT;
+const MAX_CPU_RESIDENT_BYTES = MAX_RESIDENT_BLOCKS * MAX_BLOCK_BYTES;
+const MAX_GPU_RESIDENT_BYTES = MAX_CPU_RESIDENT_BYTES;
 export const TILED_RAIN_MAX_CONCURRENT_FETCHES = 8;
 const VIEWPORT_OVERSCAN_SAMPLES = 64;
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
@@ -135,6 +139,11 @@ export class TiledRainTileStore {
       staleDesiredStates: 0,
       sourceFrameStackFetched: false,
       maxResidentBlocks: MAX_RESIDENT_BLOCKS,
+      maxCpuResidentBytes: MAX_CPU_RESIDENT_BYTES,
+      maxGpuTextureBytes: MAX_GPU_RESIDENT_BYTES,
+      peakResidentBlockCount: 0,
+      peakLogicalUInt16ResidentBytes: 0,
+      peakEstimatedGpuTextureBytes: 0,
       inFlightFetchCount: 0,
       queuedFetchCount: 0,
       abortedObsoleteRequestCount: 0,
@@ -145,6 +154,13 @@ export class TiledRainTileStore {
     this.fetchQueue = [];
     this.inFlightFetchCount = 0;
     this.latestUsefulBlockKeys = new Set();
+    this.protectedBlockKeys = new Set();
+    this.maxTargetBlocks = this.tiles.size * 2;
+    this.maxTrackedBlocks = MAX_RESIDENT_BLOCKS + this.maxTargetBlocks + TILED_RAIN_MAX_CONCURRENT_FETCHES;
+    this.diagnosticsState.maxPendingBlocks = this.maxTargetBlocks + TILED_RAIN_MAX_CONCURRENT_FETCHES;
+    this.diagnosticsState.maxTrackedBlocks = this.maxTrackedBlocks;
+    this.diagnosticsState.trackedBlockCount = 0;
+    this.diagnosticsState.peakTrackedBlockCount = 0;
   }
 
   descriptor(tileKey, blockIndex) {
@@ -235,15 +251,11 @@ export class TiledRainTileStore {
           return null;
         }
         if (payload.byteLength !== state.descriptor.byte_length) throw new Error(`Tiled rain block ${state.key} byte length is ${payload.byteLength}, expected ${state.descriptor.byte_length}.`);
-        const values = new Uint16Array(payload);
-        for (let index = 0; index < values.length; index++) {
-          if (values[index] === 0 || values[index] === 1 || (values[index] >= 2 && values[index] <= 65535)) continue;
-          throw new Error(`Tiled rain block ${state.key} has an invalid UInt16 code at ${index}.`);
-        }
         state.payload = payload;
         state.status = 'ready';
         state.lastUsed = ++this.lastUsed;
         this.diagnosticsState.tileFetchCount++;
+        this.evict(this.protectedBlockKeys);
         this.onTiming(`tiled-rain-block-${state.tileKey}-${state.blockIndex}-fetch-complete`);
         state.resolve(state);
         return state;
@@ -266,6 +278,7 @@ export class TiledRainTileStore {
         state.controller = null;
         state.promise = null;
         if (state.status === 'aborted' || state.status === 'error') this.blocks.delete(state.key);
+        this.updateMemoryDiagnostics();
         this.pumpFetchQueue();
       });
   }
@@ -274,10 +287,12 @@ export class TiledRainTileStore {
     const candidates = [...this.blocks.values()]
       .filter((state) => state.status === 'ready' && !keepKeys.has(state.key))
       .sort((left, right) => left.lastUsed - right.lastUsed);
-    while (this.blocks.size > MAX_RESIDENT_BLOCKS && candidates.length) {
+    let readyBlockCount = [...this.blocks.values()].filter((state) => state.status === 'ready').length;
+    while (readyBlockCount > MAX_RESIDENT_BLOCKS && candidates.length) {
       const state = candidates.shift();
       if (state.gpuTexture && this.gl) this.gl.deleteTexture(state.gpuTexture);
       this.blocks.delete(state.key);
+      readyBlockCount--;
       this.diagnosticsState.evictions++;
     }
     this.updateMemoryDiagnostics();
@@ -285,6 +300,11 @@ export class TiledRainTileStore {
 
   setVisibleTileCount(count) {
     this.diagnosticsState.visibleTileCount = count;
+  }
+
+  setProtectedBlockKeys(keys) {
+    this.protectedBlockKeys = new Set(keys);
+    this.evict(this.protectedBlockKeys);
   }
 
   updateMemoryDiagnostics() {
@@ -301,6 +321,11 @@ export class TiledRainTileStore {
     this.diagnosticsState.residentTileBlockCount = [...this.blocks.values()].filter((state) => state.status === 'ready').length;
     this.diagnosticsState.logicalUInt16ResidentBytes = bytes;
     this.diagnosticsState.estimatedGpuTextureBytes = gpuBytes;
+    this.diagnosticsState.peakResidentBlockCount = Math.max(this.diagnosticsState.peakResidentBlockCount, this.diagnosticsState.residentTileBlockCount);
+    this.diagnosticsState.peakLogicalUInt16ResidentBytes = Math.max(this.diagnosticsState.peakLogicalUInt16ResidentBytes, bytes);
+    this.diagnosticsState.peakEstimatedGpuTextureBytes = Math.max(this.diagnosticsState.peakEstimatedGpuTextureBytes, gpuBytes);
+    this.diagnosticsState.trackedBlockCount = this.blocks.size;
+    this.diagnosticsState.peakTrackedBlockCount = Math.max(this.diagnosticsState.peakTrackedBlockCount, this.blocks.size);
   }
 
   uploadBlock(gl, state) {
@@ -376,7 +401,7 @@ function makeProgram(gl, shaderData) {
     '  bool validA = codeA != 0u; bool validB = codeB != 0u;',
     '  float rainA = decodeRain(codeA); float rainB = decodeRain(codeB);',
     '  float rain = validA && validB ? mix(rainA, rainB, u_temporalProgress) : validA ? rainA : validB ? rainB : 0.0;',
-    '  float radiusFraction = u_mode == 0 ? rainVisibility(rain) : strongRain(rain);',
+    `  float radiusFraction = u_mode == 0 ? rainVisibility(rain) * ${DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6)} : strongRain(rain);`,
     `  v_radius = radiusFraction / ${TILED_RAIN_GRID_SIZE}.0; v_local = a_vertex;`,
     `  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / ${TILED_RAIN_GRID_SIZE}.0;`,
     '  gl_Position = projectTile(center + a_vertex * v_radius);',
@@ -495,10 +520,17 @@ export class TiledRainDotsLayer {
     const fallbackKeys = this.committedFrame
       ? this.blockKeysForFrame(this.committedFrame, this.viewportTileKeys)
       : new Set();
-    const usefulKeys = new Set([...targetKeys, ...fallbackKeys]);
+    // Fallback is only prefetched when already resident. This keeps pending
+    // work bounded to the newest target while preserving ordinary transitions.
+    const residentFallbackKeys = [...fallbackKeys].filter((key) => this.store.blocks.get(key)?.status === 'ready');
+    const usefulKeys = new Set([...targetKeys, ...residentFallbackKeys]);
     this.desiredBlockKeys = targetKeys;
+    this.store.setProtectedBlockKeys(targetKeys);
     this.store.updateDesiredBlockKeys(usefulKeys);
-    this.store.evict(usefulKeys);
+    // Target blocks have priority. Fallback remains protected during ordinary
+    // adjacent transitions, but can be evicted on a large jump so the ready
+    // block ceiling remains hard.
+    this.store.evict(targetKeys);
 
     const ensure = (keys) => [...keys].map((key) => {
       const separator = key.lastIndexOf(':');
@@ -520,7 +552,7 @@ export class TiledRainDotsLayer {
         console.error('Unable to load the required tiled rain state.', error);
         this.store.diagnosticsState.lastError = error instanceof Error ? error.message : String(error);
       });
-    void Promise.all(ensure(fallbackKeys)).then(() => {
+    void Promise.all(ensure(residentFallbackKeys)).then(() => {
       if (generation === this.requestGeneration && this.committedFrame && this.canRenderFrame(this.committedFrame)) {
         this.map?.triggerRepaint();
       }
@@ -554,6 +586,7 @@ export class TiledRainDotsLayer {
     this.committedFrame = frame;
     const targetKeys = this.blockKeysForFrame(frame, this.viewportTileKeys);
     this.desiredBlockKeys = targetKeys;
+    this.store.setProtectedBlockKeys(targetKeys);
     this.store.updateDesiredBlockKeys(targetKeys);
     this.store.evict(targetKeys);
     this.map?.triggerRepaint();

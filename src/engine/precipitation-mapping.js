@@ -16,6 +16,7 @@ export const DOTS_STRONG_RAIN_SHAPE_ANCHORS = Object.freeze([
   { progress: 0.55, radius: 0.65 },
   { progress: 1.00, radius: 0.86 }
 ]);
+export const DOTS_BASE_RAIN_MAX_RADIUS_FRACTION = RAIN_BASE_RADIUS_ANCHORS[RAIN_BASE_RADIUS_ANCHORS.length - 1].radius;
 
 function interpolateSquaredRadius(progress, lower, upper) {
   const area = lower.radius * lower.radius + (upper.radius * upper.radius - lower.radius * lower.radius) * clamp(progress, 0, 1);
