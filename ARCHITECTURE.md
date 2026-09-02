@@ -38,6 +38,52 @@ real geographic weather sequence
 The scalar branch remains implemented for later reintroduction but is not part
 of the current active application/runtime path.
 
+## Experimental tiled-rain Phase 0A — non-default
+
+The opt-in `?tiledRain=1` path is a separate first vertical slice for proving
+the tiled browser data path. It is intentionally limited to Dots, one fixed
+Mercator reference level (L13), and direct shader interpolation between source
+frames. Its data flow is:
+
+```text
+normalized source generation (`data/generated/current/metadata.json`)
+        ↓ offline fixed globally anchored L13 reconstruction
+128 × 128 samples, UInt16 temporal blocks of four frames
+        ↓ optional gzip sidecars through the local development server
+bounded browser tile/block residency
+        ↓ WebGL2 R16UI texture arrays
+procedural instanced Dots
+```
+
+`tools/generate-tiled-rain.py` reads only the normalized metadata and the exact
+Float32 rain frame assets referenced by that metadata. It does not parse
+NetCDF/provider data. Experimental assets are written to the ignored
+`data/generated/tiled-rain/current/` directory. The manifest records the source
+generation identity, and the browser verifies that identity against the current
+normalized metadata before requesting any tile. A stale or invalid tile set is
+an explicit error; the tiled path never falls back to geographic reconstruction.
+
+The spatial contract is exact and globally anchored: sample identity is the
+L13 integer pair `(i, j)` at `x = i / 2^13`, `y = j / 2^13`. Half-open ownership
+assigns each sample to one 128-sample tile. Tile blocks use a documented
+frame-major, row-major UInt16 layout. Code 0 is NoData, code 1 is valid dry,
+and codes 2–65535 linearly decode positive physical `mm/h` using the actual
+finite maximum recorded in the manifest. Presentation mapping remains in the
+shader and reuses the Dots rain/strong-rain transfer anchors.
+
+The tiled loader selects the conservative visible Mercator tile envelope with a
+small deterministic L13 overscan, requests only the current frame pair's
+blocks, rejects stale desired-state completions, and bounds resident blocks by
+an explicit LRU ceiling. It uploads block payloads directly as WebGL2 integer
+texture arrays without expanding the tile to Float32 arrays or constructing
+per-sample JavaScript positions. Camera movement changes tile orchestration;
+it does not reconstruct a weather field or rebuild a geographic pyramid.
+
+Phase 0A intentionally does not solve temporal motion: the shader uses direct
+`mix(rainA, rainB, progress)` interpolation. Optical flow, advection, radar or
+model motion, single/double warp, and materialized subframes remain deferred to
+Phase 0B.
+
 The current data/runtime sequence is: (1) mutable discovery metadata pointing
 to an immutable generation containing the full support sidecar and independently
 delivered exact source frames, (2) viewport- and
@@ -168,9 +214,11 @@ development-only test tooling, not production hosting. The preparation tool
 invokes the generator against its unpublished staging directory before
 publishing an immutable generation; the generator refuses `current`, published
 generation directories, and manifests that already carry a `generation_id`.
-It writes ignored gzip-level-9 `.gz` sidecars alongside the logical source frames
-and support mask. The manifest and application request generation-relative
-`.f32` and `support.mask` URLs after metadata discovery. To test
+It writes ignored gzip-level-9 `.gz` sidecars alongside the logical source frames,
+support mask, and experimental `.u16` blocks. The manifest and normal
+application request generation-relative `.f32` and `support.mask` URLs after
+metadata discovery; the tiled-rain path requests manifest-relative `.u16`
+blocks. To test
 from a phone/tablet on the same LAN, run either mode from the repository root:
 
 ```text
@@ -186,6 +234,9 @@ when the client advertises `Accept-Encoding: gzip`, with `Content-Encoding: gzip
 `Vary: Accept-Encoding`, and the encoded `Content-Length`. Browser fetch
 transparently returns the original exact Float32 bytes; HTTP content coding is
 transport behavior, not a provider-format change.
+
+The same optional behavior applies to `.u16` tiled-rain blocks. The local
+server does not add a compression dependency or alter logical asset bytes.
 
 The preparation digest uses the `dot-field-generated-weather-v2` namespace for
 the gzip-era artifact contract. Logical metadata and weather files determine
@@ -276,6 +327,14 @@ cache counters, validation scans, eviction count, and
 `fullSequenceLoadDurationMs`. RAW exact-frame diagnostics identify the selected
 frame and confirm whether its `Float32Array` is the resident source payload;
 RAW does not own a duplicate source frame.
+
+In tiled-rain mode, the diagnostics source snapshot instead reports the tiled
+source generation, visible/resident tile and block counts, pending requests,
+logical UInt16 bytes, estimated GPU texture bytes, tile request/fetch/upload
+counters, latest and cumulative texture upload timing, first tiled-weather
+visible timing, evictions, the current source frame pair and shader progress,
+and `sourceFrameStackFetched: false`. The normal source loader, RAW, Squares,
+and `GeographicWeatherPyramid` are not instantiated on this path.
 
 Export uses schema version 1 with session metadata, environment, limitations,
 summary, samples, events, and weather resources. MapTiler keys,

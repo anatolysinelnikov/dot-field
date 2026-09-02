@@ -20,8 +20,10 @@ import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
+import { beginTiledRainLoad, TiledRainDotsLayer } from './engine/tiled-rain.js';
 
 const applicationStartupAt = performance.now();
+const tiledRainEnabled = new URLSearchParams(window.location.search).get('tiledRain') === '1';
 const startupTimings = Object.create(null);
 function markStartup(name) {
   if (startupTimings[name] !== undefined) return startupTimings[name];
@@ -86,7 +88,9 @@ function updateTimelineResidency(residentSourceFrameIndices = []) {
   }));
 }
 
-const weatherLoad = beginActiveWeatherLoad({ onTiming: markStartup, onResidencyChange: updateTimelineResidency });
+const weatherLoad = tiledRainEnabled
+  ? beginTiledRainLoad('./data/generated/tiled-rain/current/manifest.json', { onTiming: markStartup })
+  : beginActiveWeatherLoad({ onTiming: markStartup, onResidencyChange: updateTimelineResidency });
 
 async function loadMapTilerKey() {
   try {
@@ -180,7 +184,7 @@ const state = {
   playbackStalled: false,
   playbackPendingRequirementKey: null,
   playbackHorizonKey: null,
-  renderMode: 'raw',
+  renderMode: tiledRainEnabled ? 'dots' : 'raw',
   hazardsVisible: true,
   rawFrameIndex: 0,
   rawTimeChanged: false
@@ -197,6 +201,16 @@ let basemapFallbackTimer = null;
 let weatherRequestGeneration = 0;
 
 const diagnosticsEnabled = new URLSearchParams(window.location.search).get('diagnostics') === '1';
+
+if (tiledRainEnabled) {
+  renderModeSelector.dataset.mode = 'dots';
+  for (const button of renderModeButtons) {
+    const enabled = button.dataset.renderMode === 'dots';
+    button.hidden = !enabled;
+    button.setAttribute('aria-checked', String(enabled));
+  }
+  hazards.closest('.hazards-control')?.setAttribute('hidden', '');
+}
 
 function numericSummary(values) {
   if (!values.length) return { count: 0, lastMs: 0, meanMs: 0, p95Ms: 0, maxMs: 0 };
@@ -245,14 +259,24 @@ function diagnosticsSnapshot() {
   const dots = weatherLayer?.diagnostics() || null;
   const squares = squaresLayer?.diagnostics() || null;
   const pyramid = geographicWeatherPyramid?.snapshot() || null;
-  const sourceResidentBytes = source?.residentSourceBytes || 0;
-  const trackedCpuBytes = (raw?.totalCpuGeometryBytes || 0)
+  let sourceResidentBytes = source?.residentSourceBytes || 0;
+  let trackedCpuBytes = (raw?.totalCpuGeometryBytes || 0)
     + (dots?.cpuBytes || 0)
     + (squares?.cpuBytes || 0)
     + (pyramid?.knownTypedArrayBytes || 0);
-  const estimatedGpuBufferBytes = (raw?.estimatedGpuBufferBytes || 0)
+  let estimatedGpuBufferBytes = (raw?.estimatedGpuBufferBytes || 0)
     + (dots?.estimatedGpuBufferBytes || 0)
     + (squares?.estimatedGpuBufferBytes || 0);
+  if (tiledRainEnabled && dots) {
+    source = {
+      ...dots,
+      sourceFrameStackFetched: false,
+      sourceResidencyPolicy: 'bounded-tiled-blocks'
+    };
+    trackedCpuBytes = dots.logicalUInt16ResidentBytes || 0;
+    estimatedGpuBufferBytes = dots.estimatedGpuTextureBytes || 0;
+    sourceResidentBytes = dots.logicalUInt16ResidentBytes || 0;
+  }
   if (source && raw) {
     const rawFrameIndex = raw.sourceFrameIndex;
     const sourceFrame = Number.isInteger(rawFrameIndex) ? activeWeatherField?.sourceFrames?.get?.(rawFrameIndex) : null;
@@ -292,13 +316,13 @@ function diagnosticsSnapshot() {
       bearing: map.getBearing?.() ?? null
     },
     lod: {
-      stableLevel: state.lod.level,
+      stableLevel: tiledRainEnabled ? 13 : state.lod.level,
       transition: state.lodTransition ? {
         fromLevel: state.lodTransition.fromLevel,
         toLevel: state.lodTransition.toLevel,
         progress: state.lodTransition.rawProgress
       } : null,
-      leafCount: state.levelData?.count || 0
+      leafCount: tiledRainEnabled ? weatherLayer?.diagnostics()?.proceduralInstancesPerTile || 0 : state.levelData?.count || 0
     },
     canonicalWindow: {
       rebuilds: state.canonicalWindowRebuilds,
@@ -336,11 +360,17 @@ function activateWeatherField(field) {
     ? field.exactSourceFrameAt(0)
     : field.rawFrame;
   sourceTimestamps = Array.isArray(field.timestamps) ? field.timestamps : [];
-  rawLayer = new RawWeatherLayer(rawWeatherField);
+  rawLayer = tiledRainEnabled ? null : new RawWeatherLayer(rawWeatherField);
   state.weatherReady = true;
   for (const control of [...renderModeButtons, hazards, timeSlider]) control.disabled = false;
   markStartup('first-weather-ready');
   tryInitializeWeatherLayer();
+  if (tiledRainEnabled) {
+    state.playbackReady = true;
+    playPause.disabled = false;
+    markStartup('playback-ready');
+    return;
+  }
   if (field.frameCount === undefined) {
     state.playbackReady = true;
     markStartup('playback-ready');
@@ -379,6 +409,7 @@ function startWeatherSequence(trigger) {
 // source-frame request gated by basemap readiness.
 void weatherLoad.metadataReady.catch((error) => {
   console.error('Unable to load weather metadata.', error);
+  if (tiledRainEnabled) lodDiagnostics.textContent = `Tiled rain error: ${error instanceof Error ? error.message : String(error)}`;
 });
 
 const TIMESTAMP_MONTHS = Object.freeze(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
@@ -570,6 +601,13 @@ function updateCanonicalWindow() {
 
 function updateLodDiagnostics() {
   const zoom = state.logicalSamplingZoom.toFixed(2);
+  if (tiledRainEnabled) {
+    const tiled = weatherLayer?.diagnostics();
+    const value = `Zoom ${zoom} · L13 tiled · ${tiled?.visibleTileCount || 0} tiles`;
+    if (diagnosticsHud) diagnosticsHud.setBaseText(value);
+    else lodDiagnostics.textContent = value;
+    return;
+  }
   const transition = state.lodTransition;
   const level = transition
     ? `${transition.fromLevel} → ${transition.toLevel}`
@@ -606,6 +644,12 @@ function updateLogicalSamplingZoom() {
     updateLodDiagnostics();
     return;
   }
+  if (tiledRainEnabled) {
+    state.camera = next;
+    weatherLayer?.setViewportBounds(visibleMercatorBounds());
+    updateLodDiagnostics();
+    return;
+  }
   let delta = next.rawZoom - previous.rawZoom;
   delta -= logicalZoomLatitudeAdjustment(next.latitude, previous.latitude);
   if (Number.isFinite(delta)) {
@@ -627,6 +671,10 @@ function commitLevelData(level, levelData) {
 
 function tryInitializeWeatherLayer() {
   if (state.mapReady || !state.styleReady || !state.weatherReady) return;
+  if (tiledRainEnabled) {
+    tryInitializeTiledRainLayer();
+    return;
+  }
   const initialBounds = visibleMercatorBounds();
   if (!initialBounds) throw new Error('Initial camera bounds are unavailable for weather topology initialization.');
   const initialLevel = zoomToMercatorGridLevel(state.logicalSamplingZoom);
@@ -745,6 +793,24 @@ function tryInitializeWeatherLayer() {
   map.triggerRepaint();
 }
 
+function tryInitializeTiledRainLayer() {
+  const initialBounds = visibleMercatorBounds();
+  if (!initialBounds) throw new Error('Initial camera bounds are unavailable for tiled rain initialization.');
+  weatherLayer = new TiledRainDotsLayer(activeWeatherField.tileStore, { onTiming: markStartup });
+  geographicLayers = [weatherLayer];
+  const styleLayers = map.getStyle().layers || [];
+  const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');
+  map.addLayer(weatherLayer, firstSymbol?.id);
+  state.mapReady = true;
+  state.canonicalWindow = null;
+  weatherLayer.setViewportBounds(initialBounds);
+  weatherLayer.setTime(state.time / LOOP_SECONDS);
+  updateLodDiagnostics();
+  applyRenderMode();
+  markStartup('initial-weather-topology-ready');
+  map.triggerRepaint();
+}
+
 function startAdjacentTransition(level, now) {
   const direction = Math.sign(level - state.lod.level);
   const toLevel = state.lod.level + direction;
@@ -829,6 +895,7 @@ function queueWeatherUpdate() {
 }
 
 function rendererTemporalRequirements(normalizedTime) {
+  if (tiledRainEnabled) return { times: [normalizedTime], sourceFrames: [], key: String(normalizedTime) };
   const rendererFrame = geographicTemporalFrameAt(normalizedTime);
   const nextRendererTime = rendererFrame.nextIndex / TEMPORAL_FRAME_COUNT;
   const times = [normalizedTime, nextRendererTime];
@@ -851,6 +918,7 @@ function renderCurrentWeather() {
 }
 
 function rebasePlaybackHorizon(normalizedTime, requirements) {
+  if (tiledRainEnabled) return;
   if (!activeWeatherField || activeWeatherField.frameCount === undefined || requirements.key === state.playbackHorizonKey) return;
   state.playbackHorizonKey = requirements.key;
   void weatherLoad.rebaseRollingPrefetch(normalizedTime).catch((error) => {
@@ -860,6 +928,10 @@ function rebasePlaybackHorizon(normalizedTime, requirements) {
 
 function requestWeatherTime(normalizedTime, { playback = false } = {}) {
   if (!activeWeatherField) return;
+  if (tiledRainEnabled) {
+    weatherLayer?.setTime(normalizedTime);
+    return;
+  }
   const requirements = rendererTemporalRequirements(normalizedTime);
   if (playback && rendererSourcesAreAvailable(requirements)) {
     rebasePlaybackHorizon(normalizedTime, requirements);
@@ -887,6 +959,12 @@ function requestWeatherTime(normalizedTime, { playback = false } = {}) {
 function applyRenderMode() {
   if (!state.mapReady) return;
   const mode = state.renderMode;
+  if (tiledRainEnabled) {
+    weatherLayer.setActive(mode === 'dots');
+    weatherLayer.setTime(state.time / LOOP_SECONDS);
+    updateTimestamp();
+    return;
+  }
   const time = state.time / LOOP_SECONDS;
   const rawActive = mode === 'raw';
   rawLayer.setActive(rawActive);
@@ -1102,7 +1180,7 @@ for (const button of renderModeButtons) {
 }
 hazards.addEventListener('change', () => {
   state.hazardsVisible = hazards.checked;
-  rawLayer.setHazards(state.hazardsVisible);
+  rawLayer?.setHazards(state.hazardsVisible);
   weatherLayer?.setHazardsVisible(state.hazardsVisible);
   squaresLayer?.setHazardsVisible(state.hazardsVisible);
 });
@@ -1230,6 +1308,11 @@ map.on('moveend', () => {
   state.resettingView = false;
   state.logicalSamplingZoom = WEATHER_REGION.initialZoom;
   rebaseCamera();
+  if (tiledRainEnabled) {
+    weatherLayer?.setViewportBounds(visibleMercatorBounds());
+    updateResetViewControl();
+    return;
+  }
   updateCanonicalWindow();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
   updateResetViewControl();
@@ -1265,7 +1348,9 @@ let applicationFrameQueued = false;
 
 // Deliberately diagnostic-only: this keeps scheduler counters available to
 // focused benchmarks without adding a visible per-pointer UI update path.
-window.__dotFieldWeatherDiagnostics = () => weatherLoad.diagnostics();
+window.__dotFieldWeatherDiagnostics = () => tiledRainEnabled
+  ? weatherLayer?.diagnostics() || null
+  : weatherLoad.diagnostics();
 
 function wakeApplicationFrame() {
   if (applicationFrameQueued) return;

@@ -45,7 +45,7 @@ function isWeatherResource(entry) {
     const url = new URL(entry.name, globalThis.location?.href);
     if (url.origin !== globalThis.location?.origin) return false;
     return /(?:^|\/)data\/(?:generated\/|.*mrl_z3)/i.test(url.pathname)
-      || /(?:\.f32|\.mask|\.csv|metadata\.json)$/i.test(url.pathname);
+      || /(?:\.f32|\.u16|\.mask|\.csv|metadata\.json)$/i.test(url.pathname);
   } catch {
     return false;
   }

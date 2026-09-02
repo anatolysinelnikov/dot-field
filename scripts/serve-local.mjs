@@ -12,6 +12,7 @@ const MIME_TYPES = Object.freeze({
   '.js': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.mask': 'application/octet-stream',
+  '.u16': 'application/octet-stream',
   '.svg': 'image/svg+xml'
 });
 
@@ -36,7 +37,7 @@ function localNetworkAddress() {
 }
 
 function sourceAssetCanUseCompression(pathname) {
-  return pathname.endsWith('.f32') || pathname.endsWith('/support.mask');
+  return pathname.endsWith('.f32') || pathname.endsWith('.u16') || pathname.endsWith('/support.mask');
 }
 
 export function createLocalServer({ root = process.cwd(), compression = 'identity', logWeatherRequests = false } = {}) {
