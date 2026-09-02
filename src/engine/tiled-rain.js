@@ -175,10 +175,12 @@ export class TiledRainTileStore {
       state.lastUsed = ++this.lastUsed;
       return Promise.resolve(state);
     }
-    if (state?.promise) return state.promise;
+    if (state?.promise && !state.obsolete && state.status !== 'error' && state.status !== 'aborted') return state.promise;
     const descriptor = this.descriptor(tileKey, blockIndex);
     if (!descriptor) throw new Error(`Tiled rain block ${key} is not present in the manifest.`);
-    state = state || { key, tileKey, blockIndex, descriptor, status: 'queued', lastUsed: ++this.lastUsed, payload: null, gpuTexture: null };
+    if (!state || state.obsolete || state.status === 'error' || state.status === 'aborted') {
+      state = { key, tileKey, blockIndex, descriptor, status: 'queued', lastUsed: ++this.lastUsed, payload: null, gpuTexture: null };
+    }
     state.status = 'queued';
     state.obsolete = false;
     state.promise = new Promise((resolve, reject) => {
@@ -277,7 +279,9 @@ export class TiledRainTileStore {
         this.diagnosticsState.pendingRequestCount = Math.max(0, this.diagnosticsState.pendingRequestCount - 1);
         state.controller = null;
         state.promise = null;
-        if (state.status === 'aborted' || state.status === 'error') this.blocks.delete(state.key);
+        if ((state.status === 'aborted' || state.status === 'error') && this.blocks.get(state.key) === state) {
+          this.blocks.delete(state.key);
+        }
         this.updateMemoryDiagnostics();
         this.pumpFetchQueue();
       });
