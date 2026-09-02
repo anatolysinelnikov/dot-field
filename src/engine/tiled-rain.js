@@ -6,6 +6,7 @@ import {
   DOTS_STRONG_RAIN_SHAPE_ANCHORS,
   RAIN_VISIBILITY_SHADER
 } from './precipitation-mapping.js';
+import { sha256ArrayBuffer } from './sha256.js';
 
 export const TILED_RAIN_SCHEMA = 'dot-field-tiled-rain-v0';
 export const TILED_RAIN_WARP_SCHEMA = 'dot-field-tiled-rain-warp-v1';
@@ -103,12 +104,6 @@ async function fetchJsonWithBytes(url, description) {
   } catch {
     clearError(`${description || 'JSON'} is not valid JSON.`);
   }
-}
-
-async function sha256ArrayBuffer(bytes) {
-  if (!globalThis.crypto?.subtle) throw new Error('Web Crypto SHA-256 is unavailable; cannot validate tiled rain asset identity.');
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
 async function loadAndValidateDataset(manifestUrl, timing) {
