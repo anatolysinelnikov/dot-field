@@ -155,6 +155,67 @@ is introduced here. Future Phase 0B2 will consume this MotionField for GPU
 temporal warp while preserving the browser as a bounded tile-residency and
 GPU-presentation client.
 
+## Experimental tiled-rain Phase 0B2 — opt-in GPU motion warp
+
+Phase 0B2 consumes the existing offline MotionField without changing the
+renderer-facing motion contract or the Phase 0A reference path. The normal
+`?tiledRain=1` URL continues to use the original 128 × 128 UInt16 rain assets
+and direct A/B interpolation. The experimental `?tiledRain=1&motionWarp=1`
+path is a separate browser data path:
+
+```text
+Phase 0A encoded rain cores + 13-sample read-only halos
+        + separate Phase 0B1 MotionField tiles
+        ↓ bounded shared weather fetch queue
+154 × 154 R16UI rain textures + 3 × 54 RGBA32F motion textures
+        ↓ confidence-aware manual GPU sampling
+double backward warp -> existing Dots presentation mapping
+```
+
+Warp rain assets are generated separately under the ignored
+`data/generated/tiled-rain-warp/current/` root. They are stitched directly from
+the exact Phase 0A encoded UInt16 core samples: no reconstruction, decoding, or
+requantization occurs. Each owned 128 × 128 core is surrounded by a 13-sample
+halo derived from the MotionField ±12 component bound plus one bilinear tap
+guard, producing a 154 × 154 stored footprint. Halo samples are read-only
+sampling support and do not create sample identities or change half-open 128
+sample tile ownership. At the outer declared Phase 0A tile bounds, halo samples
+are explicit NoData. The warp manifest binds to the normalized source
+generation, the exact Phase 0A manifest bytes, and the exact Phase 0B1 motion
+manifest bytes.
+
+The browser validates all three identities before requesting payloads. Rain
+blocks and spatial MotionField tiles share the existing maximum of eight
+in-flight weather requests. Rain remains bounded by the existing committed
+target/cache lifecycle; successfully fetched motion tiles are spatial and may
+remain resident for the immutable dataset lifetime. A new warp target is
+committed only when its visible rain blocks and visible motion tiles are ready.
+Diagnostics expose the separate logical and estimated GPU costs, with rain
+allocation measured at the actual 154 × 154 size, plus motion request,
+fetch, upload, and residency counters.
+
+Motion is interpolated at each stable integer L13 rain sample from its four
+surrounding 64-sample globally anchored nodes. The interpolation is
+confidence-weighted: zero-confidence nodes contribute neither a vector nor a
+pull toward zero, while their weights reduce the interpolated confidence. The
+shader performs deterministic manual UInt16 bilinear sampling for fractional
+warp coordinates, treating code 0 as NoData and code 1 as valid dry; valid taps
+are renormalized without using texture-edge clamping as a spatial substitute.
+For interval progress `s`, the forward A -> B field is applied as a double
+backward warp (`A(p - flow*s)` and `B(p + flow*(1-s))`), then blended toward
+direct A/B interpolation by confidence. If the warp is unsupported or invalid,
+the direct value is retained, and an unwarped location with no endpoint
+support cannot gain precipitation through the warp. Explicit endpoint paths
+make `s=0` exactly A(p), `s=1` exactly B(p), and equal endpoint frames remain
+direct samples. Dot centers never move.
+
+There is no browser motion estimation, optical-flow dependency, temporal prior,
+or materialized subframe. The browser remains a loader, bounded-residency, and
+GPU-presentation client. The Phase 0B1 radar-derived estimator is replaceable;
+Phase 0B2 depends only on the independent MotionField `dx`, `dy`, and
+`confidence` contract. Future implementations can replace the estimator
+without changing this downstream channel or the eventual renderer consumer.
+
 The current data/runtime sequence is: (1) mutable discovery metadata pointing
 to an immutable generation containing the full support sidecar and independently
 delivered exact source frames, (2) viewport- and

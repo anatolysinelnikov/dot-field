@@ -8,9 +8,12 @@ import {
 } from './precipitation-mapping.js';
 
 export const TILED_RAIN_SCHEMA = 'dot-field-tiled-rain-v0';
+export const TILED_RAIN_WARP_SCHEMA = 'dot-field-tiled-rain-warp-v1';
 export const TILED_RAIN_LOD_LEVEL = 13;
 export const TILED_RAIN_TILE_SIZE = 128;
 export const TILED_RAIN_GRID_SIZE = 2 ** TILED_RAIN_LOD_LEVEL;
+export const TILED_RAIN_WARP_HALO_SIZE = 13;
+export const TILED_RAIN_WARP_STORED_SIZE = TILED_RAIN_TILE_SIZE + 2 * TILED_RAIN_WARP_HALO_SIZE;
 // The LRU returns toward this target whenever the required target permits it.
 const READY_CACHE_BLOCK_LIMIT = 320;
 export const TILED_RAIN_MAX_CONCURRENT_FETCHES = 8;
@@ -91,6 +94,23 @@ async function fetchJson(url) {
   }
 }
 
+async function fetchJsonWithBytes(url, description) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Unable to load ${description || 'JSON'} ${url} (${response.status}).`);
+  const bytes = await response.arrayBuffer();
+  try {
+    return { value: JSON.parse(new TextDecoder().decode(bytes)), bytes };
+  } catch {
+    clearError(`${description || 'JSON'} is not valid JSON.`);
+  }
+}
+
+async function sha256ArrayBuffer(bytes) {
+  if (!globalThis.crypto?.subtle) throw new Error('Web Crypto SHA-256 is unavailable; cannot validate tiled rain asset identity.');
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
 async function loadAndValidateDataset(manifestUrl, timing) {
   timing('tiled-rain-manifest-fetch-start');
   const manifest = validateManifest(await fetchJson(manifestUrl));
@@ -108,11 +128,155 @@ async function loadAndValidateDataset(manifestUrl, timing) {
   return Object.freeze({ manifest, manifestUrl, tiles });
 }
 
+function validateMotionManifest(manifest) {
+  if (!manifest || manifest.schema !== 'dot-field-tiled-rain-motion-v1' || manifest.version !== 1) {
+    clearError('MotionField schema/version is not supported.');
+  }
+  if (manifest.rain_tile_size !== TILED_RAIN_TILE_SIZE || manifest.interval_count !== 18
+    || !Array.isArray(manifest.intervals) || manifest.intervals.length !== manifest.interval_count) {
+    clearError('MotionField temporal or tile dimensions are invalid.');
+  }
+  if (manifest.motion_grid?.node_spacing_l13_samples !== 64
+    || manifest.motion_grid?.anchor !== 'global L13 integer coordinate 0; independent of crop, tile, or viewport') {
+    clearError('MotionField global grid anchoring is invalid.');
+  }
+  if (manifest.displacement?.maximum_absolute_component !== 12
+    || manifest.encoding?.dtype !== 'Float32'
+    || manifest.encoding?.byte_order !== 'little-endian') {
+    clearError('MotionField displacement or encoding contract is invalid.');
+  }
+  const seen = new Set();
+  for (const tile of manifest.tiles || []) {
+    if (!Number.isInteger(tile.x) || !Number.isInteger(tile.y) || tile.node_width !== 3 || tile.node_height !== 3
+      || typeof tile.asset !== 'string' || typeof tile.gzip_asset !== 'string'
+      || tile.byte_length !== manifest.interval_count * 3 * 3 * 3 * Float32Array.BYTES_PER_ELEMENT) {
+      clearError('MotionField tile descriptor is invalid.');
+    }
+    const key = `${tile.x}:${tile.y}`;
+    if (seen.has(key)) clearError(`duplicate MotionField tile ${key}.`);
+    seen.add(key);
+  }
+  return manifest;
+}
+
+function validateWarpManifest(manifest) {
+  if (!manifest || manifest.schema !== TILED_RAIN_WARP_SCHEMA || manifest.version !== 1) {
+    clearError('warp rain schema/version is not supported.');
+  }
+  if (manifest.lod_level !== TILED_RAIN_LOD_LEVEL || manifest.grid_size !== TILED_RAIN_GRID_SIZE
+    || manifest.core_tile_size !== TILED_RAIN_TILE_SIZE || manifest.halo_size !== TILED_RAIN_WARP_HALO_SIZE
+    || manifest.stored_footprint?.width !== TILED_RAIN_WARP_STORED_SIZE
+    || manifest.stored_footprint?.height !== TILED_RAIN_WARP_STORED_SIZE) {
+    clearError('warp rain grid, core, or halo dimensions are invalid.');
+  }
+  positiveInteger(manifest.frame_count, 'frame_count');
+  if (!Array.isArray(manifest.timestamps) || manifest.timestamps.length !== manifest.frame_count
+    || manifest.temporal_block_size !== 4) clearError('warp rain temporal blocking is invalid.');
+  if (manifest.physical_units !== 'mm/h' || manifest.byte_order !== 'little-endian') clearError('warp rain units or byte order are invalid.');
+  const sourceEncoding = manifest.encoding;
+  if (!sourceEncoding || sourceEncoding.dtype !== 'UInt16' || sourceEncoding.nodata_code !== 0 || sourceEncoding.dry_code !== 1
+    || sourceEncoding.positive_code_min !== 2 || sourceEncoding.positive_code_max !== 65535
+    || sourceEncoding.positive_quantized_range !== 65534
+    || !Number.isFinite(sourceEncoding.physical_max_mmh) || sourceEncoding.physical_max_mmh <= 0) {
+    clearError('warp rain UInt16 encoding semantics are invalid.');
+  }
+  if (manifest.motion_displacement_bound_l13_samples !== 12
+    || typeof manifest.source_tiled_rain_manifest !== 'string'
+    || typeof manifest.source_motion_manifest !== 'string'
+    || typeof manifest.source_tiled_rain_manifest_sha256 !== 'string'
+    || typeof manifest.source_motion_manifest_sha256 !== 'string') {
+    clearError('warp rain source identity binding is invalid.');
+  }
+  const seenTiles = new Set();
+  const seenBlocks = new Set();
+  for (const tile of manifest.tiles || []) {
+    if (!Number.isInteger(tile.x) || !Number.isInteger(tile.y) || !Array.isArray(tile.blocks)) clearError('warp tile descriptor is invalid.');
+    const tileKey = `${tile.x}:${tile.y}`;
+    if (seenTiles.has(tileKey)) clearError(`duplicate warp tile ${tileKey}.`);
+    seenTiles.add(tileKey);
+    for (const block of tile.blocks) {
+      const key = `${tileKey}:${block.index}`;
+      if (!Number.isInteger(block.index) || !Number.isInteger(block.frame_start) || !Number.isInteger(block.frame_count)
+        || block.frame_count < 1 || block.frame_start < 0 || block.frame_start + block.frame_count > manifest.frame_count
+        || typeof block.asset !== 'string' || typeof block.gzip_asset !== 'string'
+        || block.sample_count !== TILED_RAIN_WARP_STORED_SIZE ** 2
+        || block.byte_length !== block.sample_count * block.frame_count * Uint16Array.BYTES_PER_ELEMENT) {
+        clearError(`warp block ${key} is invalid.`);
+      }
+      if (seenBlocks.has(key)) clearError(`duplicate warp block ${key}.`);
+      seenBlocks.add(key);
+    }
+  }
+  return manifest;
+}
+
+async function loadAndValidateWarpDataset(manifestUrl, timing) {
+  timing('tiled-rain-warp-manifest-fetch-start');
+  const warpResponse = await fetchJsonWithBytes(manifestUrl, 'warp rain manifest');
+  const manifest = validateWarpManifest(warpResponse.value);
+  timing('tiled-rain-warp-manifest-validation-complete');
+  const rainManifestUrl = resolveAssetUrl(manifestUrl, manifest.source_tiled_rain_manifest);
+  const rainResponse = await fetchJsonWithBytes(rainManifestUrl, 'Phase 0A tiled rain manifest');
+  const rainManifest = validateManifest(rainResponse.value);
+  const rainManifestSha256 = await sha256ArrayBuffer(rainResponse.bytes);
+  if (rainManifestSha256 !== manifest.source_tiled_rain_manifest_sha256) {
+    clearError('warp rain is not bound to the exact Phase 0A manifest bytes.');
+  }
+  if (rainManifest.source_generation_id !== manifest.source_generation_id) {
+    clearError('warp rain and Phase 0A source generation IDs differ.');
+  }
+  const sourceMetadataUrl = resolveAssetUrl(rainManifestUrl, rainManifest.source_metadata_asset);
+  const sourceMetadata = await fetchJson(sourceMetadataUrl);
+  if (sourceMetadata.generation_id !== manifest.source_generation_id) {
+    clearError(`source generation mismatch: warp=${manifest.source_generation_id}, current=${sourceMetadata.generation_id || '<missing>'}.`);
+  }
+  const motionManifestUrl = resolveAssetUrl(manifestUrl, manifest.source_motion_manifest);
+  const motionResponse = await fetchJsonWithBytes(motionManifestUrl, 'MotionField manifest');
+  const motionManifest = validateMotionManifest(motionResponse.value);
+  const motionManifestSha256 = await sha256ArrayBuffer(motionResponse.bytes);
+  if (motionManifestSha256 !== manifest.source_motion_manifest_sha256) {
+    clearError('warp rain is not bound to the exact MotionField manifest bytes.');
+  }
+  if (motionManifest.source_generation_id !== manifest.source_generation_id
+    || motionManifest.source_tiled_rain_manifest_sha256 !== rainManifestSha256) {
+    clearError('warp rain, MotionField, and Phase 0A source identities differ.');
+  }
+  if (motionManifest.interval_count !== manifest.frame_count - 1
+    || JSON.stringify(motionManifest.intervals.map((interval) => interval.from)) !== JSON.stringify(manifest.timestamps.slice(0, -1))
+    || JSON.stringify(motionManifest.intervals.map((interval) => interval.to)) !== JSON.stringify(manifest.timestamps.slice(1))) {
+    clearError('warp rain and MotionField timestamps differ.');
+  }
+  const tiles = new Map();
+  for (const tile of manifest.tiles) tiles.set(`${tile.x}:${tile.y}`, tile);
+  const motionTiles = new Map();
+  for (const tile of motionManifest.tiles || []) motionTiles.set(`${tile.x}:${tile.y}`, tile);
+  if (motionTiles.size !== tiles.size || [...tiles.keys()].some((key) => !motionTiles.has(key))) {
+    clearError('warp rain and MotionField tile identities differ.');
+  }
+  timing('tiled-rain-warp-source-identities-verified');
+  return Object.freeze({
+    manifest,
+    manifestUrl,
+    tiles,
+    isMotionWarp: true,
+    motionManifest,
+    motionManifestUrl,
+    motionTiles,
+    sourceMetadata,
+    sourceTiledRainManifestSha256: rainManifestSha256,
+    sourceMotionManifestSha256: motionManifestSha256
+  });
+}
+
 export class TiledRainTileStore {
   constructor(dataset, { onTiming = null } = {}) {
     this.dataset = dataset;
     this.manifest = dataset.manifest;
     this.tiles = dataset.tiles;
+    this.motionWarp = Boolean(dataset.isMotionWarp);
+    this.motionManifest = dataset.motionManifest || null;
+    this.motionManifestUrl = dataset.motionManifestUrl || null;
+    this.motionTiles = dataset.motionTiles || new Map();
     this.onTiming = typeof onTiming === 'function' ? onTiming : () => {};
     this.startedAt = now();
     this.blocks = new Map();
@@ -125,6 +289,26 @@ export class TiledRainTileStore {
       pendingRequestCount: 0,
       logicalUInt16ResidentBytes: 0,
       estimatedGpuTextureBytes: 0,
+      haloRainLogicalResidentBytes: 0,
+      estimatedHaloRainGpuBytes: 0,
+      motionWarpActive: this.motionWarp,
+      warpManifestSourceGenerationId: this.motionWarp ? this.manifest.source_generation_id : null,
+      warpManifestSourceTiledRainManifestSha256: this.motionWarp ? this.manifest.source_tiled_rain_manifest_sha256 : null,
+      warpManifestSourceMotionManifestSha256: this.motionWarp ? this.manifest.source_motion_manifest_sha256 : null,
+      motionManifestSha256: this.motionWarp ? dataset.sourceMotionManifestSha256 : null,
+      motionManifestSourceTiledRainManifestSha256: this.motionWarp ? this.motionManifest.source_tiled_rain_manifest_sha256 : null,
+      rainHaloSize: this.motionWarp ? TILED_RAIN_WARP_HALO_SIZE : 0,
+      storedRainTextureDimensions: this.motionWarp ? [TILED_RAIN_WARP_STORED_SIZE, TILED_RAIN_WARP_STORED_SIZE] : [TILED_RAIN_TILE_SIZE, TILED_RAIN_TILE_SIZE],
+      residentMotionTileCount: 0,
+      pendingMotionTileCount: 0,
+      logicalMotionResidentBytes: 0,
+      estimatedMotionGpuBytes: 0,
+      peakLogicalMotionResidentBytes: 0,
+      peakEstimatedMotionGpuBytes: 0,
+      motionRequestCount: 0,
+      motionFetchCount: 0,
+      motionUploadCount: 0,
+      peakResidentMotionTileCount: 0,
       tileRequestCount: 0,
       tileFetchCount: 0,
       tileUploadCount: 0,
@@ -146,13 +330,21 @@ export class TiledRainTileStore {
       identityResponseCount: 0,
       unknownEncodingResponseCount: 0,
       responseContentLengthBytes: 0,
+      rainResponseContentLengthBytes: 0,
+      motionResponseContentLengthBytes: 0,
       logicalFetchedBytes: 0,
       latestContentEncoding: null,
-      lastError: null
+      lastError: null,
+      rainBlockRequestCount: 0,
+      rainBlockFetchCount: 0,
+      motionLogicalFetchedBytes: 0,
+      combinedWeatherFetchCount: 0,
+      peakCombinedInFlightWeatherFetchCount: 0
     };
     this.fetchQueue = [];
     this.inFlightFetchCount = 0;
     this.latestUsefulBlockKeys = new Set();
+    this.latestUsefulMotionTileKeys = new Set();
     this.protectedBlockKeys = new Set();
     this.maxTargetBlocks = this.tiles.size * 2;
     const blockByteLengths = [...this.tiles.values()].flatMap((tile) => tile.blocks.map((block) => block.byte_length));
@@ -176,6 +368,10 @@ export class TiledRainTileStore {
     return tile?.blocks.find((block) => block.index === blockIndex) || null;
   }
 
+  motionDescriptor(tileKey) {
+    return this.motionTiles.get(tileKey) || null;
+  }
+
   ensureBlock(tileKey, blockIndex) {
     const key = `${tileKey}:${blockIndex}`;
     let state = this.blocks.get(key);
@@ -187,7 +383,7 @@ export class TiledRainTileStore {
     const descriptor = this.descriptor(tileKey, blockIndex);
     if (!descriptor) throw new Error(`Tiled rain block ${key} is not present in the manifest.`);
     if (!state || state.obsolete || state.status === 'error' || state.status === 'aborted') {
-      state = { key, tileKey, blockIndex, descriptor, status: 'queued', lastUsed: ++this.lastUsed, payload: null, gpuTexture: null };
+      state = { key, tileKey, blockIndex, descriptor, kind: 'rain', status: 'queued', lastUsed: ++this.lastUsed, payload: null, gpuTexture: null };
     }
     state.status = 'queued';
     state.obsolete = false;
@@ -203,10 +399,43 @@ export class TiledRainTileStore {
     return state.promise;
   }
 
-  updateDesiredBlockKeys(usefulKeys) {
+  ensureMotionTile(tileKey) {
+    const key = tileKey;
+    let state = this.motionTilesState?.get(key);
+    if (state?.status === 'ready') {
+      state.lastUsed = ++this.lastUsed;
+      return Promise.resolve(state);
+    }
+    if (state?.promise && !state.obsolete && state.status !== 'error' && state.status !== 'aborted') return state.promise;
+    const descriptor = this.motionDescriptor(tileKey);
+    if (!descriptor) throw new Error(`MotionField tile ${key} is not present in the manifest.`);
+    if (!this.motionTilesState) this.motionTilesState = new Map();
+    if (!state || state.obsolete || state.status === 'error' || state.status === 'aborted') {
+      state = { key, tileKey, descriptor, kind: 'motion', status: 'queued', lastUsed: ++this.lastUsed, payload: null, gpuTexture: null };
+    }
+    state.status = 'queued';
+    state.obsolete = false;
+    state.promise = new Promise((resolve, reject) => {
+      state.resolve = resolve;
+      state.reject = reject;
+    });
+    this.motionTilesState.set(key, state);
+    this.fetchQueue.push(state);
+    this.diagnosticsState.pendingRequestCount++;
+    this.diagnosticsState.pendingMotionTileCount++;
+    this.diagnosticsState.queuedFetchCount++;
+    this.pumpFetchQueue();
+    return state.promise;
+  }
+
+  updateDesiredBlockKeys(usefulKeys, usefulMotionTileKeys = new Set()) {
     this.latestUsefulBlockKeys = new Set(usefulKeys);
-    for (const state of [...this.blocks.values()]) {
-      if ((state.status === 'queued' || state.status === 'pending') && !this.latestUsefulBlockKeys.has(state.key)) {
+    this.latestUsefulMotionTileKeys = new Set(usefulMotionTileKeys);
+    for (const state of [...this.blocks.values(), ...(this.motionTilesState?.values() || [])]) {
+      const useful = state.kind === 'motion'
+        ? this.latestUsefulMotionTileKeys.has(state.key)
+        : this.latestUsefulBlockKeys.has(state.key);
+      if ((state.status === 'queued' || state.status === 'pending') && !useful) {
         this.abortObsoleteState(state);
       }
     }
@@ -225,7 +454,11 @@ export class TiledRainTileStore {
       this.diagnosticsState.queuedFetchCount = Math.max(0, this.diagnosticsState.queuedFetchCount - 1);
       state.resolve?.(null);
       state.promise = null;
-      this.blocks.delete(state.key);
+      if (state.kind === 'motion') {
+        this.motionTilesState.delete(state.key);
+        this.diagnosticsState.pendingMotionTileCount = Math.max(0, this.diagnosticsState.pendingMotionTileCount - 1);
+      }
+      else this.blocks.delete(state.key);
       return;
     }
     state.controller?.abort();
@@ -246,9 +479,14 @@ export class TiledRainTileStore {
     this.inFlightFetchCount++;
     this.diagnosticsState.inFlightFetchCount = this.inFlightFetchCount;
     this.diagnosticsState.peakInFlightFetchCount = Math.max(this.diagnosticsState.peakInFlightFetchCount, this.inFlightFetchCount);
+    this.diagnosticsState.combinedWeatherFetchCount = this.inFlightFetchCount;
+    this.diagnosticsState.peakCombinedInFlightWeatherFetchCount = Math.max(this.diagnosticsState.peakCombinedInFlightWeatherFetchCount, this.inFlightFetchCount);
     this.diagnosticsState.tileRequestCount++;
-    const url = resolveAssetUrl(this.dataset.manifestUrl, state.descriptor.asset);
-    this.onTiming(`tiled-rain-block-${state.tileKey}-${state.blockIndex}-fetch-start`);
+    if (state.kind === 'motion') this.diagnosticsState.motionRequestCount++;
+    else this.diagnosticsState.rainBlockRequestCount = (this.diagnosticsState.rainBlockRequestCount || 0) + 1;
+    const assetManifestUrl = state.kind === 'motion' ? this.motionManifestUrl : this.dataset.manifestUrl;
+    const url = resolveAssetUrl(assetManifestUrl, state.descriptor.asset);
+    this.onTiming(`${state.kind === 'motion' ? 'tiled-rain-motion' : 'tiled-rain-block'}-${state.tileKey}${state.kind === 'motion' ? '' : `-${state.blockIndex}`}-fetch-start`);
     void fetch(url, { signal: state.controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`Unable to load tiled rain block ${url} (${response.status}).`);
@@ -258,23 +496,36 @@ export class TiledRainTileStore {
         else this.diagnosticsState.unknownEncodingResponseCount++;
         this.diagnosticsState.latestContentEncoding = contentEncoding || 'identity';
         const contentLength = Number(response.headers?.get?.('Content-Length'));
-        if (Number.isFinite(contentLength) && contentLength >= 0) this.diagnosticsState.responseContentLengthBytes += contentLength;
+        if (Number.isFinite(contentLength) && contentLength >= 0) {
+          this.diagnosticsState.responseContentLengthBytes += contentLength;
+          if (state.kind === 'motion') this.diagnosticsState.motionResponseContentLengthBytes += contentLength;
+          else this.diagnosticsState.rainResponseContentLengthBytes += contentLength;
+        }
         return response.arrayBuffer();
       })
       .then((payload) => {
         this.diagnosticsState.logicalFetchedBytes += payload.byteLength;
-        if (state.obsolete || !this.latestUsefulBlockKeys.has(state.key)) {
+        const useful = state.kind === 'motion'
+          ? this.latestUsefulMotionTileKeys.has(state.key)
+          : this.latestUsefulBlockKeys.has(state.key);
+        if (state.obsolete || !useful) {
           state.status = 'aborted';
           state.resolve(null);
           return null;
         }
-        if (payload.byteLength !== state.descriptor.byte_length) throw new Error(`Tiled rain block ${state.key} byte length is ${payload.byteLength}, expected ${state.descriptor.byte_length}.`);
+        if (payload.byteLength !== state.descriptor.byte_length) throw new Error(`${state.kind === 'motion' ? 'MotionField tile' : 'Tiled rain block'} ${state.key} byte length is ${payload.byteLength}, expected ${state.descriptor.byte_length}.`);
         state.payload = payload;
         state.status = 'ready';
         state.lastUsed = ++this.lastUsed;
         this.diagnosticsState.tileFetchCount++;
-        this.evict(this.protectedBlockKeys);
-        this.onTiming(`tiled-rain-block-${state.tileKey}-${state.blockIndex}-fetch-complete`);
+        if (state.kind === 'motion') {
+          this.diagnosticsState.motionFetchCount++;
+          this.diagnosticsState.motionLogicalFetchedBytes = (this.diagnosticsState.motionLogicalFetchedBytes || 0) + payload.byteLength;
+        } else {
+          this.diagnosticsState.rainBlockFetchCount = (this.diagnosticsState.rainBlockFetchCount || 0) + 1;
+        }
+        if (state.kind !== 'motion') this.evict(this.protectedBlockKeys);
+        this.onTiming(`${state.kind === 'motion' ? 'tiled-rain-motion' : 'tiled-rain-block'}-${state.tileKey}${state.kind === 'motion' ? '' : `-${state.blockIndex}`}-fetch-complete`);
         state.resolve(state);
         return state;
       })
@@ -292,12 +543,15 @@ export class TiledRainTileStore {
       .finally(() => {
         this.inFlightFetchCount = Math.max(0, this.inFlightFetchCount - 1);
         this.diagnosticsState.inFlightFetchCount = this.inFlightFetchCount;
+        this.diagnosticsState.combinedWeatherFetchCount = this.inFlightFetchCount;
         this.diagnosticsState.pendingRequestCount = Math.max(0, this.diagnosticsState.pendingRequestCount - 1);
         state.controller = null;
         state.promise = null;
-        if ((state.status === 'aborted' || state.status === 'error') && this.blocks.get(state.key) === state) {
-          this.blocks.delete(state.key);
+        const stateMap = state.kind === 'motion' ? this.motionTilesState : this.blocks;
+        if ((state.status === 'aborted' || state.status === 'error') && stateMap?.get(state.key) === state) {
+          stateMap.delete(state.key);
         }
+        if (state.kind === 'motion') this.diagnosticsState.pendingMotionTileCount = Math.max(0, this.diagnosticsState.pendingMotionTileCount - 1);
         this.updateMemoryDiagnostics();
         this.pumpFetchQueue();
       });
@@ -336,15 +590,33 @@ export class TiledRainTileStore {
       if (state.status !== 'ready') continue;
       tileKeys.add(state.tileKey);
       bytes += state.payload?.byteLength || 0;
-      gpuBytes += state.gpuTexture ? TILED_RAIN_TILE_SIZE * TILED_RAIN_TILE_SIZE * state.descriptor.frame_count * 2 : 0;
+      const storedSize = this.motionWarp ? TILED_RAIN_WARP_STORED_SIZE : TILED_RAIN_TILE_SIZE;
+      gpuBytes += state.gpuTexture ? storedSize * storedSize * state.descriptor.frame_count * 2 : 0;
     }
     this.diagnosticsState.residentTileCount = tileKeys.size;
     this.diagnosticsState.residentTileBlockCount = [...this.blocks.values()].filter((state) => state.status === 'ready').length;
     this.diagnosticsState.logicalUInt16ResidentBytes = bytes;
     this.diagnosticsState.estimatedGpuTextureBytes = gpuBytes;
+    this.diagnosticsState.haloRainLogicalResidentBytes = this.motionWarp ? bytes : 0;
+    this.diagnosticsState.estimatedHaloRainGpuBytes = this.motionWarp ? gpuBytes : 0;
     this.diagnosticsState.peakResidentBlockCount = Math.max(this.diagnosticsState.peakResidentBlockCount, this.diagnosticsState.residentTileBlockCount);
     this.diagnosticsState.peakLogicalUInt16ResidentBytes = Math.max(this.diagnosticsState.peakLogicalUInt16ResidentBytes, bytes);
     this.diagnosticsState.peakEstimatedGpuTextureBytes = Math.max(this.diagnosticsState.peakEstimatedGpuTextureBytes, gpuBytes);
+    let motionBytes = 0;
+    let motionGpuBytes = 0;
+    let residentMotionTileCount = 0;
+    for (const state of this.motionTilesState?.values() || []) {
+      if (state.status !== 'ready') continue;
+      residentMotionTileCount++;
+      motionBytes += state.payload?.byteLength || 0;
+      motionGpuBytes += state.gpuTexture ? 3 * (this.motionManifest.interval_count * 3) * 4 * 4 : 0;
+    }
+    this.diagnosticsState.residentMotionTileCount = residentMotionTileCount;
+    this.diagnosticsState.logicalMotionResidentBytes = motionBytes;
+    this.diagnosticsState.estimatedMotionGpuBytes = motionGpuBytes;
+    this.diagnosticsState.peakResidentMotionTileCount = Math.max(this.diagnosticsState.peakResidentMotionTileCount, residentMotionTileCount);
+    this.diagnosticsState.peakLogicalMotionResidentBytes = Math.max(this.diagnosticsState.peakLogicalMotionResidentBytes, motionBytes);
+    this.diagnosticsState.peakEstimatedMotionGpuBytes = Math.max(this.diagnosticsState.peakEstimatedMotionGpuBytes, motionGpuBytes);
     this.diagnosticsState.trackedBlockCount = this.blocks.size;
     this.diagnosticsState.peakTrackedBlockCount = Math.max(this.diagnosticsState.peakTrackedBlockCount, this.blocks.size);
   }
@@ -356,16 +628,50 @@ export class TiledRainTileStore {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
     gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, this.motionWarp ? gl.REPEAT : gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, this.motionWarp ? gl.REPEAT : gl.CLAMP_TO_EDGE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage3D(
       gl.TEXTURE_2D_ARRAY, 0, gl.R16UI,
-      TILED_RAIN_TILE_SIZE, TILED_RAIN_TILE_SIZE, state.descriptor.frame_count,
+      this.motionWarp ? TILED_RAIN_WARP_STORED_SIZE : TILED_RAIN_TILE_SIZE,
+      this.motionWarp ? TILED_RAIN_WARP_STORED_SIZE : TILED_RAIN_TILE_SIZE,
+      state.descriptor.frame_count,
       0, gl.RED_INTEGER, gl.UNSIGNED_SHORT, new Uint16Array(state.payload)
     );
     state.gpuTexture = texture;
     this.gl = gl;
+    this.diagnosticsState.tileUploadCount++;
+    this.diagnosticsState.latestGpuUploadMs = now() - started;
+    this.diagnosticsState.cumulativeGpuUploadMs += this.diagnosticsState.latestGpuUploadMs;
+    this.updateMemoryDiagnostics();
+    return texture;
+  }
+
+  uploadMotionTile(gl, state) {
+    if (state.gpuTexture) return state.gpuTexture;
+    const started = now();
+    const source = new Float32Array(state.payload);
+    const nodeCount = 3 * 3;
+    const rgba = new Float32Array(this.motionManifest.interval_count * nodeCount * 4);
+    for (let index = 0; index < this.motionManifest.interval_count * nodeCount; index++) {
+      rgba[index * 4] = source[index * 3];
+      rgba[index * 4 + 1] = source[index * 3 + 1];
+      rgba[index * 4 + 2] = source[index * 3 + 2];
+    }
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA32F, 3, this.motionManifest.interval_count * 3,
+      0, gl.RGBA, gl.FLOAT, rgba
+    );
+    state.gpuTexture = texture;
+    this.gl = gl;
+    this.diagnosticsState.motionUploadCount++;
     this.diagnosticsState.tileUploadCount++;
     this.diagnosticsState.latestGpuUploadMs = now() - started;
     this.diagnosticsState.cumulativeGpuUploadMs += this.diagnosticsState.latestGpuUploadMs;
@@ -408,20 +714,62 @@ function makeProgram(gl, shaderData) {
     '#version 300 es', shaderData.vertexShaderPrelude,
     'precision highp float; precision highp int; precision highp usampler2DArray;',
     'in vec2 a_vertex;',
-    'uniform vec2 u_tileOrigin; uniform usampler2DArray u_rainA; uniform usampler2DArray u_rainB;',
-    'uniform int u_frameLayerA; uniform int u_frameLayerB; uniform float u_temporalProgress; uniform int u_mode;',
+    'uniform vec2 u_tileOrigin; uniform usampler2DArray u_rainA; uniform usampler2DArray u_rainB; uniform sampler2D u_motion;',
+    'uniform int u_frameLayerA; uniform int u_frameLayerB; uniform int u_frameA; uniform int u_frameB; uniform int u_motionInterval; uniform int u_motionWarpActive; uniform int u_rainHalo; uniform float u_temporalProgress; uniform int u_mode;',
     'out vec2 v_local; out float v_radius;',
     'uniform float u_physicalMaxMmh;',
     'float decodeRain(uint code) { if (code == 0u || code == 1u) return 0.0; return (float(code) - 1.0) / 65534.0 * u_physicalMaxMmh; }',
+    'vec2 rainTap(uint code) { return vec2(decodeRain(code), code == 0u ? 0.0 : 1.0); }',
+    'vec2 sampleRainFractional(usampler2DArray source, int frameLayer, vec2 coreCoordinate) {',
+    '  vec2 stored = coreCoordinate + vec2(float(u_rainHalo)); vec2 base = floor(stored); vec2 fraction = fract(stored);',
+    '  ivec2 origin = ivec2(base); float totalWeight = 0.0; float value = 0.0;',
+    '  uint code00 = texelFetch(source, ivec3(origin, frameLayer), 0).r;',
+    '  uint code10 = texelFetch(source, ivec3(origin + ivec2(1, 0), frameLayer), 0).r;',
+    '  uint code01 = texelFetch(source, ivec3(origin + ivec2(0, 1), frameLayer), 0).r;',
+    '  uint code11 = texelFetch(source, ivec3(origin + ivec2(1, 1), frameLayer), 0).r;',
+    '  float weight00 = (1.0 - fraction.x) * (1.0 - fraction.y); float weight10 = fraction.x * (1.0 - fraction.y);',
+    '  float weight01 = (1.0 - fraction.x) * fraction.y; float weight11 = fraction.x * fraction.y;',
+    '  vec2 tap = rainTap(code00); if (tap.y > 0.0) { value += weight00 * tap.x; totalWeight += weight00; }',
+    '  tap = rainTap(code10); if (tap.y > 0.0) { value += weight10 * tap.x; totalWeight += weight10; }',
+    '  tap = rainTap(code01); if (tap.y > 0.0) { value += weight01 * tap.x; totalWeight += weight01; }',
+    '  tap = rainTap(code11); if (tap.y > 0.0) { value += weight11 * tap.x; totalWeight += weight11; }',
+    '  return totalWeight > 0.0 ? vec2(value / totalWeight, 1.0) : vec2(0.0);',
+    '}',
+    'vec3 interpolateMotion(vec2 coreCoordinate) {',
+    '  vec2 nodeCoordinate = coreCoordinate / 64.0; ivec2 lower = ivec2(floor(nodeCoordinate));',
+    '  lower = clamp(lower, ivec2(0), ivec2(1)); vec2 fraction = nodeCoordinate - vec2(lower);',
+    '  vec2 flow = vec2(0.0); float confidence = 0.0;',
+    '  for (int row = 0; row < 2; row++) for (int column = 0; column < 2; column++) {',
+    '    float weight = (column == 0 ? 1.0 - fraction.x : fraction.x) * (row == 0 ? 1.0 - fraction.y : fraction.y);',
+    '    vec4 node = texelFetch(u_motion, ivec2(lower.x + column, u_motionInterval * 3 + lower.y + row), 0);',
+    '    flow += weight * node.z * node.xy; confidence += weight * node.z;',
+    '  }',
+    '  return confidence > 0.000001 ? vec3(flow / confidence, confidence) : vec3(0.0);',
+    '}',
+    'vec2 temporalNoDataMix(vec2 first, vec2 second, float progress) {',
+    '  if (first.y > 0.0 && second.y > 0.0) return vec2(mix(first.x, second.x, progress), 1.0);',
+    '  if (first.y > 0.0) return first; if (second.y > 0.0) return second; return vec2(0.0);',
+    '}',
     RAIN_VISIBILITY_SHADER,
     strongRainShader(),
     'void main() {',
     `  int localIndex = gl_InstanceID; int localX = localIndex % ${TILED_RAIN_TILE_SIZE}; int localY = localIndex / ${TILED_RAIN_TILE_SIZE};`,
-    '  uint codeA = texelFetch(u_rainA, ivec3(localX, localY, u_frameLayerA), 0).r;',
-    '  uint codeB = texelFetch(u_rainB, ivec3(localX, localY, u_frameLayerB), 0).r;',
+    '  ivec2 rainCoordinate = ivec2(localX, localY) + ivec2(u_motionWarpActive * u_rainHalo);',
+    '  uint codeA = texelFetch(u_rainA, ivec3(rainCoordinate, u_frameLayerA), 0).r;',
+    '  uint codeB = texelFetch(u_rainB, ivec3(rainCoordinate, u_frameLayerB), 0).r;',
     '  bool validA = codeA != 0u; bool validB = codeB != 0u;',
     '  float rainA = decodeRain(codeA); float rainB = decodeRain(codeB);',
-    '  float rain = validA && validB ? mix(rainA, rainB, u_temporalProgress) : validA ? rainA : validB ? rainB : 0.0;',
+    '  float direct = validA && validB ? mix(rainA, rainB, u_temporalProgress) : validA ? rainA : validB ? rainB : 0.0;',
+    '  float rain = direct;',
+    '  if (u_motionWarpActive == 1 && u_frameA != u_frameB && u_temporalProgress > 0.0 && u_temporalProgress < 1.0) {',
+    '    vec3 motion = interpolateMotion(vec2(float(localX), float(localY)));',
+    '    if (motion.z > 0.000001 && (validA || validB)) {',
+    '      vec2 warpedA = sampleRainFractional(u_rainA, u_frameLayerA, vec2(float(localX), float(localY)) - motion.xy * u_temporalProgress);',
+    '      vec2 warpedB = sampleRainFractional(u_rainB, u_frameLayerB, vec2(float(localX), float(localY)) + motion.xy * (1.0 - u_temporalProgress));',
+    '      vec2 warped = temporalNoDataMix(warpedA, warpedB, u_temporalProgress);',
+    '      if (warped.y > 0.0) rain = mix(direct, warped.x, motion.z);',
+    '    }',
+    '  }',
     `  float radiusFraction = u_mode == 0 ? rainVisibility(rain) * ${DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6)} : strongRain(rain);`,
     `  v_radius = radiusFraction / ${TILED_RAIN_GRID_SIZE}.0; v_local = a_vertex;`,
     `  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / ${TILED_RAIN_GRID_SIZE}.0;`,
@@ -444,8 +792,14 @@ function makeProgram(gl, shaderData) {
       tileOrigin: gl.getUniformLocation(program, 'u_tileOrigin'),
       rainA: gl.getUniformLocation(program, 'u_rainA'),
       rainB: gl.getUniformLocation(program, 'u_rainB'),
+      motion: gl.getUniformLocation(program, 'u_motion'),
       frameLayerA: gl.getUniformLocation(program, 'u_frameLayerA'),
       frameLayerB: gl.getUniformLocation(program, 'u_frameLayerB'),
+      frameA: gl.getUniformLocation(program, 'u_frameA'),
+      frameB: gl.getUniformLocation(program, 'u_frameB'),
+      motionInterval: gl.getUniformLocation(program, 'u_motionInterval'),
+      motionWarpActive: gl.getUniformLocation(program, 'u_motionWarpActive'),
+      rainHalo: gl.getUniformLocation(program, 'u_rainHalo'),
       temporalProgress: gl.getUniformLocation(program, 'u_temporalProgress'),
       physicalMaxMmh: gl.getUniformLocation(program, 'u_physicalMaxMmh'),
       mode: gl.getUniformLocation(program, 'u_mode'),
@@ -492,6 +846,7 @@ export class TiledRainDotsLayer {
   onRemove(map, gl) {
     for (const entry of this.programs.values()) gl.deleteProgram(entry.program);
     for (const state of this.store.blocks.values()) if (state.gpuTexture) gl.deleteTexture(state.gpuTexture);
+    for (const state of this.store.motionTilesState?.values() || []) if (state.gpuTexture) gl.deleteTexture(state.gpuTexture);
     if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);
   }
 
@@ -545,9 +900,10 @@ export class TiledRainDotsLayer {
     // work bounded to the newest target while preserving ordinary transitions.
     const residentFallbackKeys = [...fallbackKeys].filter((key) => this.store.blocks.get(key)?.status === 'ready');
     const usefulKeys = new Set([...targetKeys, ...residentFallbackKeys]);
+    const targetMotionTileKeys = this.store.motionWarp ? new Set(this.viewportTileKeys) : new Set();
     this.desiredBlockKeys = targetKeys;
     this.store.setProtectedBlockKeys(targetKeys);
-    this.store.updateDesiredBlockKeys(usefulKeys);
+    this.store.updateDesiredBlockKeys(usefulKeys, targetMotionTileKeys);
     // Target blocks have priority. Fallback remains protected during ordinary
     // adjacent transitions, but can be evicted on a large jump so the ready
     // block ceiling remains hard.
@@ -559,13 +915,14 @@ export class TiledRainDotsLayer {
       const blockIndex = Number(key.slice(separator + 1));
       return this.store.ensureBlock(tileKey, blockIndex);
     });
-    void Promise.all(ensure(targetKeys))
+    const ensureMotion = (keys) => [...keys].map((key) => this.store.ensureMotionTile(key));
+    void Promise.all([...ensure(targetKeys), ...ensureMotion(targetMotionTileKeys)])
       .then(() => {
         if (generation !== this.requestGeneration) {
           this.store.diagnosticsState.staleDesiredStates++;
           return;
         }
-        if (!this.allBlocksReady(targetKeys)) return;
+        if (!this.allBlocksReady(targetKeys) || !this.allMotionTilesReady(targetMotionTileKeys)) return;
         this.commitFrame(requestedFrame);
       })
       .catch((error) => {
@@ -596,8 +953,13 @@ export class TiledRainDotsLayer {
     return [...keys].every((key) => this.store.blocks.get(key)?.status === 'ready');
   }
 
+  allMotionTilesReady(keys) {
+    return [...keys].every((key) => this.store.motionTilesState?.get(key)?.status === 'ready');
+  }
+
   canRenderFrame(frame) {
-    return this.allBlocksReady(this.blockKeysForFrame(frame, this.viewportTileKeys));
+    return this.allBlocksReady(this.blockKeysForFrame(frame, this.viewportTileKeys))
+      && this.allMotionTilesReady(this.store.motionWarp ? new Set(this.viewportTileKeys) : new Set());
   }
 
   commitFrame(frame) {
@@ -608,7 +970,7 @@ export class TiledRainDotsLayer {
     const targetKeys = this.blockKeysForFrame(frame, this.viewportTileKeys);
     this.desiredBlockKeys = targetKeys;
     this.store.setProtectedBlockKeys(targetKeys);
-    this.store.updateDesiredBlockKeys(targetKeys);
+    this.store.updateDesiredBlockKeys(targetKeys, this.store.motionWarp ? new Set(this.viewportTileKeys) : new Set());
     this.store.evict(targetKeys);
     this.map?.triggerRepaint();
   }
@@ -646,6 +1008,10 @@ export class TiledRainDotsLayer {
     gl.uniform1i(locations.rainB, 1);
     gl.uniform1i(locations.frameLayerA, this.committedFrame.frame0 - blockA.descriptor.frame_start);
     gl.uniform1i(locations.frameLayerB, this.committedFrame.frame1 - blockB.descriptor.frame_start);
+    gl.uniform1i(locations.frameA, this.committedFrame.frame0);
+    gl.uniform1i(locations.frameB, this.committedFrame.frame1);
+    gl.uniform1i(locations.rainHalo, this.store.motionWarp ? TILED_RAIN_WARP_HALO_SIZE : 0);
+    gl.uniform1i(locations.motionWarpActive, this.store.motionWarp ? 1 : 0);
     gl.uniform1f(locations.temporalProgress, this.committedFrame.progress);
     gl.uniform1f(locations.physicalMaxMmh, this.store.manifest.encoding.physical_max_mmh);
     gl.uniform1i(locations.mode, mode);
@@ -654,6 +1020,13 @@ export class TiledRainDotsLayer {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockA.gpuTexture || this.store.uploadBlock(gl, blockA));
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockB.gpuTexture || this.store.uploadBlock(gl, blockB));
+    if (this.store.motionWarp) {
+      const motionState = this.store.motionTilesState.get(`${tile.x}:${tile.y}`);
+      gl.uniform1i(locations.motion, 2);
+      gl.uniform1i(locations.motionInterval, Math.min(this.committedFrame.frame0, this.store.motionManifest.interval_count - 1));
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, motionState.gpuTexture || this.store.uploadMotionTile(gl, motionState));
+    }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
     gl.enableVertexAttribArray(locations.vertex);
     gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
@@ -675,7 +1048,9 @@ export class TiledRainDotsLayer {
       const tile = this.store.tiles.get(tileKey);
       const blockA = this.store.blocks.get(`${tileKey}:${blockAIndex}`);
       const blockB = this.store.blocks.get(`${tileKey}:${blockBIndex}`);
-      if (!tile || blockA?.status !== 'ready' || blockB?.status !== 'ready') continue;
+      const motionTile = this.store.motionWarp ? this.store.motionTilesState?.get(tileKey) : null;
+      if (!tile || blockA?.status !== 'ready' || blockB?.status !== 'ready'
+        || (this.store.motionWarp && motionTile?.status !== 'ready')) continue;
       this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 0);
       this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 1);
       rendered++;
@@ -713,9 +1088,11 @@ export class TiledRainDotsLayer {
   }
 }
 
-export function beginTiledRainLoad(manifestUrl, { onTiming = null } = {}) {
+export function beginTiledRainLoad(manifestUrl, { onTiming = null, motionWarp = false } = {}) {
   const timing = typeof onTiming === 'function' ? onTiming : () => {};
-  const metadataReady = loadAndValidateDataset(manifestUrl, timing).then((dataset) => {
+  const metadataReady = (motionWarp
+    ? loadAndValidateWarpDataset(manifestUrl, timing)
+    : loadAndValidateDataset(manifestUrl, timing)).then((dataset) => {
     const store = new TiledRainTileStore(dataset, { onTiming: timing });
     return Object.freeze({
       isTiledRain: true,

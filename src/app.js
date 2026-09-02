@@ -24,6 +24,7 @@ import { beginTiledRainLoad, TiledRainDotsLayer } from './engine/tiled-rain.js';
 
 const applicationStartupAt = performance.now();
 const tiledRainEnabled = new URLSearchParams(window.location.search).get('tiledRain') === '1';
+const motionWarpEnabled = tiledRainEnabled && new URLSearchParams(window.location.search).get('motionWarp') === '1';
 const startupTimings = Object.create(null);
 function markStartup(name) {
   if (startupTimings[name] !== undefined) return startupTimings[name];
@@ -89,7 +90,12 @@ function updateTimelineResidency(residentSourceFrameIndices = []) {
 }
 
 const weatherLoad = tiledRainEnabled
-  ? beginTiledRainLoad('./data/generated/tiled-rain/current/manifest.json', { onTiming: markStartup })
+  ? beginTiledRainLoad(
+    motionWarpEnabled
+      ? './data/generated/tiled-rain-warp/current/manifest.json'
+      : './data/generated/tiled-rain/current/manifest.json',
+    { onTiming: markStartup, motionWarp: motionWarpEnabled }
+  )
   : beginActiveWeatherLoad({ onTiming: markStartup, onResidencyChange: updateTimelineResidency });
 
 async function loadMapTilerKey() {
