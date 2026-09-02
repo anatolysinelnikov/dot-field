@@ -634,6 +634,7 @@ function updateLogicalSamplingZoom() {
   updateRawMapMaxZoom(next.latitude);
   if (state.resettingView) {
     state.camera = next;
+    if (tiledRainEnabled) state.logicalSamplingZoom = next.rawZoom;
     updateResetViewControl();
     updateLodDiagnostics();
     return;
@@ -641,10 +642,12 @@ function updateLogicalSamplingZoom() {
   const previous = state.camera;
   if (!previous) {
     state.camera = next;
+    if (tiledRainEnabled) state.logicalSamplingZoom = next.rawZoom;
     updateLodDiagnostics();
     return;
   }
   if (tiledRainEnabled) {
+    state.logicalSamplingZoom = next.rawZoom;
     state.camera = next;
     weatherLayer?.setViewportBounds(visibleMercatorBounds());
     updateLodDiagnostics();

@@ -67,14 +67,17 @@ The spatial contract is exact and globally anchored: sample identity is the
 L13 integer pair `(i, j)` at `x = i / 2^13`, `y = j / 2^13`. Half-open ownership
 assigns each sample to one 128-sample tile. Tile blocks use a documented
 frame-major, row-major UInt16 layout. Code 0 is NoData, code 1 is valid dry,
-and codes 2–65535 linearly decode positive physical `mm/h` using the actual
-finite maximum recorded in the manifest. Presentation mapping remains in the
-shader and reuses the Dots rain/strong-rain transfer anchors.
+and codes 2–65535 linearly decode positive physical `mm/h` using
+`(code - 1) / 65534 * physical_max_mmh`; the actual finite maximum is recorded
+in the manifest. Presentation mapping remains in the shader and reuses the
+Dots rain/strong-rain transfer anchors.
 
 The tiled loader selects the conservative visible Mercator tile envelope with a
 small deterministic L13 overscan, requests only the current frame pair's
-blocks, rejects stale desired-state completions, and bounds resident blocks by
-an explicit LRU ceiling. It uploads block payloads directly as WebGL2 integer
+blocks, and keeps a committed renderable frame pair while a newer requested
+pair loads. A bounded eight-fetch queue cancels obsolete queued and in-flight
+blocks; stale completions cannot commit. Resident blocks remain bounded by an
+explicit LRU ceiling. It uploads block payloads directly as WebGL2 integer
 texture arrays without expanding the tile to Float32 arrays or constructing
 per-sample JavaScript positions. Camera movement changes tile orchestration;
 it does not reconstruct a weather field or rebuild a geographic pyramid.
@@ -335,6 +338,8 @@ counters, latest and cumulative texture upload timing, first tiled-weather
 visible timing, evictions, the current source frame pair and shader progress,
 and `sourceFrameStackFetched: false`. The normal source loader, RAW, Squares,
 and `GeographicWeatherPyramid` are not instantiated on this path.
+The tiled snapshot also exposes the eight-fetch concurrency ceiling, current
+in-flight and queued work, peak in-flight work, and aborted obsolete requests.
 
 Export uses schema version 1 with session metadata, environment, limitations,
 summary, samples, events, and weather resources. MapTiler keys,

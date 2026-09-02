@@ -32,7 +32,7 @@ TEMPORAL_BLOCK_SIZE = 4
 UINT16_MAX = 65535
 POSITIVE_CODE_MIN = 2
 POSITIVE_CODE_MAX = UINT16_MAX
-POSITIVE_CODE_RANGE = POSITIVE_CODE_MAX - POSITIVE_CODE_MIN
+POSITIVE_QUANTIZED_RANGE = POSITIVE_CODE_MAX - 1
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -115,7 +115,7 @@ def encode_samples(values: np.ndarray, maximum: float) -> np.ndarray:
     wet = valid & (values > 0.0)
     encoded[valid & ~wet] = 1
     encoded[wet] = np.rint(
-        POSITIVE_CODE_MIN + values[wet] / maximum * POSITIVE_CODE_RANGE
+        1 + values[wet] / maximum * POSITIVE_QUANTIZED_RANGE
     ).astype(np.uint16)
     encoded[wet] = np.clip(encoded[wet], POSITIVE_CODE_MIN, POSITIVE_CODE_MAX)
     return encoded
@@ -126,7 +126,7 @@ def decode_samples(encoded: np.ndarray, maximum: float) -> np.ndarray:
     dry = encoded == 1
     wet = encoded >= POSITIVE_CODE_MIN
     decoded[dry] = 0.0
-    decoded[wet] = (encoded[wet].astype(np.float64) - POSITIVE_CODE_MIN) / POSITIVE_CODE_RANGE * maximum
+    decoded[wet] = (encoded[wet].astype(np.float64) - 1.0) / POSITIVE_QUANTIZED_RANGE * maximum
     return decoded
 
 
@@ -311,8 +311,9 @@ def main() -> None:
             "dry_code": 1,
             "positive_code_min": POSITIVE_CODE_MIN,
             "positive_code_max": POSITIVE_CODE_MAX,
+            "positive_quantized_range": POSITIVE_QUANTIZED_RANGE,
             "physical_max_mmh": physical_max,
-            "decode_positive": "(code - 2) / 65533 * physical_max_mmh",
+            "decode_positive": "(code - 1) / 65534 * physical_max_mmh",
         },
         "tiles": [
             {

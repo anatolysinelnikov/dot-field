@@ -10,9 +10,10 @@ export const TILED_RAIN_SCHEMA = 'dot-field-tiled-rain-v0';
 export const TILED_RAIN_LOD_LEVEL = 13;
 export const TILED_RAIN_TILE_SIZE = 128;
 export const TILED_RAIN_GRID_SIZE = 2 ** TILED_RAIN_LOD_LEVEL;
-// The current source generation exposes 143 tiles, so two adjacent frame
-// blocks for the full support fit within this bounded cache.
+// This fixed bound is intentionally large enough for the current support's
+// visible pair while remaining independent of the source Float32 sequence.
 const MAX_RESIDENT_BLOCKS = 320;
+export const TILED_RAIN_MAX_CONCURRENT_FETCHES = 8;
 const VIEWPORT_OVERSCAN_SAMPLES = 64;
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
 const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1] };
@@ -54,6 +55,7 @@ function validateManifest(manifest) {
   const encoding = manifest.encoding;
   if (!encoding || encoding.dtype !== 'UInt16' || encoding.nodata_code !== 0 || encoding.dry_code !== 1
     || encoding.positive_code_min !== 2 || encoding.positive_code_max !== 65535
+    || encoding.positive_quantized_range !== 65534
     || !Number.isFinite(encoding.physical_max_mmh) || encoding.physical_max_mmh <= 0) {
     clearError('UInt16 encoding semantics are invalid.');
   }
@@ -132,8 +134,17 @@ export class TiledRainTileStore {
       evictions: 0,
       staleDesiredStates: 0,
       sourceFrameStackFetched: false,
-      maxResidentBlocks: MAX_RESIDENT_BLOCKS
+      maxResidentBlocks: MAX_RESIDENT_BLOCKS,
+      inFlightFetchCount: 0,
+      queuedFetchCount: 0,
+      abortedObsoleteRequestCount: 0,
+      maxConcurrentFetches: TILED_RAIN_MAX_CONCURRENT_FETCHES,
+      peakInFlightFetchCount: 0,
+      lastError: null
     };
+    this.fetchQueue = [];
+    this.inFlightFetchCount = 0;
+    this.latestUsefulBlockKeys = new Set();
   }
 
   descriptor(tileKey, blockIndex) {
@@ -141,47 +152,122 @@ export class TiledRainTileStore {
     return tile?.blocks.find((block) => block.index === blockIndex) || null;
   }
 
-  async ensureBlock(tileKey, blockIndex) {
+  ensureBlock(tileKey, blockIndex) {
     const key = `${tileKey}:${blockIndex}`;
     let state = this.blocks.get(key);
     if (state?.status === 'ready') {
       state.lastUsed = ++this.lastUsed;
-      return state;
+      return Promise.resolve(state);
     }
     if (state?.promise) return state.promise;
     const descriptor = this.descriptor(tileKey, blockIndex);
     if (!descriptor) throw new Error(`Tiled rain block ${key} is not present in the manifest.`);
-    state = state || { key, tileKey, blockIndex, descriptor, status: 'pending', lastUsed: ++this.lastUsed, payload: null, gpuTexture: null };
-    state.status = 'pending';
-    state.promise = (async () => {
-      this.diagnosticsState.tileRequestCount++;
-      this.diagnosticsState.pendingRequestCount++;
-      const url = resolveAssetUrl(this.dataset.manifestUrl, descriptor.asset);
-      this.onTiming(`tiled-rain-block-${tileKey}-${blockIndex}-fetch-start`);
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Unable to load tiled rain block ${url} (${response.status}).`);
-      const payload = await response.arrayBuffer();
-      if (payload.byteLength !== descriptor.byte_length) throw new Error(`Tiled rain block ${key} byte length is ${payload.byteLength}, expected ${descriptor.byte_length}.`);
-      const values = new Uint16Array(payload);
-      for (let index = 0; index < values.length; index++) {
-        if (values[index] === 0 || values[index] === 1 || (values[index] >= 2 && values[index] <= 65535)) continue;
-        throw new Error(`Tiled rain block ${key} has an invalid UInt16 code at ${index}.`);
-      }
-      state.payload = payload;
-      state.status = 'ready';
-      state.lastUsed = ++this.lastUsed;
-      this.diagnosticsState.tileFetchCount++;
-      this.diagnosticsState.pendingRequestCount--;
-      this.onTiming(`tiled-rain-block-${tileKey}-${blockIndex}-fetch-complete`);
-      return state;
-    })().catch((error) => {
-      this.diagnosticsState.pendingRequestCount = Math.max(0, this.diagnosticsState.pendingRequestCount - 1);
-      state.status = 'error';
-      state.promise = null;
-      throw error;
+    state = state || { key, tileKey, blockIndex, descriptor, status: 'queued', lastUsed: ++this.lastUsed, payload: null, gpuTexture: null };
+    state.status = 'queued';
+    state.obsolete = false;
+    state.promise = new Promise((resolve, reject) => {
+      state.resolve = resolve;
+      state.reject = reject;
     });
     this.blocks.set(key, state);
+    this.fetchQueue.push(state);
+    this.diagnosticsState.pendingRequestCount++;
+    this.diagnosticsState.queuedFetchCount++;
+    this.pumpFetchQueue();
     return state.promise;
+  }
+
+  updateDesiredBlockKeys(usefulKeys) {
+    this.latestUsefulBlockKeys = new Set(usefulKeys);
+    for (const state of [...this.blocks.values()]) {
+      if ((state.status === 'queued' || state.status === 'pending') && !this.latestUsefulBlockKeys.has(state.key)) {
+        this.abortObsoleteState(state);
+      }
+    }
+    this.fetchQueue = this.fetchQueue.filter((state) => state.status === 'queued' && !state.obsolete);
+    this.diagnosticsState.queuedFetchCount = this.fetchQueue.length;
+    this.pumpFetchQueue();
+  }
+
+  abortObsoleteState(state) {
+    if (state.obsolete || state.status === 'ready' || state.status === 'error') return;
+    state.obsolete = true;
+    this.diagnosticsState.abortedObsoleteRequestCount++;
+    if (state.status === 'queued') {
+      state.status = 'aborted';
+      this.diagnosticsState.pendingRequestCount = Math.max(0, this.diagnosticsState.pendingRequestCount - 1);
+      this.diagnosticsState.queuedFetchCount = Math.max(0, this.diagnosticsState.queuedFetchCount - 1);
+      state.resolve?.(null);
+      state.promise = null;
+      this.blocks.delete(state.key);
+      return;
+    }
+    state.controller?.abort();
+  }
+
+  pumpFetchQueue() {
+    while (this.inFlightFetchCount < TILED_RAIN_MAX_CONCURRENT_FETCHES && this.fetchQueue.length) {
+      const state = this.fetchQueue.shift();
+      this.diagnosticsState.queuedFetchCount = this.fetchQueue.length;
+      if (!state || state.obsolete || state.status !== 'queued') continue;
+      this.startFetch(state);
+    }
+  }
+
+  startFetch(state) {
+    state.status = 'pending';
+    state.controller = new AbortController();
+    this.inFlightFetchCount++;
+    this.diagnosticsState.inFlightFetchCount = this.inFlightFetchCount;
+    this.diagnosticsState.peakInFlightFetchCount = Math.max(this.diagnosticsState.peakInFlightFetchCount, this.inFlightFetchCount);
+    this.diagnosticsState.tileRequestCount++;
+    const url = resolveAssetUrl(this.dataset.manifestUrl, state.descriptor.asset);
+    this.onTiming(`tiled-rain-block-${state.tileKey}-${state.blockIndex}-fetch-start`);
+    void fetch(url, { signal: state.controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Unable to load tiled rain block ${url} (${response.status}).`);
+        return response.arrayBuffer();
+      })
+      .then((payload) => {
+        if (state.obsolete || !this.latestUsefulBlockKeys.has(state.key)) {
+          state.status = 'aborted';
+          state.resolve(null);
+          return null;
+        }
+        if (payload.byteLength !== state.descriptor.byte_length) throw new Error(`Tiled rain block ${state.key} byte length is ${payload.byteLength}, expected ${state.descriptor.byte_length}.`);
+        const values = new Uint16Array(payload);
+        for (let index = 0; index < values.length; index++) {
+          if (values[index] === 0 || values[index] === 1 || (values[index] >= 2 && values[index] <= 65535)) continue;
+          throw new Error(`Tiled rain block ${state.key} has an invalid UInt16 code at ${index}.`);
+        }
+        state.payload = payload;
+        state.status = 'ready';
+        state.lastUsed = ++this.lastUsed;
+        this.diagnosticsState.tileFetchCount++;
+        this.onTiming(`tiled-rain-block-${state.tileKey}-${state.blockIndex}-fetch-complete`);
+        state.resolve(state);
+        return state;
+      })
+      .catch((error) => {
+        if (state.obsolete || error?.name === 'AbortError') {
+          state.status = 'aborted';
+          state.resolve(null);
+          return null;
+        }
+        state.status = 'error';
+        this.diagnosticsState.lastError = error instanceof Error ? error.message : String(error);
+        state.reject(error);
+        return null;
+      })
+      .finally(() => {
+        this.inFlightFetchCount = Math.max(0, this.inFlightFetchCount - 1);
+        this.diagnosticsState.inFlightFetchCount = this.inFlightFetchCount;
+        this.diagnosticsState.pendingRequestCount = Math.max(0, this.diagnosticsState.pendingRequestCount - 1);
+        state.controller = null;
+        state.promise = null;
+        if (state.status === 'aborted' || state.status === 'error') this.blocks.delete(state.key);
+        this.pumpFetchQueue();
+      });
   }
 
   evict(keepKeys) {
@@ -280,19 +366,19 @@ function makeProgram(gl, shaderData) {
     'uniform int u_frameLayerA; uniform int u_frameLayerB; uniform float u_temporalProgress; uniform int u_mode;',
     'out vec2 v_local; out float v_radius;',
     'uniform float u_physicalMaxMmh;',
-    'float decodeRain(uint code) { if (code == 0u) return 0.0; if (code == 1u) return 0.0; return (float(code) - 2.0) / 65533.0 * u_physicalMaxMmh; }',
+    'float decodeRain(uint code) { if (code == 0u || code == 1u) return 0.0; return (float(code) - 1.0) / 65534.0 * u_physicalMaxMmh; }',
     RAIN_VISIBILITY_SHADER,
     strongRainShader(),
     'void main() {',
-    '  int localIndex = gl_InstanceID; int localX = localIndex % 128; int localY = localIndex / 128;',
+    `  int localIndex = gl_InstanceID; int localX = localIndex % ${TILED_RAIN_TILE_SIZE}; int localY = localIndex / ${TILED_RAIN_TILE_SIZE};`,
     '  uint codeA = texelFetch(u_rainA, ivec3(localX, localY, u_frameLayerA), 0).r;',
     '  uint codeB = texelFetch(u_rainB, ivec3(localX, localY, u_frameLayerB), 0).r;',
     '  bool validA = codeA != 0u; bool validB = codeB != 0u;',
     '  float rainA = decodeRain(codeA); float rainB = decodeRain(codeB);',
     '  float rain = validA && validB ? mix(rainA, rainB, u_temporalProgress) : validA ? rainA : validB ? rainB : 0.0;',
     '  float radiusFraction = u_mode == 0 ? rainVisibility(rain) : strongRain(rain);',
-    '  v_radius = radiusFraction / 8192.0; v_local = a_vertex;',
-    '  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / 8192.0;',
+    `  v_radius = radiusFraction / ${TILED_RAIN_GRID_SIZE}.0; v_local = a_vertex;`,
+    `  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / ${TILED_RAIN_GRID_SIZE}.0;`,
     '  gl_Position = projectTile(center + a_vertex * v_radius);',
     '}'
   ].join('\n');
@@ -338,7 +424,8 @@ export class TiledRainDotsLayer {
     this.programs = new Map();
     this.active = true;
     this.viewportTileKeys = [];
-    this.frame = sourceFrameForTime(store.manifest.frame_count, 0);
+    this.requestedFrame = sourceFrameForTime(store.manifest.frame_count, 0);
+    this.committedFrame = null;
     this.requestGeneration = 0;
     this.desiredBlockKeys = new Set();
     this.map = null;
@@ -389,40 +476,87 @@ export class TiledRainDotsLayer {
 
   setTime(time) {
     const next = sourceFrameForTime(this.store.manifest.frame_count, time);
-    const previous = this.frame;
+    const previous = this.requestedFrame;
     const previousBlockA = Math.floor(previous.frame0 / this.store.manifest.temporal_block_size);
     const previousBlockB = Math.floor(previous.frame1 / this.store.manifest.temporal_block_size);
     const blockA = Math.floor(next.frame0 / this.store.manifest.temporal_block_size);
     const blockB = Math.floor(next.frame1 / this.store.manifest.temporal_block_size);
     const changed = next.frame0 !== previous.frame0 || next.frame1 !== previous.frame1 || next.progress !== previous.progress;
-    this.frame = next;
-    if (changed && (blockA !== previousBlockA || blockB !== previousBlockB)) this.requestState();
-    else if (changed) this.map?.triggerRepaint();
+    this.requestedFrame = next;
+    if (!changed) return;
+    if (blockA !== previousBlockA || blockB !== previousBlockB || !this.canRenderFrame(next)) this.requestState();
+    else this.commitFrame(next);
   }
 
   requestState() {
     const generation = ++this.requestGeneration;
-    const blockA = Math.floor(this.frame.frame0 / this.store.manifest.temporal_block_size);
-    const blockB = Math.floor(this.frame.frame1 / this.store.manifest.temporal_block_size);
-    const desired = new Set(this.viewportTileKeys.flatMap((tileKey) => [`${tileKey}:${blockA}`, `${tileKey}:${blockB}`]));
-    this.desiredBlockKeys = desired;
-    this.store.evict(desired);
-    void Promise.all(this.viewportTileKeys.flatMap((tileKey) => [blockA, blockB].filter((block, index, values) => values.indexOf(block) === index).map((block) => this.store.ensureBlock(tileKey, block))))
+    const requestedFrame = this.requestedFrame;
+    const targetKeys = this.blockKeysForFrame(requestedFrame, this.viewportTileKeys);
+    const fallbackKeys = this.committedFrame
+      ? this.blockKeysForFrame(this.committedFrame, this.viewportTileKeys)
+      : new Set();
+    const usefulKeys = new Set([...targetKeys, ...fallbackKeys]);
+    this.desiredBlockKeys = targetKeys;
+    this.store.updateDesiredBlockKeys(usefulKeys);
+    this.store.evict(usefulKeys);
+
+    const ensure = (keys) => [...keys].map((key) => {
+      const separator = key.lastIndexOf(':');
+      const tileKey = key.slice(0, separator);
+      const blockIndex = Number(key.slice(separator + 1));
+      return this.store.ensureBlock(tileKey, blockIndex);
+    });
+    void Promise.all(ensure(targetKeys))
       .then(() => {
         if (generation !== this.requestGeneration) {
           this.store.diagnosticsState.staleDesiredStates++;
-          this.store.evict(this.desiredBlockKeys);
           return;
         }
-        this.store.evict(this.desiredBlockKeys);
-        this.map?.triggerRepaint();
+        if (!this.allBlocksReady(targetKeys)) return;
+        this.commitFrame(requestedFrame);
       })
       .catch((error) => {
-        if (generation === this.requestGeneration) {
-          console.error('Unable to load the required tiled rain state.', error);
-          this.store.diagnosticsState.lastError = error instanceof Error ? error.message : String(error);
-        }
+        if (generation !== this.requestGeneration || error?.name === 'AbortError') return;
+        console.error('Unable to load the required tiled rain state.', error);
+        this.store.diagnosticsState.lastError = error instanceof Error ? error.message : String(error);
       });
+    void Promise.all(ensure(fallbackKeys)).then(() => {
+      if (generation === this.requestGeneration && this.committedFrame && this.canRenderFrame(this.committedFrame)) {
+        this.map?.triggerRepaint();
+      }
+    }).catch((error) => {
+      if (generation === this.requestGeneration && error?.name !== 'AbortError') {
+        this.store.diagnosticsState.lastError = error instanceof Error ? error.message : String(error);
+      }
+    });
+  }
+
+  blockKeysForFrame(frame, tileKeys) {
+    const blockA = Math.floor(frame.frame0 / this.store.manifest.temporal_block_size);
+    const blockB = Math.floor(frame.frame1 / this.store.manifest.temporal_block_size);
+    return new Set(tileKeys.flatMap((tileKey) => [blockA, blockB]
+      .filter((block, index, values) => values.indexOf(block) === index)
+      .map((block) => `${tileKey}:${block}`)));
+  }
+
+  allBlocksReady(keys) {
+    return [...keys].every((key) => this.store.blocks.get(key)?.status === 'ready');
+  }
+
+  canRenderFrame(frame) {
+    return this.allBlocksReady(this.blockKeysForFrame(frame, this.viewportTileKeys));
+  }
+
+  commitFrame(frame) {
+    // Invalidate an older completion that may have raced a same-block direct
+    // commit. The committed pair is always complete for the current viewport.
+    this.requestGeneration++;
+    this.committedFrame = frame;
+    const targetKeys = this.blockKeysForFrame(frame, this.viewportTileKeys);
+    this.desiredBlockKeys = targetKeys;
+    this.store.updateDesiredBlockKeys(targetKeys);
+    this.store.evict(targetKeys);
+    this.map?.triggerRepaint();
   }
 
   setActive(active) {
@@ -449,12 +583,16 @@ export class TiledRainDotsLayer {
     const { locations } = program;
     gl.useProgram(program.program);
     setGeographicProjection(gl, locations, projection);
-    gl.uniform2f(locations.tileOrigin, tile.x / TILED_RAIN_GRID_SIZE, tile.y / TILED_RAIN_GRID_SIZE);
+    gl.uniform2f(
+      locations.tileOrigin,
+      (tile.x * TILED_RAIN_TILE_SIZE) / TILED_RAIN_GRID_SIZE,
+      (tile.y * TILED_RAIN_TILE_SIZE) / TILED_RAIN_GRID_SIZE
+    );
     gl.uniform1i(locations.rainA, 0);
     gl.uniform1i(locations.rainB, 1);
-    gl.uniform1i(locations.frameLayerA, this.frame.frame0 - blockA.descriptor.frame_start);
-    gl.uniform1i(locations.frameLayerB, this.frame.frame1 - blockB.descriptor.frame_start);
-    gl.uniform1f(locations.temporalProgress, this.frame.progress);
+    gl.uniform1i(locations.frameLayerA, this.committedFrame.frame0 - blockA.descriptor.frame_start);
+    gl.uniform1i(locations.frameLayerB, this.committedFrame.frame1 - blockB.descriptor.frame_start);
+    gl.uniform1f(locations.temporalProgress, this.committedFrame.progress);
     gl.uniform1f(locations.physicalMaxMmh, this.store.manifest.encoding.physical_max_mmh);
     gl.uniform1i(locations.mode, mode);
     gl.uniform4fv(locations.color, COLORS[mode === 0 ? 'rain' : 'strong']);
@@ -470,9 +608,10 @@ export class TiledRainDotsLayer {
 
   render(gl, args) {
     if (!this.active) return;
+    if (!this.committedFrame) return;
     const program = this.programsFor(gl, args.shaderData);
-    const blockAIndex = Math.floor(this.frame.frame0 / this.store.manifest.temporal_block_size);
-    const blockBIndex = Math.floor(this.frame.frame1 / this.store.manifest.temporal_block_size);
+    const blockAIndex = Math.floor(this.committedFrame.frame0 / this.store.manifest.temporal_block_size);
+    const blockBIndex = Math.floor(this.committedFrame.frame1 / this.store.manifest.temporal_block_size);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.enable(gl.DEPTH_TEST);
@@ -496,14 +635,22 @@ export class TiledRainDotsLayer {
   }
 
   diagnostics() {
-    const blockA = Math.floor(this.frame.frame0 / this.store.manifest.temporal_block_size);
-    const blockB = Math.floor(this.frame.frame1 / this.store.manifest.temporal_block_size);
+    const frame = this.committedFrame || this.requestedFrame;
+    const blockA = Math.floor(frame.frame0 / this.store.manifest.temporal_block_size);
+    const blockB = Math.floor(frame.frame1 / this.store.manifest.temporal_block_size);
     return {
       ...this.store.diagnostics(),
       active: this.active,
       visibleTileCount: this.viewportTileKeys.length,
-      currentSourceFramePair: [this.frame.frame0, this.frame.frame1],
-      temporalProgress: this.frame.progress,
+      currentSourceFramePair: [frame.frame0, frame.frame1],
+      temporalProgress: frame.progress,
+      requestedSourceFramePair: [this.requestedFrame.frame0, this.requestedFrame.frame1],
+      requestedTemporalProgress: this.requestedFrame.progress,
+      committedSourceFramePair: this.committedFrame ? [this.committedFrame.frame0, this.committedFrame.frame1] : null,
+      temporalCommitPending: !this.committedFrame
+        || this.requestedFrame.frame0 !== this.committedFrame.frame0
+        || this.requestedFrame.frame1 !== this.committedFrame.frame1
+        || this.requestedFrame.progress !== this.committedFrame.progress,
       currentTemporalBlocks: [blockA, blockB],
       lodLevel: TILED_RAIN_LOD_LEVEL,
       tileSize: TILED_RAIN_TILE_SIZE,
