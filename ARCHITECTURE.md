@@ -93,9 +93,11 @@ orchestration; it does not reconstruct a weather field or rebuild a geographic
 pyramid.
 
 Phase 0A intentionally does not solve temporal motion: the shader uses direct
-`mix(rainA, rainB, progress)` interpolation. Optical flow, advection, radar or
-model motion, single/double warp, and materialized subframes remain deferred to
-Phase 0B.
+`mix(rainA, rainB, progress)` interpolation. The tiled runtime constructs a
+separate motion-free shader/program for this reference path; it does not
+declare or bind MotionField samplers. Optical flow, advection, radar or model
+motion, single/double warp, and materialized subframes remain deferred to Phase
+0B.
 
 ## Experimental tiled-rain Phase 0B1 — offline MotionField, non-default
 

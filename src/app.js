@@ -23,8 +23,10 @@ import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
 import { beginTiledRainLoad, TiledRainDotsLayer } from './engine/tiled-rain.js';
 
 const applicationStartupAt = performance.now();
-const tiledRainEnabled = new URLSearchParams(window.location.search).get('tiledRain') === '1';
-const motionWarpEnabled = tiledRainEnabled && new URLSearchParams(window.location.search).get('motionWarp') === '1';
+const queryParameters = new URLSearchParams(window.location.search);
+const tiledRainEnabled = queryParameters.get('tiledRain') === '1';
+const motionWarpEnabled = tiledRainEnabled && queryParameters.get('motionWarp') === '1';
+const motionWarpDebugMode = motionWarpEnabled && queryParameters.get('motionWarpDebug') === 'full' ? 'full' : null;
 const startupTimings = Object.create(null);
 function markStartup(name) {
   if (startupTimings[name] !== undefined) return startupTimings[name];
@@ -94,7 +96,7 @@ const weatherLoad = tiledRainEnabled
     motionWarpEnabled
       ? './data/generated/tiled-rain-warp/current/manifest.json'
       : './data/generated/tiled-rain/current/manifest.json',
-    { onTiming: markStartup, motionWarp: motionWarpEnabled }
+    { onTiming: markStartup, motionWarp: motionWarpEnabled, motionWarpDebugMode }
   )
   : beginActiveWeatherLoad({ onTiming: markStartup, onResidencyChange: updateTimelineResidency });
 

@@ -148,6 +148,7 @@ function validateMotionManifest(manifest) {
   const seen = new Set();
   for (const tile of manifest.tiles || []) {
     if (!Number.isInteger(tile.x) || !Number.isInteger(tile.y) || tile.node_width !== 3 || tile.node_height !== 3
+      || !Number.isInteger(tile.node_x_start) || !Number.isInteger(tile.node_y_start)
       || typeof tile.asset !== 'string' || typeof tile.gzip_asset !== 'string'
       || tile.byte_length !== manifest.interval_count * 3 * 3 * 3 * Float32Array.BYTES_PER_ELEMENT) {
       clearError('MotionField tile descriptor is invalid.');
@@ -274,6 +275,7 @@ export class TiledRainTileStore {
     this.manifest = dataset.manifest;
     this.tiles = dataset.tiles;
     this.motionWarp = Boolean(dataset.isMotionWarp);
+    this.motionWarpDebugMode = this.motionWarp && dataset.motionWarpDebugMode === 'full' ? 'full' : null;
     this.motionManifest = dataset.motionManifest || null;
     this.motionManifestUrl = dataset.motionManifestUrl || null;
     this.motionTiles = dataset.motionTiles || new Map();
@@ -292,6 +294,22 @@ export class TiledRainTileStore {
       haloRainLogicalResidentBytes: 0,
       estimatedHaloRainGpuBytes: 0,
       motionWarpActive: this.motionWarp,
+      motionWarpDebugMode: this.motionWarpDebugMode,
+      visibleMotionTilesReady: 0,
+      currentMotionInterval: null,
+      visibleUniqueMotionNodeCount: 0,
+      visibleNonzeroConfidenceNodeCount: 0,
+      visibleNonzeroConfidencePercentage: 0,
+      visibleConfidenceMean: null,
+      visibleConfidenceMedian: null,
+      visibleConfidenceMax: null,
+      visibleDisplacementMagnitudeMean: null,
+      visibleDisplacementMagnitudeMedian: null,
+      visibleDisplacementMagnitudeMax: null,
+      visibleDxMin: null,
+      visibleDxMax: null,
+      visibleDyMin: null,
+      visibleDyMax: null,
       warpManifestSourceGenerationId: this.motionWarp ? this.manifest.source_generation_id : null,
       warpManifestSourceTiledRainManifestSha256: this.motionWarp ? this.manifest.source_tiled_rain_manifest_sha256 : null,
       warpManifestSourceMotionManifestSha256: this.motionWarp ? this.manifest.source_motion_manifest_sha256 : null,
@@ -679,9 +697,87 @@ export class TiledRainTileStore {
     return texture;
   }
 
-  diagnostics() {
+  visibleMotionDiagnostics(tileKeys, interval) {
+    const empty = {
+      visibleMotionTilesReady: 0,
+      currentMotionInterval: this.motionWarp ? interval : null,
+      visibleUniqueMotionNodeCount: 0,
+      visibleNonzeroConfidenceNodeCount: 0,
+      visibleNonzeroConfidencePercentage: 0,
+      visibleConfidenceMean: null,
+      visibleConfidenceMedian: null,
+      visibleConfidenceMax: null,
+      visibleDisplacementMagnitudeMean: null,
+      visibleDisplacementMagnitudeMedian: null,
+      visibleDisplacementMagnitudeMax: null,
+      visibleDxMin: null,
+      visibleDxMax: null,
+      visibleDyMin: null,
+      visibleDyMax: null
+    };
+    if (!this.motionWarp) return empty;
+    const nodes = new Map();
+    let readyTileCount = 0;
+    for (const tileKey of tileKeys) {
+      const state = this.motionTilesState?.get(tileKey);
+      if (state?.status !== 'ready') continue;
+      readyTileCount++;
+      const descriptor = state.descriptor;
+      const values = new Float32Array(state.payload);
+      for (let row = 0; row < descriptor.node_height; row++) {
+        for (let column = 0; column < descriptor.node_width; column++) {
+          const nodeX = (descriptor.node_x_start + column) * 64;
+          const nodeY = (descriptor.node_y_start + row) * 64;
+          const key = `${nodeX}:${nodeY}`;
+          if (nodes.has(key)) continue;
+          const offset = (interval * descriptor.node_width * descriptor.node_height
+            + row * descriptor.node_width + column) * 3;
+          nodes.set(key, {
+            dx: values[offset],
+            dy: values[offset + 1],
+            confidence: values[offset + 2]
+          });
+        }
+      }
+    }
+    const allNodes = [...nodes.values()];
+    const nonzero = allNodes.filter((node) => Number.isFinite(node.confidence) && node.confidence > 0);
+    const sorted = (values) => [...values].sort((left, right) => left - right);
+    const median = (values) => {
+      if (!values.length) return null;
+      const ordered = sorted(values);
+      const middle = Math.floor(ordered.length / 2);
+      return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+    };
+    const mean = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    const confidenceValues = nonzero.map((node) => node.confidence);
+    const magnitudeValues = nonzero
+      .filter((node) => Number.isFinite(node.dx) && Number.isFinite(node.dy))
+      .map((node) => Math.hypot(node.dx, node.dy));
+    const dxValues = nonzero.map((node) => node.dx).filter(Number.isFinite);
+    const dyValues = nonzero.map((node) => node.dy).filter(Number.isFinite);
+    return {
+      visibleMotionTilesReady: readyTileCount,
+      currentMotionInterval: interval,
+      visibleUniqueMotionNodeCount: allNodes.length,
+      visibleNonzeroConfidenceNodeCount: nonzero.length,
+      visibleNonzeroConfidencePercentage: allNodes.length ? (nonzero.length / allNodes.length) * 100 : 0,
+      visibleConfidenceMean: mean(confidenceValues),
+      visibleConfidenceMedian: median(confidenceValues),
+      visibleConfidenceMax: confidenceValues.length ? Math.max(...confidenceValues) : null,
+      visibleDisplacementMagnitudeMean: mean(magnitudeValues),
+      visibleDisplacementMagnitudeMedian: median(magnitudeValues),
+      visibleDisplacementMagnitudeMax: magnitudeValues.length ? Math.max(...magnitudeValues) : null,
+      visibleDxMin: dxValues.length ? Math.min(...dxValues) : null,
+      visibleDxMax: dxValues.length ? Math.max(...dxValues) : null,
+      visibleDyMin: dyValues.length ? Math.min(...dyValues) : null,
+      visibleDyMax: dyValues.length ? Math.max(...dyValues) : null
+    };
+  }
+
+  diagnostics({ visibleMotionTileKeys = [], currentMotionInterval = 0 } = {}) {
     this.updateMemoryDiagnostics();
-    return { ...this.diagnosticsState };
+    return { ...this.diagnosticsState, ...this.visibleMotionDiagnostics(visibleMotionTileKeys, currentMotionInterval) };
   }
 }
 
@@ -709,16 +805,12 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
-function makeProgram(gl, shaderData) {
-  const vertexSource = [
-    '#version 300 es', shaderData.vertexShaderPrelude,
-    'precision highp float; precision highp int; precision highp usampler2DArray;',
-    'in vec2 a_vertex;',
-    'uniform vec2 u_tileOrigin; uniform usampler2DArray u_rainA; uniform usampler2DArray u_rainB; uniform sampler2D u_motion;',
-    'uniform int u_frameLayerA; uniform int u_frameLayerB; uniform int u_frameA; uniform int u_frameB; uniform int u_motionInterval; uniform int u_motionWarpActive; uniform int u_rainHalo; uniform float u_temporalProgress; uniform int u_mode;',
-    'out vec2 v_local; out float v_radius;',
-    'uniform float u_physicalMaxMmh;',
-    'float decodeRain(uint code) { if (code == 0u || code == 1u) return 0.0; return (float(code) - 1.0) / 65534.0 * u_physicalMaxMmh; }',
+function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode) {
+  const motionUniforms = motionWarp ? [
+    'uniform sampler2D u_motion;',
+    'uniform int u_frameA; uniform int u_frameB; uniform int u_motionInterval; uniform int u_motionWarpActive; uniform int u_rainHalo;'
+  ] : [];
+  const motionFunctions = motionWarp ? [
     'vec2 rainTap(uint code) { return vec2(decodeRain(code), code == 0u ? 0.0 : 1.0); }',
     'vec2 sampleRainFractional(usampler2DArray source, int frameLayer, vec2 coreCoordinate) {',
     '  vec2 stored = coreCoordinate + vec2(float(u_rainHalo)); vec2 base = floor(stored); vec2 fraction = fract(stored);',
@@ -749,12 +841,10 @@ function makeProgram(gl, shaderData) {
     'vec2 temporalNoDataMix(vec2 first, vec2 second, float progress) {',
     '  if (first.y > 0.0 && second.y > 0.0) return vec2(mix(first.x, second.x, progress), 1.0);',
     '  if (first.y > 0.0) return first; if (second.y > 0.0) return second; return vec2(0.0);',
-    '}',
-    RAIN_VISIBILITY_SHADER,
-    strongRainShader(),
-    'void main() {',
-    `  int localIndex = gl_InstanceID; int localX = localIndex % ${TILED_RAIN_TILE_SIZE}; int localY = localIndex / ${TILED_RAIN_TILE_SIZE};`,
-    '  ivec2 rainCoordinate = ivec2(localX, localY) + ivec2(u_motionWarpActive * u_rainHalo);',
+    '}'
+  ] : [];
+  const motionRainSource = motionWarp ? [
+    '  ivec2 rainCoordinate = ivec2(localX, localY) + ivec2(u_rainHalo);',
     '  uint codeA = texelFetch(u_rainA, ivec3(rainCoordinate, u_frameLayerA), 0).r;',
     '  uint codeB = texelFetch(u_rainB, ivec3(rainCoordinate, u_frameLayerB), 0).r;',
     '  bool validA = codeA != 0u; bool validB = codeB != 0u;',
@@ -767,9 +857,32 @@ function makeProgram(gl, shaderData) {
     '      vec2 warpedA = sampleRainFractional(u_rainA, u_frameLayerA, vec2(float(localX), float(localY)) - motion.xy * u_temporalProgress);',
     '      vec2 warpedB = sampleRainFractional(u_rainB, u_frameLayerB, vec2(float(localX), float(localY)) + motion.xy * (1.0 - u_temporalProgress));',
     '      vec2 warped = temporalNoDataMix(warpedA, warpedB, u_temporalProgress);',
-    '      if (warped.y > 0.0) rain = mix(direct, warped.x, motion.z);',
+    `      if (warped.y > 0.0) rain = ${motionWarpDebugMode === 'full' ? 'warped.x' : 'mix(direct, warped.x, motion.z)'};`,
     '    }',
-    '  }',
+    '  }'
+  ] : [
+    '  uint codeA = texelFetch(u_rainA, ivec3(localX, localY, u_frameLayerA), 0).r;',
+    '  uint codeB = texelFetch(u_rainB, ivec3(localX, localY, u_frameLayerB), 0).r;',
+    '  bool validA = codeA != 0u; bool validB = codeB != 0u;',
+    '  float rainA = decodeRain(codeA); float rainB = decodeRain(codeB);',
+    '  float rain = validA && validB ? mix(rainA, rainB, u_temporalProgress) : validA ? rainA : validB ? rainB : 0.0;'
+  ];
+  const vertexSource = [
+    '#version 300 es', shaderData.vertexShaderPrelude,
+    'precision highp float; precision highp int; precision highp usampler2DArray;',
+    'in vec2 a_vertex;',
+    'uniform vec2 u_tileOrigin; uniform usampler2DArray u_rainA; uniform usampler2DArray u_rainB;',
+    'uniform int u_frameLayerA; uniform int u_frameLayerB; uniform float u_temporalProgress; uniform int u_mode;',
+    ...motionUniforms,
+    'out vec2 v_local; out float v_radius;',
+    'uniform float u_physicalMaxMmh;',
+    'float decodeRain(uint code) { if (code == 0u || code == 1u) return 0.0; return (float(code) - 1.0) / 65534.0 * u_physicalMaxMmh; }',
+    ...motionFunctions,
+    RAIN_VISIBILITY_SHADER,
+    strongRainShader(),
+    'void main() {',
+    `  int localIndex = gl_InstanceID; int localX = localIndex % ${TILED_RAIN_TILE_SIZE}; int localY = localIndex / ${TILED_RAIN_TILE_SIZE};`,
+    ...motionRainSource,
     `  float radiusFraction = u_mode == 0 ? rainVisibility(rain) * ${DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6)} : strongRain(rain);`,
     `  v_radius = radiusFraction / ${TILED_RAIN_GRID_SIZE}.0; v_local = a_vertex;`,
     `  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / ${TILED_RAIN_GRID_SIZE}.0;`,
@@ -785,21 +898,13 @@ function makeProgram(gl, shaderData) {
   gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'Tiled rain shader linking failed.');
-  return {
-    program,
-    locations: {
+  const locations = {
       vertex: gl.getAttribLocation(program, 'a_vertex'),
       tileOrigin: gl.getUniformLocation(program, 'u_tileOrigin'),
       rainA: gl.getUniformLocation(program, 'u_rainA'),
       rainB: gl.getUniformLocation(program, 'u_rainB'),
-      motion: gl.getUniformLocation(program, 'u_motion'),
       frameLayerA: gl.getUniformLocation(program, 'u_frameLayerA'),
       frameLayerB: gl.getUniformLocation(program, 'u_frameLayerB'),
-      frameA: gl.getUniformLocation(program, 'u_frameA'),
-      frameB: gl.getUniformLocation(program, 'u_frameB'),
-      motionInterval: gl.getUniformLocation(program, 'u_motionInterval'),
-      motionWarpActive: gl.getUniformLocation(program, 'u_motionWarpActive'),
-      rainHalo: gl.getUniformLocation(program, 'u_rainHalo'),
       temporalProgress: gl.getUniformLocation(program, 'u_temporalProgress'),
       physicalMaxMmh: gl.getUniformLocation(program, 'u_physicalMaxMmh'),
       mode: gl.getUniformLocation(program, 'u_mode'),
@@ -810,8 +915,16 @@ function makeProgram(gl, shaderData) {
       tileMercatorCoords: gl.getUniformLocation(program, 'u_projection_tile_mercator_coords'),
       clippingPlane: gl.getUniformLocation(program, 'u_projection_clipping_plane'),
       projectionTransition: gl.getUniformLocation(program, 'u_projection_transition')
-    }
   };
+  if (motionWarp) Object.assign(locations, {
+    motion: gl.getUniformLocation(program, 'u_motion'),
+    frameA: gl.getUniformLocation(program, 'u_frameA'),
+    frameB: gl.getUniformLocation(program, 'u_frameB'),
+    motionInterval: gl.getUniformLocation(program, 'u_motionInterval'),
+    motionWarpActive: gl.getUniformLocation(program, 'u_motionWarpActive'),
+    rainHalo: gl.getUniformLocation(program, 'u_rainHalo')
+  });
+  return { program, locations };
 }
 
 export class TiledRainDotsLayer {
@@ -987,10 +1100,11 @@ export class TiledRainDotsLayer {
   }
 
   programsFor(gl, shaderData) {
-    let program = this.programs.get(shaderData.variantName);
+    const cacheKey = `${this.store.motionWarp ? 'motion' : 'direct'}:${shaderData.variantName}`;
+    let program = this.programs.get(cacheKey);
     if (!program) {
-      program = makeProgram(gl, shaderData);
-      this.programs.set(shaderData.variantName, program);
+      program = makeProgram(gl, shaderData, this.store.motionWarp, this.store.motionWarpDebugMode);
+      this.programs.set(cacheKey, program);
     }
     return program;
   }
@@ -1008,10 +1122,12 @@ export class TiledRainDotsLayer {
     gl.uniform1i(locations.rainB, 1);
     gl.uniform1i(locations.frameLayerA, this.committedFrame.frame0 - blockA.descriptor.frame_start);
     gl.uniform1i(locations.frameLayerB, this.committedFrame.frame1 - blockB.descriptor.frame_start);
-    gl.uniform1i(locations.frameA, this.committedFrame.frame0);
-    gl.uniform1i(locations.frameB, this.committedFrame.frame1);
-    gl.uniform1i(locations.rainHalo, this.store.motionWarp ? TILED_RAIN_WARP_HALO_SIZE : 0);
-    gl.uniform1i(locations.motionWarpActive, this.store.motionWarp ? 1 : 0);
+    if (this.store.motionWarp) {
+      gl.uniform1i(locations.frameA, this.committedFrame.frame0);
+      gl.uniform1i(locations.frameB, this.committedFrame.frame1);
+      gl.uniform1i(locations.rainHalo, TILED_RAIN_WARP_HALO_SIZE);
+      gl.uniform1i(locations.motionWarpActive, 1);
+    }
     gl.uniform1f(locations.temporalProgress, this.committedFrame.progress);
     gl.uniform1f(locations.physicalMaxMmh, this.store.manifest.encoding.physical_max_mmh);
     gl.uniform1i(locations.mode, mode);
@@ -1067,8 +1183,14 @@ export class TiledRainDotsLayer {
     const frame = this.committedFrame || this.requestedFrame;
     const blockA = Math.floor(frame.frame0 / this.store.manifest.temporal_block_size);
     const blockB = Math.floor(frame.frame1 / this.store.manifest.temporal_block_size);
+    const currentMotionInterval = this.store.motionWarp
+      ? Math.min(frame.frame0, this.store.motionManifest.interval_count - 1)
+      : null;
     return {
-      ...this.store.diagnostics(),
+      ...this.store.diagnostics({
+        visibleMotionTileKeys: this.viewportTileKeys,
+        currentMotionInterval: currentMotionInterval ?? 0
+      }),
       active: this.active,
       visibleTileCount: this.viewportTileKeys.length,
       currentSourceFramePair: [frame.frame0, frame.frame1],
@@ -1088,12 +1210,13 @@ export class TiledRainDotsLayer {
   }
 }
 
-export function beginTiledRainLoad(manifestUrl, { onTiming = null, motionWarp = false } = {}) {
+export function beginTiledRainLoad(manifestUrl, { onTiming = null, motionWarp = false, motionWarpDebugMode = null } = {}) {
   const timing = typeof onTiming === 'function' ? onTiming : () => {};
+  const debugMode = motionWarp && motionWarpDebugMode === 'full' ? 'full' : null;
   const metadataReady = (motionWarp
     ? loadAndValidateWarpDataset(manifestUrl, timing)
     : loadAndValidateDataset(manifestUrl, timing)).then((dataset) => {
-    const store = new TiledRainTileStore(dataset, { onTiming: timing });
+    const store = new TiledRainTileStore({ ...dataset, motionWarpDebugMode: debugMode }, { onTiming: timing });
     return Object.freeze({
       isTiledRain: true,
       frameCount: dataset.manifest.frame_count,
