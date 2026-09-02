@@ -23,10 +23,6 @@ from typing import Any, Iterable
 import numpy as np
 
 
-# This snapshot is deliberately part of the Phase 0B1 preparation contract.
-EXPECTED_GENERATION_ID = "generation-ff132ac91c88d758"
-EXPECTED_SOURCE_FILENAME = "202609021320.nc"
-
 SCHEMA = "dot-field-tiled-rain-motion-v1"
 VERSION = 1
 LOD_LEVEL = 13
@@ -37,18 +33,18 @@ MOTION_REGION_SIZE = 512
 MOTION_FOOTPRINT_RADIUS = 16
 MAX_COMPONENT_DISPLACEMENT = 12
 COARSE_DISPLACEMENT_STEP = 4
-COARSE_SAMPLE_STRIDE = 16
 REGIONAL_SAMPLE_STRIDE = 8
 LOCAL_SEARCH_RADIUS = 2
-# The global coarse pass samples every 16th L13 pixel, so its threshold is
-# expressed in sparse samples rather than full-resolution footprint samples.
-MIN_COARSE_INFORMATIVE = 8
 MIN_REGIONAL_INFORMATIVE = 48
 MIN_LOCAL_INFORMATIVE = 24
 MIN_SIGNAL_LOG_SUM = 3.0
 MIN_IMPROVEMENT = 0.08
 MIN_AMBIGUITY_MARGIN = 0.05
 MATCH_RAIN_THRESHOLD_MMH = 0.05
+# These are diagnostic relevance gates, not estimator acceptance thresholds.
+# They answer whether a node has enough local rain evidence to be worth judging.
+MOTION_RELEVANCE_MIN_INFORMATIVE_SAMPLES = 8
+MOTION_RELEVANCE_MIN_SIGNAL_LOG_SUM = 1.0
 REGIONAL_FALLBACK_CONFIDENCE_SCALE = 0.5
 
 
@@ -75,6 +71,16 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         default=None,
         help="optional JSON timing report written outside the deterministic manifest",
+    )
+    parser.add_argument(
+        "--expected-generation-id",
+        default=None,
+        help="optional snapshot assertion for a reproducible benchmark run",
+    )
+    parser.add_argument(
+        "--expected-source-filename",
+        default=None,
+        help="optional source filename assertion for a reproducible benchmark run",
     )
     return parser.parse_args()
 
@@ -104,16 +110,23 @@ def sha256_bytes(path: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_source_contract(metadata: dict[str, Any], rain_manifest: dict[str, Any]) -> None:
+def validate_source_contract(
+    metadata: dict[str, Any],
+    rain_manifest: dict[str, Any],
+    expected_generation_id: str | None = None,
+    expected_source_filename: str | None = None,
+) -> None:
     generation_id = metadata.get("generation_id")
     source_filename = (metadata.get("source") or {}).get("filename")
-    if generation_id != EXPECTED_GENERATION_ID:
+    if not isinstance(generation_id, str) or not generation_id:
+        raise SystemExit("normalized metadata must contain generation_id")
+    if expected_generation_id is not None and generation_id != expected_generation_id:
         raise SystemExit(
-            f"frozen generation mismatch: expected {EXPECTED_GENERATION_ID}, got {generation_id}"
+            f"expected generation mismatch: expected {expected_generation_id}, got {generation_id}"
         )
-    if source_filename != EXPECTED_SOURCE_FILENAME:
+    if expected_source_filename is not None and source_filename != expected_source_filename:
         raise SystemExit(
-            f"frozen source mismatch: expected {EXPECTED_SOURCE_FILENAME}, got {source_filename}"
+            f"expected source mismatch: expected {expected_source_filename}, got {source_filename}"
         )
     if rain_manifest.get("source_generation_id") != generation_id:
         raise SystemExit("Phase 0A tiled-rain manifest does not match normalized generation")
@@ -269,6 +282,57 @@ def score_samples(
     }
 
 
+def local_motion_relevance(
+    source_log: np.ndarray,
+    target_log: np.ndarray,
+    xs: np.ndarray,
+    ys: np.ndarray,
+) -> dict[str, Any]:
+    """Classify local rain evidence independently of estimator acceptance."""
+
+    source_inside = (
+        (xs >= 0)
+        & (xs < source_log.shape[1])
+        & (ys >= 0)
+        & (ys < source_log.shape[0])
+    )
+    target_inside = (
+        (xs >= 0)
+        & (xs < target_log.shape[1])
+        & (ys >= 0)
+        & (ys < target_log.shape[0])
+    )
+    source_values = np.full(xs.shape, np.nan, dtype=np.float32)
+    target_values = np.full(xs.shape, np.nan, dtype=np.float32)
+    source_values[source_inside] = source_log[ys[source_inside], xs[source_inside]]
+    target_values[target_inside] = target_log[ys[target_inside], xs[target_inside]]
+    source_valid = np.isfinite(source_values)
+    target_valid = np.isfinite(target_values)
+    threshold = math.log1p(MATCH_RAIN_THRESHOLD_MMH)
+    meaningful = (source_valid & (source_values >= threshold)) | (
+        target_valid & (target_values >= threshold)
+    )
+    valid = source_valid | target_valid
+    signal_values = np.maximum(
+        np.where(source_valid, source_values, 0.0),
+        np.where(target_valid, target_values, 0.0),
+    )
+    informative_count = int(np.count_nonzero(meaningful))
+    signal_sum = float(np.sum(signal_values[meaningful])) if informative_count else 0.0
+    valid_count = int(np.count_nonzero(valid))
+    relevant = (
+        valid_count >= xs.size * 0.25
+        and informative_count >= MOTION_RELEVANCE_MIN_INFORMATIVE_SAMPLES
+        and signal_sum >= MOTION_RELEVANCE_MIN_SIGNAL_LOG_SUM
+    )
+    return {
+        "relevant": relevant,
+        "valid_count": valid_count,
+        "informative_count": informative_count,
+        "signal_sum": signal_sum,
+    }
+
+
 def choose_hypothesis(
     hypotheses: Iterable[tuple[int, int]],
     source_log: np.ndarray,
@@ -385,20 +449,6 @@ def estimate_interval(
     target_log = log_signal(frame_b)
     height, width = source_log.shape
 
-    # The global coarse pass is deliberately sparse and shared by every node.
-    coarse_x, coarse_y = np.meshgrid(
-        np.arange(0, width, COARSE_SAMPLE_STRIDE, dtype=np.int64),
-        np.arange(0, height, COARSE_SAMPLE_STRIDE, dtype=np.int64),
-    )
-    global_coarse = choose_hypothesis(
-        bounded_displacements(COARSE_DISPLACEMENT_STEP),
-        source_log,
-        target_log,
-        coarse_x,
-        coarse_y,
-        MIN_COARSE_INFORMATIVE,
-    )
-
     region_x_values = range(
         math.floor(minimum_x / MOTION_REGION_SIZE),
         math.floor((minimum_x + width - 1) / MOTION_REGION_SIZE) + 1,
@@ -464,6 +514,10 @@ def estimate_interval(
     accepted_dy: list[float] = []
     accepted_magnitudes: list[float] = []
     bound_hits = 0
+    motion_relevant_node_count = 0
+    relevant_local_accepted_count = 0
+    relevant_regional_fallback_count = 0
+    relevant_rejected_count = 0
     for row, global_y in enumerate(node_y_values):
         for column, global_x in enumerate(node_x_values):
             local_x = int(global_x - minimum_x)
@@ -476,12 +530,17 @@ def estimate_interval(
                 np.arange(x0, x1 + 1, dtype=np.int64),
                 np.arange(y0, y1 + 1, dtype=np.int64),
             )
+            relevance = local_motion_relevance(source_log, target_log, xs, ys)
+            if relevance["relevant"]:
+                motion_relevant_node_count += 1
             region_key = (
                 math.floor(int(global_x) / MOTION_REGION_SIZE),
                 math.floor(int(global_y) / MOTION_REGION_SIZE),
             )
             regional_result = regional.get(region_key, {"state": "rejected"})
             if regional_result.get("state") != "accepted":
+                if relevance["relevant"]:
+                    relevant_rejected_count += 1
                 rejected += 1
                 continue
             regional_dx = int(regional_result["dx"])
@@ -519,6 +578,8 @@ def estimate_interval(
                 dy = int(local_result["dy"])
                 confidence = float(local_result["confidence"])
                 local_accepted += 1
+                if relevance["relevant"]:
+                    relevant_local_accepted_count += 1
             elif (
                 regional_result.get("state") == "accepted"
                 and regional_result.get("confidence", 0.0) > 0.0
@@ -529,8 +590,12 @@ def estimate_interval(
                 dy = regional_dy
                 confidence = float(regional_result["confidence"]) * REGIONAL_FALLBACK_CONFIDENCE_SCALE
                 regional_fallback_count += 1
+                if relevance["relevant"]:
+                    relevant_regional_fallback_count += 1
             else:
                 rejected += 1
+                if relevance["relevant"]:
+                    relevant_rejected_count += 1
                 continue
             field[row, column] = (dx, dy, confidence)
             accepted_confidences.append(confidence)
@@ -546,17 +611,21 @@ def estimate_interval(
     dy_values = np.asarray(accepted_dy, dtype=np.float64)
     magnitude_values = np.asarray(accepted_magnitudes, dtype=np.float64)
     diagnostics = {
-        "global_coarse_prior": {
-            "dx": global_coarse.get("dx", 0),
-            "dy": global_coarse.get("dy", 0),
-            "confidence": global_coarse.get("confidence", 0.0),
-            "state": global_coarse.get("state"),
-        },
         "node_count": int(field.shape[0] * field.shape[1]),
+        "motion_relevant_node_count": motion_relevant_node_count,
         "local_accepted_count": local_accepted,
         "regional_fallback_count": regional_fallback_count,
         "rejected_zero_confidence_count": rejected,
         "accepted_count": local_accepted + regional_fallback_count,
+        "relevant_local_accepted_count": relevant_local_accepted_count,
+        "relevant_regional_fallback_count": relevant_regional_fallback_count,
+        "relevant_rejected_zero_confidence_count": relevant_rejected_count,
+        "relevant_accepted_plus_fallback_percentage": 100.0 * (
+            relevant_local_accepted_count + relevant_regional_fallback_count
+        ) / max(1, motion_relevant_node_count),
+        "relevant_rejected_percentage": 100.0 * relevant_rejected_count / max(
+            1, motion_relevant_node_count
+        ),
         "confidence": {
             "min": float(np.min(nonzero)) if nonzero.size else 0.0,
             "mean": float(np.mean(nonzero)) if nonzero.size else 0.0,
@@ -605,6 +674,16 @@ def aggregate_quality(
     local_accepted = int(sum(item["local_accepted_count"] for item in interval_diagnostics))
     regional_fallback = int(sum(item["regional_fallback_count"] for item in interval_diagnostics))
     rejected = int(sum(item["rejected_zero_confidence_count"] for item in interval_diagnostics))
+    motion_relevant = int(sum(item["motion_relevant_node_count"] for item in interval_diagnostics))
+    relevant_local_accepted = int(
+        sum(item["relevant_local_accepted_count"] for item in interval_diagnostics)
+    )
+    relevant_regional_fallback = int(
+        sum(item["relevant_regional_fallback_count"] for item in interval_diagnostics)
+    )
+    relevant_rejected = int(
+        sum(item["relevant_rejected_zero_confidence_count"] for item in interval_diagnostics)
+    )
     accepted_values = np.concatenate(
         [field[field[:, :, 2] > 0.0] for field in fields]
     ) if fields else np.empty((0, 3), dtype=np.float64)
@@ -634,6 +713,14 @@ def aggregate_quality(
             "regional_fallback": 100.0 * regional_fallback / max(1, node_count),
             "rejected_zero_confidence": 100.0 * rejected / max(1, node_count),
         },
+        "motion_relevant_node_count": motion_relevant,
+        "relevant_local_accepted_count": relevant_local_accepted,
+        "relevant_regional_fallback_count": relevant_regional_fallback,
+        "relevant_rejected_zero_confidence_count": relevant_rejected,
+        "relevant_accepted_plus_fallback_percentage": 100.0 * (
+            relevant_local_accepted + relevant_regional_fallback
+        ) / max(1, motion_relevant),
+        "relevant_rejected_percentage": 100.0 * relevant_rejected / max(1, motion_relevant),
         "nonzero_confidence_count": int(confidences.size),
         "confidence": distribution(confidences, include_tail=True),
         "dx": distribution(dx_values),
@@ -807,17 +894,21 @@ def main() -> None:
         "intervals": interval_pairs(metadata["time"]["timestamps"]),
         "estimator": {
             "provenance": "radar-derived",
-            "algorithm": "deterministic hierarchical block matcher; shared sparse coarse/global and globally anchored regional priors followed by local node refinement",
+            "algorithm": "deterministic hierarchical block matcher; globally anchored regional coarse search/refinement followed by sparse local node refinement",
             "matching_signal": "log1p(rain_mmh); stored physical rain is unchanged",
             "coarse_displacement_step": COARSE_DISPLACEMENT_STEP,
-            "coarse_sample_stride": COARSE_SAMPLE_STRIDE,
             "regional_size_l13_samples": MOTION_REGION_SIZE,
             "regional_sample_stride": REGIONAL_SAMPLE_STRIDE,
             "local_footprint_radius_l13_samples": MOTION_FOOTPRINT_RADIUS,
             "local_search_radius_l13_samples": LOCAL_SEARCH_RADIUS,
             "match_rain_threshold_mmh": MATCH_RAIN_THRESHOLD_MMH,
+            "relevance_diagnostic": {
+                "minimum_informative_samples": MOTION_RELEVANCE_MIN_INFORMATIVE_SAMPLES,
+                "minimum_signal_log_sum": MOTION_RELEVANCE_MIN_SIGNAL_LOG_SUM,
+                "valid_coverage_fraction": 0.25,
+                "definition": "local node footprint has enough valid meaningful rain in frame A or B; independent of estimator acceptance",
+            },
             "minimum_informative_samples": {
-                "coarse": MIN_COARSE_INFORMATIVE,
                 "regional": MIN_REGIONAL_INFORMATIVE,
                 "local": MIN_LOCAL_INFORMATIVE,
             },

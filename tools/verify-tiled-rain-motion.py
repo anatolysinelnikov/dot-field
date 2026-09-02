@@ -31,11 +31,13 @@ def sha256_bytes(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_generated_assets(generated: Path) -> dict:
+def verify_generated_assets(
+    generated: Path,
+    expected_generation_id: str | None = None,
+    expected_source_filename: str | None = None,
+) -> dict:
     manifest_path = generated / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest["source_generation_id"] != MOTION.EXPECTED_GENERATION_ID:
-        raise AssertionError("generated motion has the wrong frozen generation")
     if manifest["interval_count"] != 18 or len(manifest["intervals"]) != 18:
         raise AssertionError("generated motion does not contain 18 adjacent intervals")
     if manifest["rain_tile_size"] != 128:
@@ -43,6 +45,22 @@ def verify_generated_assets(generated: Path) -> dict:
     if manifest["motion_grid"]["node_spacing_l13_samples"] != 64:
         raise AssertionError("generated motion has the wrong node spacing")
     source_manifest = (generated / manifest["source_tiled_rain_manifest"]).resolve()
+    source_manifest_data = json.loads(source_manifest.read_text(encoding="utf-8"))
+    if source_manifest_data["source_generation_id"] != manifest["source_generation_id"]:
+        raise AssertionError("motion and Phase 0A manifest generation IDs differ")
+    source_metadata = (
+        source_manifest.parent / source_manifest_data["source_metadata_asset"]
+    ).resolve()
+    source_metadata_data = json.loads(source_metadata.read_text(encoding="utf-8"))
+    if source_metadata_data["generation_id"] != manifest["source_generation_id"]:
+        raise AssertionError("motion, Phase 0A manifest, and normalized metadata differ")
+    if expected_generation_id is not None and manifest["source_generation_id"] != expected_generation_id:
+        raise AssertionError("generated motion does not match the expected generation")
+    if (
+        expected_source_filename is not None
+        and source_metadata_data.get("source", {}).get("filename") != expected_source_filename
+    ):
+        raise AssertionError("generated motion does not match the expected source filename")
     if sha256_bytes(source_manifest) != manifest["source_tiled_rain_manifest_sha256"]:
         raise AssertionError("motion is not bound to the exact current Phase 0A manifest")
 
@@ -83,6 +101,36 @@ def verify_generated_assets(generated: Path) -> dict:
     expected_node_count = int(bounds["node_width"]) * int(bounds["node_height"])
     if manifest["quality_diagnostics"]["unique_global_motion_nodes"] != expected_node_count:
         raise AssertionError("manifest global motion-node count is inconsistent")
+    quality = manifest["quality_diagnostics"]
+    for interval in quality["intervals"]:
+        relevant = int(interval["motion_relevant_node_count"])
+        relevant_classes = (
+            int(interval["relevant_local_accepted_count"])
+            + int(interval["relevant_regional_fallback_count"])
+            + int(interval["relevant_rejected_zero_confidence_count"])
+        )
+        if relevant_classes != relevant:
+            raise AssertionError(f"interval {interval['index']} relevance classes do not add up")
+        accepted_plus_fallback = 100.0 * (
+            int(interval["relevant_local_accepted_count"])
+            + int(interval["relevant_regional_fallback_count"])
+        ) / max(1, relevant)
+        rejected_percentage = 100.0 * int(
+            interval["relevant_rejected_zero_confidence_count"]
+        ) / max(1, relevant)
+        if abs(interval["relevant_accepted_plus_fallback_percentage"] - accepted_plus_fallback) > 1e-9:
+            raise AssertionError(f"interval {interval['index']} relevant acceptance percentage is inconsistent")
+        if abs(interval["relevant_rejected_percentage"] - rejected_percentage) > 1e-9:
+            raise AssertionError(f"interval {interval['index']} relevant rejection percentage is inconsistent")
+    aggregate = quality["aggregate"]
+    aggregate_relevant = int(aggregate["motion_relevant_node_count"])
+    aggregate_relevant_classes = (
+        int(aggregate["relevant_local_accepted_count"])
+        + int(aggregate["relevant_regional_fallback_count"])
+        + int(aggregate["relevant_rejected_zero_confidence_count"])
+    )
+    if aggregate_relevant_classes != aggregate_relevant:
+        raise AssertionError("aggregate relevance classes do not add up")
     if manifest["payload_totals"] != {"raw_f32_bytes": raw_total, "gzip_bytes": gzip_total}:
         raise AssertionError("manifest payload totals are inconsistent")
     for (x, y), values in tile_by_coordinate.items():
@@ -177,6 +225,8 @@ def main() -> None:
         default=None,
         help="also validate a generated MotionField directory",
     )
+    parser.add_argument("--expected-generation-id", default=None)
+    parser.add_argument("--expected-source-filename", default=None)
     args = parser.parse_args()
     source = make_pattern()
     translations = [
@@ -265,7 +315,11 @@ def main() -> None:
         "deterministic_rerun": True,
     }
     if args.generated is not None:
-        result["generated_assets"] = verify_generated_assets(args.generated.resolve())
+        result["generated_assets"] = verify_generated_assets(
+            args.generated.resolve(),
+            args.expected_generation_id,
+            args.expected_source_filename,
+        )
     print(json.dumps(result, indent=2))
 
 
