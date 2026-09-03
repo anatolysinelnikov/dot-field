@@ -1154,7 +1154,7 @@ export class TiledRainDotsLayer {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(false);
-    let rendered = 0;
+    const renderableTiles = [];
     for (const tileKey of this.viewportTileKeys) {
       const tile = this.store.tiles.get(tileKey);
       const blockA = this.store.blocks.get(`${tileKey}:${blockAIndex}`);
@@ -1162,10 +1162,15 @@ export class TiledRainDotsLayer {
       const motionTile = this.store.motionWarp ? this.store.motionTilesState?.get(tileKey) : null;
       if (!tile || blockA?.status !== 'ready' || blockB?.status !== 'ready'
         || (this.store.motionWarp && motionTile?.status !== 'ready')) continue;
-      this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 0);
-      this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 1);
-      rendered++;
+      renderableTiles.push({ tile, blockA, blockB });
     }
+    for (const { tile, blockA, blockB } of renderableTiles) {
+      this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 0);
+    }
+    for (const { tile, blockA, blockB } of renderableTiles) {
+      this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 1);
+    }
+    const rendered = renderableTiles.length;
     gl.depthMask(true);
     if (rendered && !this.firstVisibleReported) {
       this.firstVisibleReported = true;
