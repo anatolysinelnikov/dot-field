@@ -3,7 +3,7 @@
 
 The estimator consumes the exact physical Float32 L13 reconstruction used by
 ``generate-tiled-rain.py``.  Motion is estimated once on a globally anchored
-64-sample grid and is only packaged into 128-sample rain tiles after all
+32-sample grid and is only packaged into 128-sample rain tiles after all
 intervals have been estimated.
 """
 
@@ -28,7 +28,7 @@ VERSION = 1
 LOD_LEVEL = 13
 GRID_SIZE = 2**LOD_LEVEL
 RAIN_TILE_SIZE = 128
-MOTION_NODE_SPACING = 64
+MOTION_NODE_SPACING = 32
 MOTION_REGION_SIZE = 512
 MOTION_FOOTPRINT_RADIUS = 16
 MAX_COMPONENT_DISPLACEMENT = 12
@@ -947,18 +947,21 @@ def build_asset_payloads(
     descriptors: list[dict[str, Any]] = []
     raw_total = 0
     gzip_total = 0
+    if RAIN_TILE_SIZE % MOTION_NODE_SPACING != 0:
+        raise ValueError("rain tile size must be exactly divisible by MotionField node spacing")
+    nodes_per_tile = RAIN_TILE_SIZE // MOTION_NODE_SPACING + 1
     node_min_x = min_tile_x * RAIN_TILE_SIZE
     node_min_y = min_tile_y * RAIN_TILE_SIZE
     for tile_y in range(min_tile_y, max_tile_y + 1):
         for tile_x in range(min_tile_x, max_tile_x + 1):
             first_x = (tile_x * RAIN_TILE_SIZE - node_min_x) // MOTION_NODE_SPACING
             first_y = (tile_y * RAIN_TILE_SIZE - node_min_y) // MOTION_NODE_SPACING
-            last_x = first_x + RAIN_TILE_SIZE // MOTION_NODE_SPACING
-            last_y = first_y + RAIN_TILE_SIZE // MOTION_NODE_SPACING
             tile_fields = [
-                field[first_y:last_y + 1, first_x:last_x + 1, :]
+                field[first_y:first_y + nodes_per_tile, first_x:first_x + nodes_per_tile, :]
                 for field in fields
             ]
+            if any(tile_field.shape[1:3] != (nodes_per_tile, nodes_per_tile) for tile_field in tile_fields):
+                raise ValueError(f"MotionField tile {(tile_x, tile_y)} does not have the complete boundary-inclusive node footprint")
             payload = np.stack(tile_fields, axis=0).astype("<f4", copy=False).tobytes(order="C")
             tile_directory = tile_root / str(tile_x) / str(tile_y)
             tile_directory.mkdir(parents=True, exist_ok=True)
@@ -973,8 +976,8 @@ def build_asset_payloads(
                     "y": tile_y,
                     "node_x_start": first_x,
                     "node_y_start": first_y,
-                    "node_width": last_x - first_x + 1,
-                    "node_height": last_y - first_y + 1,
+                    "node_width": nodes_per_tile,
+                    "node_height": nodes_per_tile,
                     "asset": relative_asset,
                     "gzip_asset": f"{relative_asset}.gz",
                     "byte_length": len(payload),
@@ -1091,7 +1094,7 @@ def main() -> None:
             "node_y_start": int(node_y_values[0]),
             "node_width": int(node_x_values.size),
             "node_height": int(node_y_values.size),
-            "node_coordinates": "x=node_x_start + column*64; y=node_y_start + row*64",
+            "node_coordinates": f"x=node_x_start + column*{MOTION_NODE_SPACING}; y=node_y_start + row*{MOTION_NODE_SPACING}",
         },
         "rain_tile_size": RAIN_TILE_SIZE,
         "displacement": {

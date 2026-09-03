@@ -12,12 +12,17 @@ import numpy as np
 EPSILON = 1e-6
 
 
-def interpolate_motion(nodes: np.ndarray, coordinate: tuple[float, float]) -> tuple[np.ndarray, float]:
+def interpolate_motion(
+    nodes: np.ndarray,
+    coordinate: tuple[float, float],
+    node_spacing: int,
+) -> tuple[np.ndarray, float]:
     x, y = coordinate
-    lower_x = min(1, max(0, math.floor(x / 64.0)))
-    lower_y = min(1, max(0, math.floor(y / 64.0)))
-    fraction_x = x / 64.0 - lower_x
-    fraction_y = y / 64.0 - lower_y
+    nodes_per_tile = nodes.shape[1]
+    lower_x = min(nodes_per_tile - 2, max(0, math.floor(x / node_spacing)))
+    lower_y = min(nodes_per_tile - 2, max(0, math.floor(y / node_spacing)))
+    fraction_x = x / node_spacing - lower_x
+    fraction_y = y / node_spacing - lower_y
     flow = np.zeros(2, dtype=np.float64)
     confidence = 0.0
     for row in range(2):
@@ -96,16 +101,37 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> None:
-    nodes = np.zeros((3, 3, 3), dtype=np.float64)
+    node_spacing = 32
+    nodes = np.zeros((5, 5, 3), dtype=np.float64)
     nodes[:, :, :] = [4.0, -3.0, 1.0]
-    flow, confidence = interpolate_motion(nodes, (37.25, 89.5))
+    flow, confidence = interpolate_motion(nodes, (37.25, 89.5), node_spacing)
     require(np.allclose(flow, [4, -3]) and confidence == 1.0, "uniform confidence-weighted motion failed")
 
-    sparse = np.zeros((3, 3, 3), dtype=np.float64)
+    sparse = np.zeros((5, 5, 3), dtype=np.float64)
     sparse[0, 0] = [8.0, 2.0, 1.0]
     sparse[0, 1] = [0.0, 0.0, 0.0]
-    flow, confidence = interpolate_motion(sparse, (32.0, 0.0))
+    flow, confidence = interpolate_motion(sparse, (16.0, 0.0), node_spacing)
     require(np.allclose(flow, [8, 2]) and confidence == 0.5, "zero-confidence node pulled known motion")
+
+    # Every 32-sample subcell selects its own four surrounding nodes.  Keep
+    # the marker values distinct so a neighboring 5x5 footprint cannot pass.
+    for row in range(4):
+        for column in range(4):
+            coordinate = (column * node_spacing + node_spacing / 2, row * node_spacing + node_spacing / 2)
+            lower_x = column
+            lower_y = row
+            expected = np.asarray([
+                [lower_x, lower_y],
+                [lower_x + 1, lower_y],
+                [lower_x, lower_y + 1],
+                [lower_x + 1, lower_y + 1],
+            ], dtype=np.float64)
+            marked = np.zeros((5, 5, 3), dtype=np.float64)
+            for marker_x, marker_y in expected:
+                marked[int(marker_y), int(marker_x)] = [marker_x + marker_y * 10, 0, 1]
+            flow, confidence = interpolate_motion(marked, coordinate, node_spacing)
+            require(confidence == 1.0, f"subcell ({column},{row}) did not use four local nodes")
+            require(np.isclose(flow[0], np.mean(expected[:, 0] + expected[:, 1] * 10)), f"subcell ({column},{row}) selected the wrong nodes")
 
     source = np.zeros((40, 40), dtype=np.float64)
     y, x = np.mgrid[:40, :40]

@@ -1,4 +1,5 @@
 import {
+  deriveMotionGridContract,
   TILED_RAIN_GRID_SIZE,
   TILED_RAIN_TILE_SIZE,
   TILED_RAIN_WARP_HALO_SIZE,
@@ -19,6 +20,7 @@ const key = (x, y) => `${x}:${y}`;
 const tileFor = (value) => Math.floor(value / TILED_RAIN_TILE_SIZE);
 const localFor = (value) => value - tileFor(value) * TILED_RAIN_TILE_SIZE;
 const ownerFor = (gx, gy) => ({ tileX: tileFor(gx), tileY: tileFor(gy), tileKey: key(tileFor(gx), tileFor(gy)) });
+const motionGridFor = (store) => store.motionGrid || (store.motionManifest ? deriveMotionGridContract(store.motionManifest) : null);
 
 export function sourceFrameForProbe(frameCount, time) {
   const position = clamp(Number.isFinite(time) ? time : 0, 0, 1) * (frameCount - 1);
@@ -62,26 +64,37 @@ export function bilinearRain(store, gx, gy, frame, owner = ownerFor(gx, gy)) {
   return { available: total > 0, value: total > 0 ? value / total : 0, taps: diagnostics, reason: total > 0 ? null : 'no-valid-rain-taps' };
 }
 
-function motionNode(store, nodeX, nodeY, localNodeX, localNodeY, interval, owner) {
+function motionNode(store, localNodeX, localNodeY, interval, owner) {
   const tileKey = owner.tileKey;
   const state = store.motionTilesState?.get(tileKey);
+  const grid = motionGridFor(store);
+  const descriptor = state?.descriptor || store.motionTiles?.get(tileKey) || {
+    node_x_start: (owner.tileX * TILED_RAIN_TILE_SIZE - grid.nodeXStart) / grid.nodeSpacing,
+    node_y_start: (owner.tileY * TILED_RAIN_TILE_SIZE - grid.nodeYStart) / grid.nodeSpacing,
+    node_width: grid.nodesPerTile,
+    node_height: grid.nodesPerTile
+  };
+  const nodeX = grid.nodeXStart + (descriptor?.node_x_start + localNodeX) * grid.nodeSpacing;
+  const nodeY = grid.nodeYStart + (descriptor?.node_y_start + localNodeY) * grid.nodeSpacing;
   if (state?.status !== 'ready' || !state.payload) return { x: nodeX, y: nodeY, dx: null, dy: null, confidence: null, reason: 'motion-tile-not-resident' };
-  const descriptor = state.descriptor;
   if (localNodeX < 0 || localNodeX >= descriptor.node_width || localNodeY < 0 || localNodeY >= descriptor.node_height) return { x: nodeX, y: nodeY, dx: null, dy: null, confidence: null, reason: 'motion-node-outside-tile' };
   const values = new Float32Array(state.payload);
-  const offset = (interval * 9 + localNodeY * 3 + localNodeX) * 3;
+  const offset = (interval * grid.nodesPerTile * grid.nodesPerTile
+    + localNodeY * grid.nodesPerTile + localNodeX) * 3;
   return { x: nodeX, y: nodeY, dx: finite(values[offset]), dy: finite(values[offset + 1]), confidence: finite(values[offset + 2]) };
 }
 
 export function interpolateMotion(store, gx, gy, interval, owner = ownerFor(gx, gy)) {
+  const grid = motionGridFor(store);
+  if (!grid) return { dx: 0, dy: 0, confidence: 0, nodes: [] };
   const localX = gx - owner.tileX * TILED_RAIN_TILE_SIZE; const localY = gy - owner.tileY * TILED_RAIN_TILE_SIZE;
-  const lowerX = clamp(Math.floor(localX / 64), 0, 1); const lowerY = clamp(Math.floor(localY / 64), 0, 1);
-  const fx = localX / 64 - lowerX; const fy = localY / 64 - lowerY;
+  const lowerX = clamp(Math.floor(localX / grid.nodeSpacing), 0, grid.nodesPerTile - 2); const lowerY = clamp(Math.floor(localY / grid.nodeSpacing), 0, grid.nodesPerTile - 2);
+  const fx = localX / grid.nodeSpacing - lowerX; const fy = localY / grid.nodeSpacing - lowerY;
   const nodes = []; let flowX = 0; let flowY = 0; let confidence = 0;
   for (let row = 0; row < 2; row++) for (let column = 0; column < 2; column++) {
     const weight = (column ? fx : 1 - fx) * (row ? fy : 1 - fy);
     const localNodeX = lowerX + column; const localNodeY = lowerY + row;
-    const node = motionNode(store, (owner.tileX * 2 + localNodeX) * 64, (owner.tileY * 2 + localNodeY) * 64, localNodeX, localNodeY, interval, owner);
+    const node = motionNode(store, localNodeX, localNodeY, interval, owner);
     nodes.push({ ...node, weight });
     const c = node.confidence || 0;
     flowX += weight * c * (node.dx || 0); flowY += weight * c * (node.dy || 0); confidence += weight * c;
@@ -169,5 +182,6 @@ export function buildMotionProbe(store, sample, selectedFrame, currentFrame, { t
     const result = evaluate({ frameA: currentFrame.frameA, frameB: currentFrame.frameB, progress });
     sweep.push({ progress, directMmh: result.endpointRain.direct, dx: result.motion.dx, dy: result.motion.dy, confidence: result.motion.confidence, warpedAMmh: result.warpA.available ? result.warpA.value : null, warpedBMmh: result.warpB.available ? result.warpB.value : null, warpedMmh: result.warpedTemporal, finalMmh: result.final.mmh, fallback: result.usedDirectFallback, fallbackReason: result.fallbackReason, baseRadiusFraction: result.presentation.base.radiusFraction, baseVisible: result.presentation.base.visibility, strongRadiusFraction: result.presentation.strong.radiusFraction, strongVisible: result.presentation.strong.visibility });
   }
-  return finiteJson({ schema: MOTION_PROBE_SCHEMA, dataset: { sourceGenerationId: store.manifest.source_generation_id, rainManifest: store.dataset?.rainManifestUrl || (store.motionWarp ? null : store.dataset?.manifestUrl) || null, rainManifestSha256: store.dataset?.sourceTiledRainManifestSha256 || null, motionManifest: store.motionManifestUrl || null, motionManifestSha256: store.dataset?.sourceMotionManifestSha256 || null, warpManifest: store.motionWarp ? store.dataset?.manifestUrl || null : null, warpSourceRainManifest: store.motionWarp ? store.manifest.source_tiled_rain_manifest || null : null, warpSourceMotionManifest: store.motionWarp ? store.manifest.source_motion_manifest || null : null, warpSourceRainManifestSha256: store.motionWarp ? store.manifest.source_tiled_rain_manifest_sha256 || null : null, warpSourceMotionManifestSha256: store.motionWarp ? store.manifest.source_motion_manifest_sha256 || null : null }, sample: { globalL13: { x: sample.x, y: sample.y }, owningRainTile: { x: tileFor(sample.x), y: tileFor(sample.y) }, tileLocalCore: { x: localFor(sample.x), y: localFor(sample.y) }, longitude, latitude }, selectedAt: { ...stateObject(store, selectedFrame, timestamps), wallClock: selectedAtTimestamp, weatherTimestamp: selectedAtWeatherTimestamp, evaluation: evaluate(selectedFrame) }, current: { ...stateObject(store, currentFrame, timestamps), weatherTimestamp: currentTimestamp, evaluation: current }, motionTrace: motionTrace(store, sample.x, sample.y, timestamps), temporalSweep: sweep, neighborhood, diagnosticConstants: { motionGridNodeSpacingL13Samples: 64, motionDisplacementBoundL13Samples: 12, largeVectorChangeThresholdSamples: MOTION_PROBE_LARGE_VECTOR_CHANGE, sweepSteps: 21, nodataCode: 0, dryCode: 1, physicalMaxMmh: store.manifest.encoding.physical_max_mmh } });
+  const motionGrid = motionGridFor(store);
+  return finiteJson({ schema: MOTION_PROBE_SCHEMA, dataset: { sourceGenerationId: store.manifest.source_generation_id, rainManifest: store.dataset?.rainManifestUrl || (store.motionWarp ? null : store.dataset?.manifestUrl) || null, rainManifestSha256: store.dataset?.sourceTiledRainManifestSha256 || null, motionManifest: store.motionManifestUrl || null, motionManifestSha256: store.dataset?.sourceMotionManifestSha256 || null, warpManifest: store.motionWarp ? store.dataset?.manifestUrl || null : null, warpSourceRainManifest: store.motionWarp ? store.manifest.source_tiled_rain_manifest || null : null, warpSourceMotionManifest: store.motionWarp ? store.manifest.source_motion_manifest || null : null, warpSourceRainManifestSha256: store.motionWarp ? store.manifest.source_tiled_rain_manifest_sha256 || null : null, warpSourceMotionManifestSha256: store.motionWarp ? store.manifest.source_motion_manifest_sha256 || null : null }, sample: { globalL13: { x: sample.x, y: sample.y }, owningRainTile: { x: tileFor(sample.x), y: tileFor(sample.y) }, tileLocalCore: { x: localFor(sample.x), y: localFor(sample.y) }, longitude, latitude }, selectedAt: { ...stateObject(store, selectedFrame, timestamps), wallClock: selectedAtTimestamp, weatherTimestamp: selectedAtWeatherTimestamp, evaluation: evaluate(selectedFrame) }, current: { ...stateObject(store, currentFrame, timestamps), weatherTimestamp: currentTimestamp, evaluation: current }, motionTrace: motionTrace(store, sample.x, sample.y, timestamps), temporalSweep: sweep, neighborhood, diagnosticConstants: { motionGridNodeSpacingL13Samples: motionGrid?.nodeSpacing ?? null, motionNodesPerRainTile: motionGrid?.nodesPerTile ?? null, motionDisplacementBoundL13Samples: 12, largeVectorChangeThresholdSamples: MOTION_PROBE_LARGE_VECTOR_CHANGE, sweepSteps: 21, nodataCode: 0, dryCode: 1, physicalMaxMmh: store.manifest.encoding.physical_max_mmh } });
 }

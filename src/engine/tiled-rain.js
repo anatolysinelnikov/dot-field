@@ -131,10 +131,12 @@ function validateMotionManifest(manifest) {
     || !Array.isArray(manifest.intervals) || manifest.intervals.length !== manifest.interval_count) {
     clearError('MotionField temporal or tile dimensions are invalid.');
   }
-  if (manifest.motion_grid?.node_spacing_l13_samples !== 64
-    || manifest.motion_grid?.anchor !== 'global L13 integer coordinate 0; independent of crop, tile, or viewport') {
+  const motionGrid = deriveMotionGridContract(manifest);
+  if (manifest.motion_grid?.anchor !== 'global L13 integer coordinate 0; independent of crop, tile, or viewport') {
     clearError('MotionField global grid anchoring is invalid.');
   }
+  positiveInteger(manifest.motion_grid?.node_width, 'MotionField node_width');
+  positiveInteger(manifest.motion_grid?.node_height, 'MotionField node_height');
   if (manifest.displacement?.maximum_absolute_component !== 12
     || manifest.encoding?.dtype !== 'Float32'
     || manifest.encoding?.byte_order !== 'little-endian') {
@@ -142,10 +144,13 @@ function validateMotionManifest(manifest) {
   }
   const seen = new Set();
   for (const tile of manifest.tiles || []) {
-    if (!Number.isInteger(tile.x) || !Number.isInteger(tile.y) || tile.node_width !== 3 || tile.node_height !== 3
+    const expectedNodeXStart = (tile.x * TILED_RAIN_TILE_SIZE - manifest.motion_grid.node_x_start) / motionGrid.nodeSpacing;
+    const expectedNodeYStart = (tile.y * TILED_RAIN_TILE_SIZE - manifest.motion_grid.node_y_start) / motionGrid.nodeSpacing;
+    if (!Number.isInteger(tile.x) || !Number.isInteger(tile.y) || tile.node_width !== motionGrid.nodesPerTile || tile.node_height !== motionGrid.nodesPerTile
       || !Number.isInteger(tile.node_x_start) || !Number.isInteger(tile.node_y_start)
+      || tile.node_x_start !== expectedNodeXStart || tile.node_y_start !== expectedNodeYStart
       || typeof tile.asset !== 'string' || typeof tile.gzip_asset !== 'string'
-      || tile.byte_length !== manifest.interval_count * 3 * 3 * 3 * Float32Array.BYTES_PER_ELEMENT) {
+      || tile.byte_length !== manifest.interval_count * motionGrid.nodesPerTile * motionGrid.nodesPerTile * 3 * Float32Array.BYTES_PER_ELEMENT) {
       clearError('MotionField tile descriptor is invalid.');
     }
     const key = `${tile.x}:${tile.y}`;
@@ -153,6 +158,22 @@ function validateMotionManifest(manifest) {
     seen.add(key);
   }
   return manifest;
+}
+
+export function deriveMotionGridContract(manifest) {
+  const grid = manifest?.motion_grid;
+  const nodeSpacing = grid?.node_spacing_l13_samples;
+  if (!Number.isInteger(nodeSpacing) || nodeSpacing <= 0
+    || TILED_RAIN_TILE_SIZE % nodeSpacing !== 0
+    || !Number.isInteger(grid?.node_x_start) || !Number.isInteger(grid?.node_y_start)) {
+    clearError('MotionField node spacing or global node origin is invalid.');
+  }
+  return Object.freeze({
+    nodeSpacing,
+    nodesPerTile: TILED_RAIN_TILE_SIZE / nodeSpacing + 1,
+    nodeXStart: grid.node_x_start,
+    nodeYStart: grid.node_y_start
+  });
 }
 
 function validateWarpManifest(manifest) {
@@ -273,6 +294,7 @@ export class TiledRainTileStore {
     this.motionWarp = Boolean(dataset.isMotionWarp);
     this.motionWarpDebugMode = this.motionWarp && dataset.motionWarpDebugMode === 'full' ? 'full' : null;
     this.motionManifest = dataset.motionManifest || null;
+    this.motionGrid = this.motionManifest ? deriveMotionGridContract(this.motionManifest) : null;
     this.motionManifestUrl = dataset.motionManifestUrl || null;
     this.motionTiles = dataset.motionTiles || new Map();
     this.onTiming = typeof onTiming === 'function' ? onTiming : () => {};
@@ -623,7 +645,10 @@ export class TiledRainTileStore {
       if (state.status !== 'ready') continue;
       residentMotionTileCount++;
       motionBytes += state.payload?.byteLength || 0;
-      motionGpuBytes += state.gpuTexture ? 3 * (this.motionManifest.interval_count * 3) * 4 * 4 : 0;
+      motionGpuBytes += state.gpuTexture
+        ? this.motionGrid.nodesPerTile * (this.motionManifest.interval_count * this.motionGrid.nodesPerTile)
+          * 4 * Float32Array.BYTES_PER_ELEMENT
+        : 0;
     }
     this.diagnosticsState.residentMotionTileCount = residentMotionTileCount;
     this.diagnosticsState.logicalMotionResidentBytes = motionBytes;
@@ -665,7 +690,7 @@ export class TiledRainTileStore {
     if (state.gpuTexture) return state.gpuTexture;
     const started = now();
     const source = new Float32Array(state.payload);
-    const nodeCount = 3 * 3;
+    const nodeCount = this.motionGrid.nodesPerTile * this.motionGrid.nodesPerTile;
     const rgba = new Float32Array(this.motionManifest.interval_count * nodeCount * 4);
     for (let index = 0; index < this.motionManifest.interval_count * nodeCount; index++) {
       rgba[index * 4] = source[index * 3];
@@ -680,7 +705,8 @@ export class TiledRainTileStore {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage2D(
-      gl.TEXTURE_2D, 0, gl.RGBA32F, 3, this.motionManifest.interval_count * 3,
+      gl.TEXTURE_2D, 0, gl.RGBA32F, this.motionGrid.nodesPerTile,
+      this.motionManifest.interval_count * this.motionGrid.nodesPerTile,
       0, gl.RGBA, gl.FLOAT, rgba
     );
     state.gpuTexture = texture;
@@ -722,8 +748,10 @@ export class TiledRainTileStore {
       const values = new Float32Array(state.payload);
       for (let row = 0; row < descriptor.node_height; row++) {
         for (let column = 0; column < descriptor.node_width; column++) {
-          const nodeX = (descriptor.node_x_start + column) * 64;
-          const nodeY = (descriptor.node_y_start + row) * 64;
+          const nodeX = this.motionGrid.nodeXStart
+            + (descriptor.node_x_start + column) * this.motionGrid.nodeSpacing;
+          const nodeY = this.motionGrid.nodeYStart
+            + (descriptor.node_y_start + row) * this.motionGrid.nodeSpacing;
           const key = `${nodeX}:${nodeY}`;
           if (nodes.has(key)) continue;
           const offset = (interval * descriptor.node_width * descriptor.node_height
@@ -804,7 +832,8 @@ function compileShader(gl, type, source) {
 function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode) {
   const motionUniforms = motionWarp ? [
     'uniform sampler2D u_motion;',
-    'uniform int u_frameA; uniform int u_frameB; uniform int u_motionInterval; uniform int u_motionWarpActive; uniform int u_rainHalo;'
+    'uniform int u_frameA; uniform int u_frameB; uniform int u_motionInterval; uniform int u_motionWarpActive; uniform int u_rainHalo;',
+    'uniform int u_motionNodeSpacing; uniform int u_motionNodesPerTile;'
   ] : [];
   const motionFunctions = motionWarp ? [
     'vec2 rainTap(uint code) { return vec2(decodeRain(code), code == 0u ? 0.0 : 1.0); }',
@@ -824,12 +853,12 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode) {
     '  return totalWeight > 0.0 ? vec2(value / totalWeight, 1.0) : vec2(0.0);',
     '}',
     'vec3 interpolateMotion(vec2 coreCoordinate) {',
-    '  vec2 nodeCoordinate = coreCoordinate / 64.0; ivec2 lower = ivec2(floor(nodeCoordinate));',
-    '  lower = clamp(lower, ivec2(0), ivec2(1)); vec2 fraction = nodeCoordinate - vec2(lower);',
+    '  vec2 nodeCoordinate = coreCoordinate / float(u_motionNodeSpacing); ivec2 lower = ivec2(floor(nodeCoordinate));',
+    '  lower = clamp(lower, ivec2(0), ivec2(u_motionNodesPerTile - 2)); vec2 fraction = nodeCoordinate - vec2(lower);',
     '  vec2 flow = vec2(0.0); float confidence = 0.0;',
     '  for (int row = 0; row < 2; row++) for (int column = 0; column < 2; column++) {',
     '    float weight = (column == 0 ? 1.0 - fraction.x : fraction.x) * (row == 0 ? 1.0 - fraction.y : fraction.y);',
-    '    vec4 node = texelFetch(u_motion, ivec2(lower.x + column, u_motionInterval * 3 + lower.y + row), 0);',
+    '    vec4 node = texelFetch(u_motion, ivec2(lower.x + column, u_motionInterval * u_motionNodesPerTile + lower.y + row), 0);',
     '    flow += weight * node.z * node.xy; confidence += weight * node.z;',
     '  }',
     '  return confidence > 0.000001 ? vec3(flow / confidence, confidence) : vec3(0.0);',
@@ -918,7 +947,9 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode) {
     frameB: gl.getUniformLocation(program, 'u_frameB'),
     motionInterval: gl.getUniformLocation(program, 'u_motionInterval'),
     motionWarpActive: gl.getUniformLocation(program, 'u_motionWarpActive'),
-    rainHalo: gl.getUniformLocation(program, 'u_rainHalo')
+    rainHalo: gl.getUniformLocation(program, 'u_rainHalo'),
+    motionNodeSpacing: gl.getUniformLocation(program, 'u_motionNodeSpacing'),
+    motionNodesPerTile: gl.getUniformLocation(program, 'u_motionNodesPerTile')
   });
   return { program, locations };
 }
@@ -1138,6 +1169,8 @@ export class TiledRainDotsLayer {
       const motionState = this.store.motionTilesState.get(`${tile.x}:${tile.y}`);
       gl.uniform1i(locations.motion, 2);
       gl.uniform1i(locations.motionInterval, Math.min(this.committedFrame.frame0, this.store.motionManifest.interval_count - 1));
+      gl.uniform1i(locations.motionNodeSpacing, this.store.motionGrid.nodeSpacing);
+      gl.uniform1i(locations.motionNodesPerTile, this.store.motionGrid.nodesPerTile);
       gl.activeTexture(gl.TEXTURE2);
       gl.bindTexture(gl.TEXTURE_2D, motionState.gpuTexture || this.store.uploadMotionTile(gl, motionState));
     }

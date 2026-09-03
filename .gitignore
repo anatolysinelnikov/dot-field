@@ -2,6 +2,6 @@
 /data/nc/
 /data/availability/
 /data/generated/
-**pycache**/
+__pycache__/
 *.py[cod]
 /update.command

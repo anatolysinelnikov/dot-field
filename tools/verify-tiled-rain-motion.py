@@ -42,8 +42,13 @@ def verify_generated_assets(
         raise AssertionError("generated motion does not contain 18 adjacent intervals")
     if manifest["rain_tile_size"] != 128:
         raise AssertionError("generated motion has the wrong rain tile size")
-    if manifest["motion_grid"]["node_spacing_l13_samples"] != 64:
+    motion_grid = manifest["motion_grid"]
+    node_spacing = int(motion_grid["node_spacing_l13_samples"])
+    if node_spacing != 32:
         raise AssertionError("generated motion has the wrong node spacing")
+    if 128 % node_spacing != 0:
+        raise AssertionError("MotionField node spacing does not divide the rain tile size")
+    nodes_per_tile = 128 // node_spacing + 1
     source_manifest = (generated / manifest["source_tiled_rain_manifest"]).resolve()
     source_manifest_data = json.loads(source_manifest.read_text(encoding="utf-8"))
     if source_manifest_data["source_generation_id"] != manifest["source_generation_id"]:
@@ -72,14 +77,14 @@ def verify_generated_assets(
         y = int(descriptor["y"])
         node_width = int(descriptor["node_width"])
         node_height = int(descriptor["node_height"])
-        if (node_width, node_height) != (3, 3):
-            raise AssertionError(f"tile {x},{y} does not have the expected 3x3 node footprint")
+        if (node_width, node_height) != (nodes_per_tile, nodes_per_tile):
+            raise AssertionError(f"tile {x},{y} does not have the expected {nodes_per_tile}x{nodes_per_tile} node footprint")
         asset = generated / descriptor["asset"]
         payload = np.fromfile(asset, dtype="<f4")
-        expected_values = 18 * node_width * node_height * 3
+        expected_values = manifest["interval_count"] * nodes_per_tile * nodes_per_tile * 3
         if payload.size != expected_values or descriptor["byte_length"] != payload.nbytes:
             raise AssertionError(f"tile {x},{y} has an invalid payload length")
-        values = payload.reshape(18, node_height, node_width, 3)
+        values = payload.reshape(manifest["interval_count"], node_height, node_width, 3)
         if np.any(~np.isfinite(values)):
             raise AssertionError(f"tile {x},{y} contains non-finite motion")
         if np.any(np.abs(values[:, :, :, :2]) > MOTION.MAX_COMPONENT_DISPLACEMENT):
@@ -99,6 +104,19 @@ def verify_generated_assets(
 
     bounds = manifest["motion_grid"]
     expected_node_count = int(bounds["node_width"]) * int(bounds["node_height"])
+    source_bounds = source_manifest_data["tile_index_bounds"]
+    min_tile_x, min_tile_y = int(source_bounds["min_x"]), int(source_bounds["min_y"])
+    expected_width = (int(source_bounds["max_x"]) - min_tile_x) * 128 // node_spacing + 1
+    expected_height = (int(source_bounds["max_y"]) - min_tile_y) * 128 // node_spacing + 1
+    if (bounds["node_x_start"], bounds["node_y_start"]) != (min_tile_x * 128, min_tile_y * 128):
+        raise AssertionError("MotionField global node origin is not anchored to the Phase 0A tile envelope")
+    if (int(bounds["node_width"]), int(bounds["node_height"])) != (expected_width, expected_height):
+        raise AssertionError("MotionField global node dimensions are inconsistent with tile bounds")
+    for descriptor in manifest["tiles"]:
+        expected_x_start = (int(descriptor["x"]) - min_tile_x) * 128 // node_spacing
+        expected_y_start = (int(descriptor["y"]) - min_tile_y) * 128 // node_spacing
+        if (int(descriptor["node_x_start"]), int(descriptor["node_y_start"])) != (expected_x_start, expected_y_start):
+            raise AssertionError(f"tile {descriptor['x']},{descriptor['y']} is not globally anchored")
     if manifest["quality_diagnostics"]["unique_global_motion_nodes"] != expected_node_count:
         raise AssertionError("manifest global motion-node count is inconsistent")
     quality = manifest["quality_diagnostics"]
@@ -360,9 +378,9 @@ def main() -> None:
 
     # Package two adjacent rain tiles from one global field and compare the
     # shared x=128 node bytes.  This catches per-tile re-estimation/rounding.
-    packaged_field = np.zeros((1, 5, 3), dtype="<f4")
+    packaged_field = np.zeros((1, 9, 3), dtype="<f4")
     packaged_field[0, :, :] = np.asarray(
-        [[0.0, 1.0, 0.1], [2.0, 3.0, 0.2], [4.0, 5.0, 0.3], [6.0, 7.0, 0.4], [8.0, 9.0, 0.5]],
+        [[0.0, 1.0, 0.1], [2.0, 3.0, 0.2], [4.0, 5.0, 0.3], [6.0, 7.0, 0.4], [8.0, 9.0, 0.5], [10.0, 11.0, 0.6], [12.0, 13.0, 0.7], [14.0, 15.0, 0.8], [16.0, 17.0, 0.9]],
         dtype="<f4",
     )
     package_manifest = {"tile_index_bounds": {"min_x": 0, "max_x": 1, "min_y": 0, "max_y": 0}}
@@ -372,8 +390,10 @@ def main() -> None:
         )
         first = (Path(temporary) / assets[0]["asset"]).read_bytes()
         second = (Path(temporary) / assets[1]["asset"]).read_bytes()
-        # One node is 12 bytes and is the third node in tile 0 / first node in tile 1.
-        if first[2 * 12:3 * 12] != second[:12]:
+        if assets[0]["node_width"] != 5 or assets[0]["node_height"] != 5:
+            raise AssertionError("synthetic package did not use the 5x5 node footprint")
+        # One node is 12 bytes and is the fifth node in tile 0 / first node in tile 1.
+        if first[4 * 12:5 * 12] != second[:12]:
             raise AssertionError("shared boundary motion node bytes differ")
 
     # Deterministic estimator output is byte-identical across independent runs.

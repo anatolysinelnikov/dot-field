@@ -118,7 +118,7 @@ the provider longitude/latitude grid, UInt16 transport values, presentation
 colors, or browser tiles. The resulting `MotionField` is an independent
 renderer-facing contract containing one forward `dx`, `dy`, and `confidence`
 triple for every adjacent source-frame interval. It uses the same globally
-anchored L13 integer sample identity as rain, with one node every 64 L13
+anchored L13 integer sample identity as rain, with one node every 32 L13
 samples. Displacements cover the complete source interval, are measured in L13
 samples, and use increasing global x/east and increasing global y/south signs.
 Each component is bounded to ±12 samples. Float32 little-endian assets store
@@ -147,7 +147,8 @@ Motion assets live under the ignored
 UInt16 rain assets. The motion manifest binds its content to both the normalized
 `source_generation_id` and the SHA-256 of the exact Phase 0A rain manifest used
 as the RainField basis. Each 128 × 128 rain tile packages the shared global
-motion nodes at its 3 × 3 boundary-inclusive footprint; duplicated boundary
+motion nodes at its 5 × 5 boundary-inclusive footprint for the 32-sample node
+spacing; duplicated boundary
 nodes are byte-identical because estimation occurs before tile packaging.
 Deterministic gzip sidecars and reproducible per-interval quality diagnostics
 are emitted alongside the raw Float32 payloads. Benchmark timings are kept out
@@ -172,7 +173,7 @@ path is a separate browser data path:
 Phase 0A encoded rain cores + 13-sample read-only halos
         + separate Phase 0B1 MotionField tiles
         ↓ bounded shared weather fetch queue
-154 × 154 R16UI rain textures + 3 × 54 RGBA32F motion textures
+154 × 154 R16UI rain textures + manifest-derived RGBA32F motion textures
         ↓ confidence-aware manual GPU sampling
 double backward warp -> existing Dots presentation mapping
 ```
@@ -200,7 +201,10 @@ allocation measured at the actual 154 × 154 size, plus motion request,
 fetch, upload, and residency counters.
 
 Motion is interpolated at each stable integer L13 rain sample from its four
-surrounding 64-sample globally anchored nodes. The interpolation is
+surrounding globally anchored nodes. The validated MotionField manifest
+supplies the node spacing and boundary-inclusive per-tile dimension (5 × 5
+for the current 32-sample experiment); the GPU texture width and interval row
+stride derive from that dimension. The interpolation is
 confidence-weighted: zero-confidence nodes contribute neither a vector nor a
 pull toward zero, while their weights reduce the interpolated confidence. The
 shader performs deterministic manual UInt16 bilinear sampling for fractional
@@ -214,7 +218,10 @@ support cannot gain precipitation through the warp. Explicit endpoint paths
 make `s=0` exactly A(p), `s=1` exactly B(p), and equal endpoint frames remain
 direct samples. Dot centers never move.
 
-There is no browser motion estimation, optical-flow dependency, temporal prior,
+The renderer consumes the MotionField layout from the validated manifest and
+does not depend on the estimator's implementation or a hardcoded sampling
+density. The 13-sample rain halo remains unchanged because the displacement
+bound remains 12 samples. There is no browser motion estimation, optical-flow dependency, temporal prior,
 or materialized subframe. The browser remains a loader, bounded-residency, and
 GPU-presentation client. The Phase 0B1 radar-derived estimator is replaceable;
 Phase 0B2 depends only on the independent MotionField `dx`, `dy`, and
