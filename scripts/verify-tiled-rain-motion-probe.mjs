@@ -21,9 +21,9 @@ const tile = { x: 0, y: 0, blocks: [{ index: 0, frame_start: 0, frame_count: 3 }
 const motionManifest = { interval_count: 2 };
 const motionValues = new Float32Array(2 * 9 * 3);
 for (let interval = 0; interval < 2; interval++) for (let node = 0; node < 9; node++) {
-  motionValues[(interval * 9 + node) * 3] = interval + 1;
-  motionValues[(interval * 9 + node) * 3 + 1] = -2;
-  motionValues[(interval * 9 + node) * 3 + 2] = 1;
+  motionValues[(interval * 9 + node) * 3] = interval + node + 1;
+  motionValues[(interval * 9 + node) * 3 + 1] = -2 - node;
+  motionValues[(interval * 9 + node) * 3 + 2] = 0.2 + node * 0.05;
 }
 const store = {
   motionWarp: true,
@@ -34,20 +34,30 @@ const store = {
   motionManifestUrl: '/motion/manifest.json',
   tiles: new Map([['0:0', tile]]),
   blocks: new Map([['0:0:0', { status: 'ready', descriptor: tile.blocks[0], payload: makeRain(2) }]]),
-  motionTilesState: new Map([['0:0', { status: 'ready', descriptor: { node_x_start: 0, node_y_start: 0, node_width: 3, node_height: 3 }, payload: motionValues.buffer }]])
+  motionTilesState: new Map([['0:0', { status: 'ready', descriptor: { node_x_start: 17, node_y_start: 11, node_width: 3, node_height: 3 }, payload: motionValues.buffer }]])
 };
 
 assert.deepEqual(sampleIdentityFromMercator(0.5, 0.5), { x: 4096, y: 4096 });
 assert.equal(evaluateTiledRainSample(store, 64, 64, { frameA: 0, frameB: 1, progress: 0 }).endpointRain.codeA, 2);
 const interpolated = interpolateMotion(store, 64, 64, 0);
-assert.equal(interpolated.dx, 1);
-assert.equal(interpolated.dy, -2);
-assert.equal(interpolated.confidence, 1);
+assert.equal(interpolated.nodes.every((node) => node.dx !== null && node.dy !== null && node.confidence !== null), true);
+const firstHalf = interpolateMotion(store, 32, 32, 0);
+const secondHalf = interpolateMotion(store, 96, 96, 0);
+assert.deepEqual(firstHalf.nodes.map((node) => [node.x, node.y]), [[0, 0], [64, 0], [0, 64], [64, 64]]);
+assert.deepEqual(secondHalf.nodes.map((node) => [node.x, node.y]), [[64, 64], [128, 64], [64, 128], [128, 128]]);
+const weightedExpected = (indices) => {
+  let weightedDx = 0; let weightedDy = 0; let confidence = 0;
+  for (const index of indices) { const c = 0.2 + index * 0.05; weightedDx += (index + 1) * c; weightedDy += (-2 - index) * c; confidence += c; }
+  return { dx: weightedDx / confidence, dy: weightedDy / confidence, confidence: confidence / indices.length };
+};
+assert.ok(firstHalf.nodes.every((node, index) => Math.abs(node.confidence - [0.2, 0.25, 0.35, 0.4][index]) < 1e-6));
+assert.ok(Math.abs(firstHalf.dx - weightedExpected([0, 1, 3, 4]).dx) < 1e-6);
+assert.ok(Math.abs(secondHalf.dx - weightedExpected([4, 5, 7, 8]).dx) < 1e-6);
 const rightBoundary = interpolateMotion(store, 100, 64, 0);
 const bottomBoundary = interpolateMotion(store, 64, 100, 0);
-assert.equal(rightBoundary.confidence, 1);
-assert.equal(bottomBoundary.confidence, 1);
-const withAdjacentMotion = { ...store, motionTilesState: new Map([...store.motionTilesState, ['1:0', { status: 'ready', descriptor: { node_x_start: 2, node_y_start: 0, node_width: 3, node_height: 3 }, payload: motionValues.buffer }], ['0:1', { status: 'ready', descriptor: { node_x_start: 0, node_y_start: 2, node_width: 3, node_height: 3 }, payload: motionValues.buffer }]]) };
+assert.ok(rightBoundary.confidence > 0);
+assert.ok(bottomBoundary.confidence > 0);
+const withAdjacentMotion = { ...store, motionTilesState: new Map([...store.motionTilesState, ['1:0', { status: 'ready', descriptor: { node_x_start: 19, node_y_start: 11, node_width: 3, node_height: 3 }, payload: motionValues.buffer }], ['0:1', { status: 'ready', descriptor: { node_x_start: 17, node_y_start: 13, node_width: 3, node_height: 3 }, payload: motionValues.buffer }]]) };
 assert.deepEqual(interpolateMotion(withAdjacentMotion, 100, 64, 0), rightBoundary);
 assert.deepEqual(interpolateMotion(withAdjacentMotion, 64, 100, 0), bottomBoundary);
 const owner = { tileX: 0, tileY: 0, tileKey: '0:0' };
@@ -79,6 +89,7 @@ assert.equal(probe.temporalSweep.length, 21);
 assert.equal(probe.temporalSweep[0].progress, 0);
 assert.equal(probe.temporalSweep.at(-1).progress, 1);
 assert.equal(probe.motionTrace.length, 2);
+assert.equal(probe.motionTrace.every((interval) => interval.dx !== null && interval.dy !== null && interval.confidence !== null), true);
 assert.equal(probe.neighborhood.length, 9);
 assert.equal(probe.selectedAt.wallClock, 'wall-clock');
 assert.equal(probe.selectedAt.weatherTimestamp, 'a');

@@ -62,12 +62,11 @@ export function bilinearRain(store, gx, gy, frame, owner = ownerFor(gx, gy)) {
   return { available: total > 0, value: total > 0 ? value / total : 0, taps: diagnostics, reason: total > 0 ? null : 'no-valid-rain-taps' };
 }
 
-function motionNode(store, nodeX, nodeY, interval, owner) {
+function motionNode(store, nodeX, nodeY, localNodeX, localNodeY, interval, owner) {
   const tileKey = owner.tileKey;
   const state = store.motionTilesState?.get(tileKey);
   if (state?.status !== 'ready' || !state.payload) return { x: nodeX, y: nodeY, dx: null, dy: null, confidence: null, reason: 'motion-tile-not-resident' };
-  const descriptor = state.descriptor; const localNodeX = Math.round(nodeX / 64) - descriptor.node_x_start;
-  const localNodeY = Math.round(nodeY / 64) - descriptor.node_y_start;
+  const descriptor = state.descriptor;
   if (localNodeX < 0 || localNodeX >= descriptor.node_width || localNodeY < 0 || localNodeY >= descriptor.node_height) return { x: nodeX, y: nodeY, dx: null, dy: null, confidence: null, reason: 'motion-node-outside-tile' };
   const values = new Float32Array(state.payload);
   const offset = (interval * 9 + localNodeY * 3 + localNodeX) * 3;
@@ -81,7 +80,8 @@ export function interpolateMotion(store, gx, gy, interval, owner = ownerFor(gx, 
   const nodes = []; let flowX = 0; let flowY = 0; let confidence = 0;
   for (let row = 0; row < 2; row++) for (let column = 0; column < 2; column++) {
     const weight = (column ? fx : 1 - fx) * (row ? fy : 1 - fy);
-    const node = motionNode(store, (owner.tileX * 2 + lowerX + column) * 64, (owner.tileY * 2 + lowerY + row) * 64, interval, owner);
+    const localNodeX = lowerX + column; const localNodeY = lowerY + row;
+    const node = motionNode(store, (owner.tileX * 2 + localNodeX) * 64, (owner.tileY * 2 + localNodeY) * 64, localNodeX, localNodeY, interval, owner);
     nodes.push({ ...node, weight });
     const c = node.confidence || 0;
     flowX += weight * c * (node.dx || 0); flowY += weight * c * (node.dy || 0); confidence += weight * c;
