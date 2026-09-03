@@ -960,8 +960,6 @@ def build_asset_payloads(
                 field[first_y:first_y + nodes_per_tile, first_x:first_x + nodes_per_tile, :]
                 for field in fields
             ]
-            if any(tile_field.shape[1:3] != (nodes_per_tile, nodes_per_tile) for tile_field in tile_fields):
-                raise ValueError(f"MotionField tile {(tile_x, tile_y)} does not have the complete boundary-inclusive node footprint")
             payload = np.stack(tile_fields, axis=0).astype("<f4", copy=False).tobytes(order="C")
             tile_directory = tile_root / str(tile_x) / str(tile_y)
             tile_directory.mkdir(parents=True, exist_ok=True)

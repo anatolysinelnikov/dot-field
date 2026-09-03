@@ -106,8 +106,8 @@ def verify_generated_assets(
     expected_node_count = int(bounds["node_width"]) * int(bounds["node_height"])
     source_bounds = source_manifest_data["tile_index_bounds"]
     min_tile_x, min_tile_y = int(source_bounds["min_x"]), int(source_bounds["min_y"])
-    expected_width = (int(source_bounds["max_x"]) - min_tile_x) * 128 // node_spacing + 1
-    expected_height = (int(source_bounds["max_y"]) - min_tile_y) * 128 // node_spacing + 1
+    expected_width = (int(source_bounds["max_x"]) - min_tile_x + 1) * 128 // node_spacing + 1
+    expected_height = (int(source_bounds["max_y"]) - min_tile_y + 1) * 128 // node_spacing + 1
     if (bounds["node_x_start"], bounds["node_y_start"]) != (min_tile_x * 128, min_tile_y * 128):
         raise AssertionError("MotionField global node origin is not anchored to the Phase 0A tile envelope")
     if (int(bounds["node_width"]), int(bounds["node_height"])) != (expected_width, expected_height):
@@ -378,11 +378,11 @@ def main() -> None:
 
     # Package two adjacent rain tiles from one global field and compare the
     # shared x=128 node bytes.  This catches per-tile re-estimation/rounding.
-    packaged_field = np.zeros((1, 9, 3), dtype="<f4")
-    packaged_field[0, :, :] = np.asarray(
+    packaged_field = np.zeros((5, 9, 3), dtype="<f4")
+    packaged_field[:, :, :] = np.asarray(
         [[0.0, 1.0, 0.1], [2.0, 3.0, 0.2], [4.0, 5.0, 0.3], [6.0, 7.0, 0.4], [8.0, 9.0, 0.5], [10.0, 11.0, 0.6], [12.0, 13.0, 0.7], [14.0, 15.0, 0.8], [16.0, 17.0, 0.9]],
         dtype="<f4",
-    )
+    )[None, :, :]
     package_manifest = {"tile_index_bounds": {"min_x": 0, "max_x": 1, "min_y": 0, "max_y": 0}}
     with tempfile.TemporaryDirectory(prefix="dot-field-motion-verify-") as temporary:
         assets, _, _ = MOTION.build_asset_payloads(
