@@ -257,6 +257,7 @@ async function loadAndValidateWarpDataset(manifestUrl, timing) {
     isMotionWarp: true,
     motionManifest,
     motionManifestUrl,
+    rainManifestUrl,
     motionTiles,
     sourceMetadata,
     sourceTiledRainManifestSha256: rainManifestSha256,
@@ -923,12 +924,13 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode) {
 }
 
 export class TiledRainDotsLayer {
-  constructor(store, { onTiming = null } = {}) {
+  constructor(store, { onTiming = null, onCommit = null } = {}) {
     this.id = 'tiled-rain-dots';
     this.type = 'custom';
     this.renderingMode = '3d';
     this.store = store;
     this.onTiming = typeof onTiming === 'function' ? onTiming : () => {};
+    this.onCommit = typeof onCommit === 'function' ? onCommit : () => {};
     this.programs = new Map();
     this.active = true;
     this.viewportTileKeys = [];
@@ -1081,6 +1083,7 @@ export class TiledRainDotsLayer {
     this.store.updateDesiredBlockKeys(targetKeys, this.store.motionWarp ? new Set(this.viewportTileKeys) : new Set());
     this.store.evict(targetKeys);
     this.map?.triggerRepaint();
+    this.onCommit(this.committedFrame);
   }
 
   setActive(active) {

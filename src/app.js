@@ -21,12 +21,19 @@ import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
 import { beginTiledRainLoad, TiledRainDotsLayer } from './engine/tiled-rain.js';
+import {
+  buildMotionProbe,
+  sampleIdentityFromMercator,
+  sourceFrameForProbe
+} from './engine/tiled-rain-motion-probe.js';
 
 const applicationStartupAt = performance.now();
 const queryParameters = new URLSearchParams(window.location.search);
 const tiledRainEnabled = queryParameters.get('tiledRain') === '1';
+const diagnosticsEnabled = queryParameters.get('diagnostics') === '1';
 const motionWarpEnabled = tiledRainEnabled && queryParameters.get('motionWarp') === '1';
 const motionWarpDebugMode = motionWarpEnabled && queryParameters.get('motionWarpDebug') === 'full' ? 'full' : null;
+const motionProbeEnabled = tiledRainEnabled && diagnosticsEnabled && queryParameters.get('motionProbe') === '1';
 const startupTimings = Object.create(null);
 function markStartup(name) {
   if (startupTimings[name] !== undefined) return startupTimings[name];
@@ -208,8 +215,6 @@ let weatherSequencePromise = null;
 let basemapFallbackTimer = null;
 let weatherRequestGeneration = 0;
 
-const diagnosticsEnabled = new URLSearchParams(window.location.search).get('diagnostics') === '1';
-
 if (tiledRainEnabled) {
   renderModeSelector.dataset.mode = 'dots';
   for (const button of renderModeButtons) {
@@ -356,6 +361,116 @@ const runtimeDiagnostics = createRuntimeDiagnostics({
 });
 const diagnosticsHud = runtimeDiagnostics?.attachHud(lodDiagnostics) || null;
 if (runtimeDiagnostics) window.__dotFieldDiagnostics = runtimeDiagnostics;
+
+let motionProbe = null;
+let motionProbeJson = '';
+let motionProbeMarker = null;
+let motionProbeStatus = null;
+let motionProbeCopyButton = null;
+let motionProbeClearButton = null;
+let motionProbeDetails = null;
+
+function probeFrame() {
+  const frame = weatherLayer?.committedFrame || weatherLayer?.requestedFrame;
+  return frame ? { frameA: frame.frame0, frameB: frame.frame1, progress: frame.progress } : sourceFrameForProbe(sourceFrameCount, state.time / LOOP_SECONDS);
+}
+
+function probeTimestamp(frame) {
+  const a = providerTimestampMilliseconds(sourceTimestamps[frame.frameA]);
+  const b = providerTimestampMilliseconds(sourceTimestamps[frame.frameB]);
+  return a === null ? null : b === null ? a : a + (b - a) * frame.progress;
+}
+
+function refreshMotionProbe() {
+  if (!motionProbe || !weatherLayer?.store || !weatherLayer.committedFrame) return;
+  const currentFrame = probeFrame();
+  const probe = buildMotionProbe(weatherLayer.store, motionProbe.sample, motionProbe.selectedFrame, currentFrame, {
+    timestamps: sourceTimestamps,
+    longitude: motionProbe.longitude,
+    latitude: motionProbe.latitude,
+    selectedAtTimestamp: motionProbe.selectedAtTimestamp,
+    currentTimestamp: probeTimestamp(currentFrame)
+  });
+  motionProbeJson = JSON.stringify(probe);
+  if (motionProbe.details && !motionProbe.details.hidden) motionProbe.details.value = motionProbeJson;
+}
+
+function updateMotionProbeMarker() {
+  if (!motionProbeMarker || !motionProbe) return;
+  const point = map.project([motionProbe.longitude, motionProbe.latitude]);
+  motionProbeMarker.style.transform = `translate(${point.x}px, ${point.y}px)`;
+}
+
+function clearMotionProbe() {
+  motionProbe = null;
+  motionProbeJson = '';
+  motionProbeMarker?.remove();
+  motionProbeMarker = null;
+  if (motionProbeStatus) motionProbeStatus.textContent = 'No probe selected';
+  motionProbeCopyButton && (motionProbeCopyButton.disabled = true);
+  motionProbeClearButton && (motionProbeClearButton.disabled = true);
+}
+
+async function copyMotionProbe() {
+  if (!motionProbe) return;
+  refreshMotionProbe();
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      const clipboardResult = await Promise.race([
+        navigator.clipboard.writeText(motionProbeJson),
+        new Promise((resolve) => window.setTimeout(() => resolve(false), 1000))
+      ]);
+      copied = clipboardResult !== false;
+    }
+  } catch { /* Use the synchronous LAN/iPhone fallback below. */ }
+  if (!copied) {
+    const textarea = motionProbe.details || document.createElement('textarea');
+    textarea.value = motionProbeJson;
+    if (!motionProbe.details) { textarea.className = 'motion-probe-details'; lodDiagnostics.append(textarea); motionProbe.details = textarea; }
+    textarea.hidden = false; textarea.focus(); textarea.select();
+    try { copied = document.execCommand('copy'); } catch { copied = false; }
+  }
+  motionProbeStatus.textContent = copied ? `Copied probe (${motionProbeJson.length} bytes)` : 'Manual copy required';
+}
+
+function selectMotionProbe(event) {
+  if (!motionProbeEnabled || !weatherLayer?.store || state.renderMode !== 'dots') return;
+  const [x, y] = lngLatToMercator(event.lngLat.lng, event.lngLat.lat);
+  const sample = sampleIdentityFromMercator(x, y);
+  const frame = weatherLayer.committedFrame;
+  if (!frame) return;
+  motionProbe = { sample, longitude: (sample.x / 2 ** 13) * 360 - 180, latitude: Math.atan(Math.sinh(Math.PI * (1 - 2 * sample.y / 2 ** 13))) * 180 / Math.PI, selectedFrame: { frameA: frame.frame0, frameB: frame.frame1, progress: frame.progress }, selectedAtTimestamp: new Date().toISOString(), details: null };
+  motionProbe.details = motionProbeDetails;
+  motionProbeMarker?.remove();
+  motionProbeMarker = document.createElement('span');
+  motionProbeMarker.className = 'motion-probe-marker';
+  motionProbeMarker.setAttribute('aria-label', `Pinned L13 sample ${sample.x}, ${sample.y}`);
+  mapContainer.append(motionProbeMarker);
+  refreshMotionProbe();
+  updateMotionProbeMarker();
+  motionProbeCopyButton && (motionProbeCopyButton.disabled = false);
+  motionProbeClearButton && (motionProbeClearButton.disabled = false);
+  if (motionProbeStatus) motionProbeStatus.textContent = `Pinned L13 ${sample.x},${sample.y}`;
+}
+
+if (motionProbeEnabled) {
+  const controls = document.createElement('div');
+  controls.className = 'motion-probe-controls';
+  const copy = document.createElement('button'); copy.type = 'button'; copy.textContent = 'Copy probe'; copy.disabled = true;
+  const clear = document.createElement('button'); clear.type = 'button'; clear.textContent = 'Clear probe'; clear.disabled = true;
+  const status = document.createElement('span'); status.className = 'diagnostics-status'; status.textContent = 'No probe selected';
+  const details = document.createElement('textarea'); details.className = 'motion-probe-details'; details.hidden = true; details.readOnly = true; details.setAttribute('aria-label', 'Motion probe JSON');
+  controls.append(copy, clear, status, details); lodDiagnostics.append(controls);
+  motionProbeStatus = status;
+  motionProbeCopyButton = copy;
+  motionProbeClearButton = clear;
+  motionProbeDetails = details;
+  copy.addEventListener('click', () => void copyMotionProbe());
+  clear.addEventListener('click', clearMotionProbe);
+  motionProbe = null;
+  Object.defineProperty(window, '__dotFieldMotionProbe', { value: () => motionProbeJson, configurable: true });
+}
 
 for (const control of [...renderModeButtons, hazards, timeSlider, playPause]) control.disabled = true;
 
@@ -807,7 +922,7 @@ function tryInitializeWeatherLayer() {
 function tryInitializeTiledRainLayer() {
   const initialBounds = visibleMercatorBounds();
   if (!initialBounds) throw new Error('Initial camera bounds are unavailable for tiled rain initialization.');
-  weatherLayer = new TiledRainDotsLayer(activeWeatherField.tileStore, { onTiming: markStartup });
+  weatherLayer = new TiledRainDotsLayer(activeWeatherField.tileStore, { onTiming: markStartup, onCommit: refreshMotionProbe });
   geographicLayers = [weatherLayer];
   const styleLayers = map.getStyle().layers || [];
   const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');
@@ -925,6 +1040,7 @@ function renderCurrentWeather() {
   if (!state.mapReady || state.renderMode === 'raw') return;
   if (state.renderMode === 'dots') weatherLayer.updateWeather(state.time / LOOP_SECONDS);
   else if (state.renderMode === 'squares') squaresLayer.updateWeather(state.time / LOOP_SECONDS);
+  refreshMotionProbe();
   map.triggerRepaint();
 }
 
@@ -941,6 +1057,7 @@ function requestWeatherTime(normalizedTime, { playback = false } = {}) {
   if (!activeWeatherField) return;
   if (tiledRainEnabled) {
     weatherLayer?.setTime(normalizedTime);
+    refreshMotionProbe();
     return;
   }
   const requirements = rendererTemporalRequirements(normalizedTime);
@@ -1279,7 +1396,10 @@ map.on('sourcedata', (event) => {
   if (event.isSourceLoaded) markStartup('initial-map-source-ready');
 });
 map.on('mousemove', updateRawHover);
-map.on('click', selectRawCell);
+map.on('click', (event) => {
+  if (motionProbeEnabled) selectMotionProbe(event);
+  else selectRawCell(event);
+});
 map.on('dragstart', () => {
   runtimeDiagnostics?.recordEvent('drag-start');
   rawMapDragging = true;
@@ -1306,6 +1426,7 @@ function updateResetViewControl() {
 map.on('move', updateLogicalSamplingZoom);
 map.on('move', updateRawTooltipPosition);
 map.on('move', updateResetViewControl);
+map.on('move', updateMotionProbeMarker);
 map.on('rotate', updateResetViewControl);
 map.on('pitch', updateResetViewControl);
 map.on('movestart', () => {
