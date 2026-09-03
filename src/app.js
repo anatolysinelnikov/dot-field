@@ -389,6 +389,7 @@ function refreshMotionProbe() {
     longitude: motionProbe.longitude,
     latitude: motionProbe.latitude,
     selectedAtTimestamp: motionProbe.selectedAtTimestamp,
+    selectedAtWeatherTimestamp: probeTimestamp(motionProbe.selectedFrame),
     currentTimestamp: probeTimestamp(currentFrame)
   });
   motionProbeJson = JSON.stringify(probe);

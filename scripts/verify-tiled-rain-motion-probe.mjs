@@ -51,9 +51,18 @@ const withAdjacentMotion = { ...store, motionTilesState: new Map([...store.motio
 assert.deepEqual(interpolateMotion(withAdjacentMotion, 100, 64, 0), rightBoundary);
 assert.deepEqual(interpolateMotion(withAdjacentMotion, 64, 100, 0), bottomBoundary);
 const owner = { tileX: 0, tileY: 0, tileKey: '0:0' };
-const crossingWarp = bilinearRain(store, 127.75, 64, 0, owner);
+const haloPayload = new Uint16Array(makeRain(2));
+for (const row of [77, 78]) {
+  haloPayload[row * size + 140] = 2;
+  haloPayload[row * size + 141] = 100;
+}
+const haloStore = { ...store, blocks: new Map([['0:0:0', { status: 'ready', descriptor: tile.blocks[0], payload: haloPayload.buffer }]]) };
+const crossingWarp = bilinearRain(haloStore, 127.75, 64, 0, owner);
 assert.equal(crossingWarp.available, true);
 assert.equal(crossingWarp.taps.every((tap) => tap.x <= 128), true);
+assert.deepEqual(crossingWarp.taps.map((tap) => tap.code), [2, 100, 2, 100]);
+const expectedCrossing = 0.25 * ((2 - 1) / 65534 * 100) + 0.75 * ((100 - 1) / 65534 * 100);
+assert.ok(Math.abs(crossingWarp.value - expectedCrossing) < 1e-12);
 assert.equal(bilinearRain(store, -14, 64, 0, owner).available, false);
 const adjacentRain = { x: 1, y: 0, blocks: [{ index: 0, frame_start: 0, frame_count: 3 }] };
 const boundaryStore = { ...withAdjacentMotion, blocks: new Map([...store.blocks, ['1:0:0', { status: 'ready', descriptor: adjacentRain.blocks[0], payload: makeRain(3) }]]), tiles: new Map([...store.tiles, ['1:0', adjacentRain]]) };
