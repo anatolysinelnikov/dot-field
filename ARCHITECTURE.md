@@ -41,9 +41,12 @@ of the current active application/runtime path.
 ## Experimental tiled-rain Phase 0A — non-default
 
 The opt-in `?tiledRain=1` path is a separate first vertical slice for proving
-the tiled browser data path. It is intentionally limited to Dots, one fixed
-Mercator reference level (L13), and direct shader interpolation between source
-frames. Its data flow is:
+the tiled browser data path. It exposes Dots and Squares through one shared
+tiled runtime/residency owner. Both are presentation modes over the same
+physical payloads; switching modes does not duplicate residency or payload
+ownership. The experiment remains limited to one fixed Mercator reference
+level (L13) and direct shader interpolation between source frames. Its data
+flow is:
 
 ```text
 normalized source generation (`data/generated/current/metadata.json`)
@@ -53,7 +56,7 @@ UInt8 storm/hail severity blocks
         ↓ optional gzip sidecars through the local development server
 bounded browser tile/block residency
         ↓ WebGL2 R16UI rain and R8 hazard texture arrays
-procedural instanced Dots
+one procedural tiled renderer → Dots or Squares presentation
 ```
 
 `tools/generate-tiled-rain.py` reads only the normalized metadata and the exact
@@ -80,11 +83,11 @@ ordering. Their optional payloads are UInt8 severity samples decoded as
 maps codes 10/11/12 and 13/14/15 to the existing real-weather storm/hail
 severity anchors, then reconstructs those continuous channels at the exact
 global L13 samples. It never interpolates raw categorical codes and never
-derives hazard severity from rain. The direct GPU Dots shader linearly
+derives hazard severity from rain. The shared direct GPU tiled renderer linearly
 interpolates the reconstructed A/B severity samples and applies the existing
-radius, color, glyph, and hail-over-storm presentation rules. Hazard visibility
-is presentation-only. The motion-warp path keeps hazards unavailable so it
-cannot display unwarped hazards over warped rain.
+Dots or Squares presentation rules, including hail-over-storm priority.
+Hazard visibility is presentation-only. The motion-warp path keeps hazards
+unavailable so it cannot display unwarped hazards over warped rain.
 
 The tiled loader selects the conservative visible Mercator tile envelope with a
 small deterministic L13 overscan, requests only the current frame pair's
@@ -104,7 +107,8 @@ toward the 320-block cache target. It uploads block payloads directly as
 WebGL2 integer texture arrays without expanding the tile to Float32 arrays or
 constructing per-sample JavaScript positions. Camera movement changes tile
 orchestration; it does not reconstruct a weather field or rebuild a geographic
-pyramid.
+pyramid. RAW and multi-LOD tiled rendering remain deferred; the fixed L13
+contract and direct A/B interpolation are temporary Phase 0A constraints.
 
 Phase 0A intentionally does not solve temporal motion: the shader uses direct
 `mix(rainA, rainB, progress)` interpolation. The tiled runtime constructs a

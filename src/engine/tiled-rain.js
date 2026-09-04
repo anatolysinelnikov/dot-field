@@ -4,8 +4,10 @@ import {
   DOTS_STRONG_RAIN_FULL_MMH,
   DOTS_STRONG_RAIN_ONSET_MMH,
   DOTS_STRONG_RAIN_SHAPE_ANCHORS,
-  RAIN_VISIBILITY_SHADER
+  RAIN_VISIBILITY_SHADER,
+  STRONG_RAIN_SHADER
 } from './precipitation-mapping.js';
+import { RAIN_VISIBILITY_FLOOR_MMH } from './config.js';
 import { sha256ArrayBuffer } from './sha256.js';
 
 export const TILED_RAIN_SCHEMA = 'dot-field-tiled-rain-v0';
@@ -20,6 +22,7 @@ const READY_CACHE_BLOCK_LIMIT = 320;
 export const TILED_RAIN_MAX_CONCURRENT_FETCHES = 8;
 const VIEWPORT_OVERSCAN_SAMPLES = 64;
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
+const CELL_VERTICES = new Float32Array([-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5]);
 function circularPoints(count) {
   return Array.from({ length: count }, (_, index) => {
     const angle = -Math.PI / 2 + index * Math.PI * 2 / count;
@@ -981,7 +984,8 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
-function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAvailable) {
+function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAvailable, presentation = 'dots') {
+  const squares = presentation === 'squares';
   const motionUniforms = motionWarp ? [
     'uniform sampler2D u_motion;',
     'uniform int u_frameA; uniform int u_frameB; uniform int u_motionInterval; uniform int u_motionWarpActive; uniform int u_rainHalo;',
@@ -1044,6 +1048,21 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAva
     '  float rainA = decodeRain(codeA); float rainB = decodeRain(codeB);',
     '  float rain = validA && validB ? mix(rainA, rainB, u_temporalProgress) : validA ? rainA : validB ? rainB : 0.0;'
   ];
+  const squaresRainSource = motionWarp ? [
+    ...motionRainSource,
+    `  float rainCoverageA = validA && rainA >= ${RAIN_VISIBILITY_FLOOR_MMH.toFixed(6)} ? 1.0 : 0.0;`,
+    `  float rainCoverageB = validB && rainB >= ${RAIN_VISIBILITY_FLOOR_MMH.toFixed(6)} ? 1.0 : 0.0;`,
+    '  float rainCoverage = mix(rainCoverageA, rainCoverageB, u_temporalProgress);'
+  ] : [
+    '  uint codeA = texelFetch(u_rainA, ivec3(localX, localY, u_frameLayerA), 0).r;',
+    '  uint codeB = texelFetch(u_rainB, ivec3(localX, localY, u_frameLayerB), 0).r;',
+    '  bool validA = codeA != 0u; bool validB = codeB != 0u;',
+    '  float rainA = decodeRain(codeA); float rainB = decodeRain(codeB);',
+    '  float rain = validA && validB ? mix(rainA, rainB, u_temporalProgress) : validA ? rainA : validB ? rainB : 0.0;',
+    `  float rainCoverageA = validA && rainA >= ${RAIN_VISIBILITY_FLOOR_MMH.toFixed(6)} ? 1.0 : 0.0;`,
+    `  float rainCoverageB = validB && rainB >= ${RAIN_VISIBILITY_FLOOR_MMH.toFixed(6)} ? 1.0 : 0.0;`,
+    '  float rainCoverage = mix(rainCoverageA, rainCoverageB, u_temporalProgress);'
+  ];
   const hazardUniforms = hazardsAvailable ? [
     'uniform sampler2DArray u_stormA; uniform sampler2DArray u_stormB; uniform sampler2DArray u_hailA; uniform sampler2DArray u_hailB;',
     'uniform int u_stormAvailableA; uniform int u_stormAvailableB; uniform int u_hailAvailableA; uniform int u_hailAvailableB;'
@@ -1054,16 +1073,51 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAva
     'float stormRadius(float severity) { return severity <= 0.033750 ? 0.0 : mix(0.30, 0.72, pow(smoothstep(0.033750, 0.930000, severity), 0.47)); }',
     'float hailRadius(float severity) { return severity <= 0.049500 ? 0.0 : mix(0.34, 1.00, pow(smoothstep(0.049500, 0.930000, severity), 0.47)); }'
   ] : [];
-  const hazardSource = hazardsAvailable ? [
-    '  float storm = temporalHazard(sampleHazard(u_stormA, u_frameLayerA, ivec2(localX, localY), u_stormAvailableA), sampleHazard(u_stormB, u_frameLayerB, ivec2(localX, localY), u_stormAvailableB));',
-    '  float hail = temporalHazard(sampleHazard(u_hailA, u_frameLayerA, ivec2(localX, localY), u_hailAvailableA), sampleHazard(u_hailB, u_frameLayerB, ivec2(localX, localY), u_hailAvailableB));'
-  ] : [];
+  const hazardSource = squares
+    ? (hazardsAvailable ? [
+      '  float stormA = sampleHazard(u_stormA, u_frameLayerA, ivec2(localX, localY), u_stormAvailableA);',
+      '  float stormB = sampleHazard(u_stormB, u_frameLayerB, ivec2(localX, localY), u_stormAvailableB);',
+      '  float hailA = sampleHazard(u_hailA, u_frameLayerA, ivec2(localX, localY), u_hailAvailableA);',
+      '  float hailB = sampleHazard(u_hailB, u_frameLayerB, ivec2(localX, localY), u_hailAvailableB);',
+      '  float storm = temporalHazard(stormA, stormB);',
+      '  float hail = temporalHazard(hailA, hailB);',
+      '  float stormCoverage = mix(stormA > 0.0 ? 1.0 : 0.0, stormB > 0.0 ? 1.0 : 0.0, u_temporalProgress);',
+      '  float hailCoverage = mix(hailA > 0.0 ? 1.0 : 0.0, hailB > 0.0 ? 1.0 : 0.0, u_temporalProgress);'
+    ] : [
+      '  float storm = 0.0; float hail = 0.0; float stormCoverage = 0.0; float hailCoverage = 0.0;'
+    ])
+    : (hazardsAvailable ? [
+      '  float storm = temporalHazard(sampleHazard(u_stormA, u_frameLayerA, ivec2(localX, localY), u_stormAvailableA), sampleHazard(u_stormB, u_frameLayerB, ivec2(localX, localY), u_stormAvailableB));',
+      '  float hail = temporalHazard(sampleHazard(u_hailA, u_frameLayerA, ivec2(localX, localY), u_hailAvailableA), sampleHazard(u_hailB, u_frameLayerB, ivec2(localX, localY), u_hailAvailableB));'
+    ] : []);
   const hazardRadiusSource = hazardsAvailable ? [
     '  float radiusFraction = u_mode == 0 ? rainVisibility(rain) * ' + DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6) + ' : u_mode == 1 ? strongRain(rain) : u_mode == 2 ? (hailRadius(hail) > 0.0 ? 0.0 : stormRadius(storm)) : hailRadius(hail);'
   ] : [
     `  float radiusFraction = u_mode == 0 ? rainVisibility(rain) * ${DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6)} : strongRain(rain);`
   ];
-  const vertexSource = [
+  const vertexSource = squares ? [
+    '#version 300 es', shaderData.vertexShaderPrelude,
+    'precision highp float; precision highp int; precision highp sampler2DArray; precision highp usampler2DArray;',
+    'in vec2 a_vertex;',
+    'uniform vec2 u_tileOrigin; uniform usampler2DArray u_rainA; uniform usampler2DArray u_rainB;',
+    'uniform int u_frameLayerA; uniform int u_frameLayerB; uniform float u_temporalProgress;',
+    ...motionUniforms,
+    ...hazardUniforms,
+    'out vec2 v_rain; out vec4 v_hazards;',
+    'uniform float u_physicalMaxMmh;',
+    'float decodeRain(uint code) { if (code == 0u || code == 1u) return 0.0; return (float(code) - 1.0) / 65534.0 * u_physicalMaxMmh; }',
+    ...motionFunctions,
+    ...hazardFunctions,
+    'void main() {',
+    `  int localIndex = gl_InstanceID; int localX = localIndex % ${TILED_RAIN_TILE_SIZE}; int localY = localIndex / ${TILED_RAIN_TILE_SIZE};`,
+    ...squaresRainSource,
+    ...hazardSource,
+    '  v_rain = vec2(rain, rainCoverage);',
+    '  v_hazards = vec4(stormCoverage, storm, hailCoverage, hail);',
+    `  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / ${TILED_RAIN_GRID_SIZE}.0;`,
+    `  gl_Position = projectTile(center + a_vertex / ${TILED_RAIN_GRID_SIZE}.0);`,
+    '}'
+  ].join('\n') : [
     '#version 300 es', shaderData.vertexShaderPrelude,
     'precision highp float; precision highp int; precision highp sampler2DArray; precision highp usampler2DArray;',
     'in vec2 a_vertex;',
@@ -1088,7 +1142,31 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAva
     '  gl_Position = projectTile(center + a_vertex * v_radius);',
     '}'
   ].join('\n');
-  const fragmentSource = [
+  const fragmentSource = squares ? [
+    '#version 300 es', 'precision highp float; precision highp int;',
+    'in vec2 v_rain; in vec4 v_hazards; uniform float u_opacity; uniform float u_hazardsVisible; out vec4 fragColor;',
+    RAIN_VISIBILITY_SHADER,
+    STRONG_RAIN_SHADER,
+hazardsAvailable ? `float strength(float value, float threshold) { return smoothstep(threshold * 0.45, 0.93, value); }
+void main() {
+  float rain = rainVisibility(v_rain.x) * clamp(v_rain.y, 0.0, 1.0);
+  float strong = strongRain(v_rain.x);
+  vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), strong);
+  float alpha = rain;
+  float stormStrength = strength(v_hazards.y, 0.075);
+  float storm = u_hazardsVisible * clamp(v_hazards.x, 0.0, 1.0) * stormStrength;
+  if (storm > 0.0) { color = mix(color, vec3(1.0, 0.0, 1.0), mix(0.45, 1.0, pow(stormStrength, 0.47))); alpha = max(alpha, storm); }
+  float hailStrength = strength(v_hazards.w, 0.11);
+  float hail = u_hazardsVisible * clamp(v_hazards.z, 0.0, 1.0) * hailStrength;
+  if (hail > 0.0) { color = mix(color, vec3(1.0, 0.831, 0.0), mix(0.5, 1.0, pow(hailStrength, 0.47))); alpha = max(alpha, hail); }
+  fragColor = vec4(color, alpha * u_opacity);
+}` : `void main() {
+  float rain = rainVisibility(v_rain.x) * clamp(v_rain.y, 0.0, 1.0);
+  float strong = strongRain(v_rain.x);
+  vec3 color = mix(vec3(0.0, 0.565, 1.0), vec3(0.0, 0.0, 1.0), strong);
+  fragColor = vec4(color, rain * u_opacity);
+}`
+  ].join('\n') : [
     '#version 300 es', 'precision highp float; precision highp int;', 'in vec2 v_local; in float v_radius; uniform vec4 u_color; uniform int u_mode; out vec4 fragColor;',
     'void main() { if (v_radius <= 0.0) discard; if (u_mode >= 2) { fragColor = u_color; return; } float distanceToCenter = length(v_local); float edge = fwidth(distanceToCenter); float alpha = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distanceToCenter); fragColor = vec4(u_color.rgb, u_color.a * alpha); }'
   ].join('\n');
@@ -1108,7 +1186,8 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAva
       physicalMaxMmh: gl.getUniformLocation(program, 'u_physicalMaxMmh'),
       mode: gl.getUniformLocation(program, 'u_mode'),
       color: gl.getUniformLocation(program, 'u_color'),
-      mode: gl.getUniformLocation(program, 'u_mode'),
+      opacity: gl.getUniformLocation(program, 'u_opacity'),
+      hazardsVisible: gl.getUniformLocation(program, 'u_hazardsVisible'),
       matrix: gl.getUniformLocation(program, 'u_matrix'),
       fallbackMatrix: gl.getUniformLocation(program, 'u_projection_fallback_matrix'),
       projectionMatrix: gl.getUniformLocation(program, 'u_projection_matrix'),
@@ -1139,9 +1218,9 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAva
   return { program, locations };
 }
 
-export class TiledRainDotsLayer {
+export class TiledRainLayer {
   constructor(store, { onTiming = null, onCommit = null } = {}) {
-    this.id = 'tiled-rain-dots';
+    this.id = 'tiled-rain';
     this.type = 'custom';
     this.renderingMode = '3d';
     this.store = store;
@@ -1150,6 +1229,7 @@ export class TiledRainDotsLayer {
     this.onCommit = typeof onCommit === 'function' ? onCommit : () => {};
     this.programs = new Map();
     this.active = true;
+    this.presentationMode = 'dots';
     this.hazardsVisible = true;
     this.viewportTileKeys = [];
     this.requestedFrame = sourceFrameForTime(store.manifest.frame_count, 0);
@@ -1169,6 +1249,9 @@ export class TiledRainDotsLayer {
     this.vertexBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, QUAD, gl.STATIC_DRAW);
+    this.squareVertexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.squareVertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, CELL_VERTICES, gl.STATIC_DRAW);
     this.hazardVertexBuffers = { storm: gl.createBuffer(), hail: gl.createBuffer() };
     for (const [type, vertices] of Object.entries({ storm: STORM, hail: HAIL })) {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.hazardVertexBuffers[type]);
@@ -1182,6 +1265,7 @@ export class TiledRainDotsLayer {
     for (const state of this.store.blocks.values()) for (const texture of Object.values(state.hazardTextures || {})) if (texture) gl.deleteTexture(texture);
     for (const state of this.store.motionTilesState?.values() || []) if (state.gpuTexture) gl.deleteTexture(state.gpuTexture);
     if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);
+    if (this.squareVertexBuffer) gl.deleteBuffer(this.squareVertexBuffer);
     for (const buffer of Object.values(this.hazardVertexBuffers || {})) if (buffer) gl.deleteBuffer(buffer);
   }
 
@@ -1316,6 +1400,13 @@ export class TiledRainDotsLayer {
     this.map?.triggerRepaint();
   }
 
+  setPresentationMode(mode) {
+    if (mode !== 'dots' && mode !== 'squares') return;
+    if (this.presentationMode === mode) return;
+    this.presentationMode = mode;
+    this.map?.triggerRepaint();
+  }
+
   setHazardsVisible(visible) {
     this.hazardsVisible = Boolean(visible);
     if (this.active) this.map?.triggerRepaint();
@@ -1326,10 +1417,10 @@ export class TiledRainDotsLayer {
   }
 
   programsFor(gl, shaderData) {
-    const cacheKey = `${this.store.motionWarp ? 'motion' : 'direct'}:${shaderData.variantName}`;
+    const cacheKey = `${this.store.motionWarp ? 'motion' : 'direct'}:${shaderData.variantName}:${this.presentationMode}`;
     let program = this.programs.get(cacheKey);
     if (!program) {
-      program = makeProgram(gl, shaderData, this.store.motionWarp, this.store.motionWarpDebugMode, this.hazardsAvailable);
+      program = makeProgram(gl, shaderData, this.store.motionWarp, this.store.motionWarpDebugMode, this.hazardsAvailable, this.presentationMode);
       this.programs.set(cacheKey, program);
     }
     return program;
@@ -1356,14 +1447,19 @@ export class TiledRainDotsLayer {
     }
     gl.uniform1f(locations.temporalProgress, this.committedFrame.progress);
     gl.uniform1f(locations.physicalMaxMmh, this.store.manifest.encoding.physical_max_mmh);
-    gl.uniform1i(locations.mode, mode);
-    const type = ['rain', 'strong', 'storm', 'hail'][mode];
-    gl.uniform4fv(locations.color, COLORS[type]);
+    if (this.presentationMode === 'squares') {
+      gl.uniform1f(locations.opacity, 1);
+      gl.uniform1f(locations.hazardsVisible, this.hazardsVisible ? 1 : 0);
+    } else {
+      gl.uniform1i(locations.mode, mode);
+      const type = ['rain', 'strong', 'storm', 'hail'][mode];
+      gl.uniform4fv(locations.color, COLORS[type]);
+    }
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockA.gpuTexture || this.store.uploadBlock(gl, blockA));
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockB.gpuTexture || this.store.uploadBlock(gl, blockB));
-    if (this.hazardsAvailable && mode >= 2) {
+    if (this.hazardsAvailable && (this.presentationMode === 'squares' || mode >= 2)) {
       const hazardBindings = [
         ['stormA', blockA, 'storm', 2, 'stormAvailableA'],
         ['stormB', blockB, 'storm', 3, 'stormAvailableB'],
@@ -1387,8 +1483,12 @@ export class TiledRainDotsLayer {
       gl.activeTexture(gl.TEXTURE2);
       gl.bindTexture(gl.TEXTURE_2D, motionState.gpuTexture || this.store.uploadMotionTile(gl, motionState));
     }
-    const vertexBuffer = mode === 2 ? this.hazardVertexBuffers.storm : mode === 3 ? this.hazardVertexBuffers.hail : this.vertexBuffer;
-    const vertexCount = mode === 2 ? STORM.length / 2 : mode === 3 ? HAIL.length / 2 : 6;
+    const vertexBuffer = this.presentationMode === 'squares'
+      ? this.squareVertexBuffer
+      : mode === 2 ? this.hazardVertexBuffers.storm : mode === 3 ? this.hazardVertexBuffers.hail : this.vertexBuffer;
+    const vertexCount = this.presentationMode === 'squares'
+      ? CELL_VERTICES.length / 2
+      : mode === 2 ? STORM.length / 2 : mode === 3 ? HAIL.length / 2 : 6;
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
     gl.enableVertexAttribArray(locations.vertex);
     gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
@@ -1415,13 +1515,22 @@ export class TiledRainDotsLayer {
         || (this.store.motionWarp && motionTile?.status !== 'ready')) continue;
       renderableTiles.push({ tile, blockA, blockB });
     }
-    for (const { tile, blockA, blockB } of renderableTiles) {
-      this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 0);
+    if (this.presentationMode === 'squares') {
+      gl.enable(gl.POLYGON_OFFSET_FILL);
+      gl.polygonOffset(-1, -1);
+      for (const { tile, blockA, blockB } of renderableTiles) {
+        this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 0);
+      }
+      gl.disable(gl.POLYGON_OFFSET_FILL);
+    } else {
+      for (const { tile, blockA, blockB } of renderableTiles) {
+        this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 0);
+      }
+      for (const { tile, blockA, blockB } of renderableTiles) {
+        this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 1);
+      }
     }
-    for (const { tile, blockA, blockB } of renderableTiles) {
-      this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 1);
-    }
-    if (this.hazardsAvailable && this.hazardsVisible) {
+    if (this.presentationMode === 'dots' && this.hazardsAvailable && this.hazardsVisible) {
       for (const { tile, blockA, blockB } of renderableTiles) {
         this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 2);
       }
@@ -1451,6 +1560,7 @@ export class TiledRainDotsLayer {
         currentMotionInterval: currentMotionInterval ?? 0
       }),
       active: this.active,
+      presentationMode: this.presentationMode,
       hazardsAvailable: this.hazardsAvailable,
       hazardsVisible: this.hazardsVisible,
       visibleTileCount: this.viewportTileKeys.length,
@@ -1470,6 +1580,9 @@ export class TiledRainDotsLayer {
     };
   }
 }
+
+// Compatibility alias for existing tiled-rain probes and callers.
+export const TiledRainDotsLayer = TiledRainLayer;
 
 export function beginTiledRainLoad(manifestUrl, { onTiming = null, motionWarp = false, motionWarpDebugMode = null } = {}) {
   const timing = typeof onTiming === 'function' ? onTiming : () => {};

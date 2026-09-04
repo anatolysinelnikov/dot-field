@@ -20,7 +20,7 @@ import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
-import { beginTiledRainLoad, TiledRainDotsLayer } from './engine/tiled-rain.js';
+import { beginTiledRainLoad, TiledRainLayer } from './engine/tiled-rain.js';
 import {
   buildMotionProbe,
   sampleIdentityFromMercator,
@@ -218,7 +218,8 @@ let weatherRequestGeneration = 0;
 if (tiledRainEnabled) {
   renderModeSelector.dataset.mode = 'dots';
   for (const button of renderModeButtons) {
-    const enabled = button.dataset.renderMode === 'dots';
+    const enabled = button.dataset.renderMode === 'dots'
+      || (!motionWarpEnabled && button.dataset.renderMode === 'squares');
     button.hidden = !enabled;
     button.setAttribute('aria-checked', String(enabled));
   }
@@ -926,7 +927,7 @@ function tryInitializeWeatherLayer() {
 function tryInitializeTiledRainLayer() {
   const initialBounds = visibleMercatorBounds();
   if (!initialBounds) throw new Error('Initial camera bounds are unavailable for tiled rain initialization.');
-  weatherLayer = new TiledRainDotsLayer(activeWeatherField.tileStore, { onTiming: markStartup, onCommit: refreshMotionProbe });
+  weatherLayer = new TiledRainLayer(activeWeatherField.tileStore, { onTiming: markStartup, onCommit: refreshMotionProbe });
   geographicLayers = [weatherLayer];
   const styleLayers = map.getStyle().layers || [];
   const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');
@@ -1042,7 +1043,8 @@ function rendererSourcesAreAvailable(requirements) {
 
 function renderCurrentWeather() {
   if (!state.mapReady || state.renderMode === 'raw') return;
-  if (state.renderMode === 'dots') weatherLayer.updateWeather(state.time / LOOP_SECONDS);
+  if (tiledRainEnabled) weatherLayer.updateWeather(state.time / LOOP_SECONDS);
+  else if (state.renderMode === 'dots') weatherLayer.updateWeather(state.time / LOOP_SECONDS);
   else if (state.renderMode === 'squares') squaresLayer.updateWeather(state.time / LOOP_SECONDS);
   refreshMotionProbe();
   map.triggerRepaint();
@@ -1092,7 +1094,9 @@ function applyRenderMode() {
   if (!state.mapReady) return;
   const mode = state.renderMode;
   if (tiledRainEnabled) {
-    weatherLayer.setActive(mode === 'dots');
+    weatherLayer.setActive(true);
+    weatherLayer.setPresentationMode(mode);
+    weatherLayer.setHazardsVisible(state.hazardsVisible);
     weatherLayer.setTime(state.time / LOOP_SECONDS);
     updateTimestamp();
     return;
