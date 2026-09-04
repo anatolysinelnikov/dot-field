@@ -3,7 +3,9 @@
 
 The input is the already-normalized generated weather sequence.  This tool
 does not parse provider files and deliberately keeps the tiled format narrow:
-one fixed L13 grid, 128x128 sample tiles, and four-frame UInt16 blocks.
+one fixed L13 grid, 128x128 sample tiles, and four-frame blocks.  Rain keeps
+the original UInt16 contract; optional storm and hail severity channels use
+compact UInt8 payloads aligned to the same samples and temporal blocks.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import argparse
 import gzip
 import json
 import math
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +36,10 @@ UINT16_MAX = 65535
 POSITIVE_CODE_MIN = 2
 POSITIVE_CODE_MAX = UINT16_MAX
 POSITIVE_QUANTIZED_RANGE = POSITIVE_CODE_MAX - 1
+HAZARD_DTYPE = "UInt8"
+HAZARD_QUANTIZED_MAX = 255
+THUNDERSTORM_LEVELS = {10: 0.2660123, 11: 0.4818750, 12: 0.6977377}
+HAIL_LEVELS = {13: 0.2776807, 14: 0.4897500, 15: 0.7018193}
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -130,6 +137,30 @@ def decode_samples(encoded: np.ndarray, maximum: float) -> np.ndarray:
     return decoded
 
 
+def severity_for_codes(values: np.ndarray, levels: dict[int, float]) -> np.ndarray:
+    """Map categorical source codes to the normal Dots severity values.
+
+    Code 31 is phenomena NoData and, like every non-channel code, contributes
+    no storm/hail severity.  The resulting continuous channel is then passed
+    through the same source-grid bilinear reconstruction as rain.
+    """
+    result = np.zeros(values.size, dtype=np.float32)
+    for code, severity in levels.items():
+        result[values == code] = severity
+    return result
+
+
+def encode_hazard_samples(values: np.ndarray) -> np.ndarray:
+    encoded = np.zeros(values.size, dtype=np.uint8)
+    valid = np.isfinite(values)
+    encoded[valid] = np.rint(np.clip(values[valid], 0.0, 1.0) * HAZARD_QUANTIZED_MAX).astype(np.uint8)
+    return encoded
+
+
+def decode_hazard_samples(encoded: np.ndarray) -> np.ndarray:
+    return encoded.astype(np.float64) / HAZARD_QUANTIZED_MAX
+
+
 def percentile(values: np.ndarray, quantile: float) -> float:
     return float(np.percentile(values, quantile)) if values.size else 0.0
 
@@ -169,6 +200,22 @@ def main() -> None:
             raise SystemExit(f"source frame {frame_index} contains invalid physical rain values")
         source_frames.append(values)
 
+    phenomena = metadata.get("phenomena", {})
+    if not phenomena.get("available"):
+        raise SystemExit("normalized source phenomena channel is required for tiled hazard generation")
+    phenomena_assets = phenomena.get("frame_assets")
+    if not isinstance(phenomena_assets, list) or len(phenomena_assets) != frame_count:
+        raise SystemExit("normalized source phenomena frame assets do not match frame count")
+    phenomena_frames: list[np.ndarray] = []
+    for frame_index, asset in enumerate(phenomena_assets):
+        frame_path = (source_metadata_path.parent / asset).resolve()
+        values = np.fromfile(frame_path, dtype=np.uint8)
+        if values.size != node_count:
+            raise SystemExit(f"source phenomena frame {frame_index} has {values.size} values, expected {node_count}")
+        phenomena_frames.append(values)
+    storm_source_frames = [severity_for_codes(values, THUNDERSTORM_LEVELS) for values in phenomena_frames]
+    hail_source_frames = [severity_for_codes(values, HAIL_LEVELS) for values in phenomena_frames]
+
     support = grid["weather_support"]
     west_x = (finite_number(support["west"], "weather_support.west") + 180.0) / 360.0
     east_x = (finite_number(support["east"], "weather_support.east") + 180.0) / 360.0
@@ -183,7 +230,9 @@ def main() -> None:
     min_tile_y = min_sample_y // TILE_SIZE
     max_tile_y = max_sample_y // TILE_SIZE
 
-    tiles: dict[tuple[int, int], list[np.ndarray]] = {}
+    rain_tiles: dict[tuple[int, int], list[np.ndarray]] = {}
+    storm_tiles: dict[tuple[int, int], list[np.ndarray]] = {}
+    hail_tiles: dict[tuple[int, int], list[np.ndarray]] = {}
     finite_values: list[np.ndarray] = []
     for tile_y in range(min_tile_y, max_tile_y + 1):
         for tile_x in range(min_tile_x, max_tile_x + 1):
@@ -193,17 +242,35 @@ def main() -> None:
                 sample_indices_x / GRID_SIZE,
                 sample_indices_y / GRID_SIZE,
             )
-            tile_frames = []
-            for source in source_frames:
-                values = reconstruct_frame(
-                    source, source_width, source_height,
+            tile_rain_frames = []
+            tile_storm_frames = []
+            tile_hail_frames = []
+            for rain_source, storm_source, hail_source in zip(source_frames, storm_source_frames, hail_source_frames):
+                rain_values = reconstruct_frame(
+                    rain_source, source_width, source_height,
                     float(grid["longitude_start"]), float(grid["longitude_spacing"]),
                     float(grid["latitude_start"]), float(grid["latitude_spacing"]),
                     sample_x.reshape(-1), sample_y.reshape(-1),
                 )
-                tile_frames.append(values)
-                finite_values.append(values[np.isfinite(values)])
-            tiles[(tile_x, tile_y)] = tile_frames
+                storm_values = reconstruct_frame(
+                    storm_source, source_width, source_height,
+                    float(grid["longitude_start"]), float(grid["longitude_spacing"]),
+                    float(grid["latitude_start"]), float(grid["latitude_spacing"]),
+                    sample_x.reshape(-1), sample_y.reshape(-1),
+                )
+                hail_values = reconstruct_frame(
+                    hail_source, source_width, source_height,
+                    float(grid["longitude_start"]), float(grid["longitude_spacing"]),
+                    float(grid["latitude_start"]), float(grid["latitude_spacing"]),
+                    sample_x.reshape(-1), sample_y.reshape(-1),
+                )
+                tile_rain_frames.append(rain_values)
+                tile_storm_frames.append(storm_values)
+                tile_hail_frames.append(hail_values)
+                finite_values.append(rain_values[np.isfinite(rain_values)])
+            rain_tiles[(tile_x, tile_y)] = tile_rain_frames
+            storm_tiles[(tile_x, tile_y)] = tile_storm_frames
+            hail_tiles[(tile_x, tile_y)] = tile_hail_frames
     all_finite = np.concatenate(finite_values) if finite_values else np.empty(0, dtype=np.float32)
     if all_finite.size == 0:
         raise SystemExit("dataset support produced no valid L13 samples")
@@ -215,9 +282,10 @@ def main() -> None:
         raise SystemExit(f"output path is not a directory: {output}")
     output.mkdir(parents=True, exist_ok=True)
     tile_root = output / "tiles" / f"L{LOD_LEVEL}"
+    if tile_root.exists():
+        shutil.rmtree(tile_root)
     tile_root.mkdir(parents=True, exist_ok=True)
 
-    blocks: list[dict[str, Any]] = []
     encoded_sample_count = 0
     nodata_sample_count = 0
     wet_sample_count = 0
@@ -225,10 +293,44 @@ def main() -> None:
     relative_errors: list[np.ndarray] = []
     raw_payload_bytes = 0
     gzip_payload_bytes = 0
+    raw_storm_payload_bytes = 0
+    gzip_storm_payload_bytes = 0
+    raw_hail_payload_bytes = 0
+    gzip_hail_payload_bytes = 0
+    hazard_logical_sample_count = 0
+    hazard_logical_zero_count = 0
+    hazard_encoded_sample_count = 0
+    hazard_encoded_zero_count = 0
+    hazard_block_count = 0
+    hazard_zero_block_count = 0
+    hazard_descriptor_bytes = 0
 
-    for (tile_x, tile_y), tile_frames in sorted(tiles.items()):
+    def write_hazard_payload(tile_directory: Path, channel: str, block_index: int, block_frames: list[np.ndarray]) -> tuple[dict[str, Any] | None, int, int, int, int]:
+        encoded_frames = [encode_hazard_samples(frame) for frame in block_frames]
+        encoded_values = np.concatenate(encoded_frames).astype(np.uint8, copy=False)
+        logical_count = int(encoded_values.size)
+        zero_count = int(np.count_nonzero(encoded_values == 0))
+        if zero_count == logical_count:
+            return None, 0, 0, logical_count, zero_count
+        payload = encoded_values.tobytes()
+        asset_path = tile_directory / f"{channel}-block-{block_index:03d}.u8"
+        asset_path.write_bytes(payload)
+        encoded_path = Path(f"{asset_path}.gz")
+        encoded_path.write_bytes(gzip.compress(payload, compresslevel=9, mtime=0))
+        descriptor = {
+            "asset": str(asset_path.relative_to(output)).replace("\\", "/"),
+            "sample_count": TILE_SIZE * TILE_SIZE,
+            "byte_length": len(payload),
+            "gzip_byte_length": encoded_path.stat().st_size,
+            "layout": "frame-major; each frame is row-major y then x",
+        }
+        return descriptor, len(payload), encoded_path.stat().st_size, logical_count, zero_count
+
+    tile_descriptors: list[dict[str, Any]] = []
+    for (tile_x, tile_y), tile_frames in sorted(rain_tiles.items()):
         tile_directory = tile_root / str(tile_x) / str(tile_y)
         tile_directory.mkdir(parents=True, exist_ok=True)
+        tile_blocks: list[dict[str, Any]] = []
         for block_index, frame_start in enumerate(range(0, frame_count, TEMPORAL_BLOCK_SIZE)):
             block_frames = tile_frames[frame_start:frame_start + TEMPORAL_BLOCK_SIZE]
             encoded_frames = [encode_samples(frame, physical_max) for frame in block_frames]
@@ -247,9 +349,30 @@ def main() -> None:
                 "gzip_byte_length": encoded_path.stat().st_size,
                 "layout": "frame-major; each frame is row-major y then x",
             }
-            blocks.append({"tile_x": tile_x, "tile_y": tile_y, **block_descriptor})
+            storm_descriptor, storm_raw, storm_gzip, storm_count, storm_zero = write_hazard_payload(
+                tile_directory, "storm", block_index, storm_tiles[(tile_x, tile_y)][frame_start:frame_start + TEMPORAL_BLOCK_SIZE]
+            )
+            hail_descriptor, hail_raw, hail_gzip, hail_count, hail_zero = write_hazard_payload(
+                tile_directory, "hail", block_index, hail_tiles[(tile_x, tile_y)][frame_start:frame_start + TEMPORAL_BLOCK_SIZE]
+            )
+            block_descriptor["storm"] = storm_descriptor
+            block_descriptor["hail"] = hail_descriptor
+            tile_blocks.append(block_descriptor)
             raw_payload_bytes += len(payload)
             gzip_payload_bytes += encoded_path.stat().st_size
+            raw_storm_payload_bytes += storm_raw
+            gzip_storm_payload_bytes += storm_gzip
+            raw_hail_payload_bytes += hail_raw
+            gzip_hail_payload_bytes += hail_gzip
+            hazard_logical_sample_count += storm_count + hail_count
+            hazard_logical_zero_count += storm_zero + hail_zero
+            hazard_encoded_sample_count += (storm_count if storm_descriptor else 0) + (hail_count if hail_descriptor else 0)
+            hazard_encoded_zero_count += (storm_zero if storm_descriptor else 0) + (hail_zero if hail_descriptor else 0)
+            if storm_descriptor or hail_descriptor:
+                hazard_block_count += 1
+            else:
+                hazard_zero_block_count += 1
+            hazard_descriptor_bytes += len(json.dumps({"storm": storm_descriptor, "hail": hail_descriptor}, separators=(",", ":")))
 
             for reference, encoded in zip(block_frames, encoded_frames):
                 decoded = decode_samples(encoded, physical_max)
@@ -265,6 +388,7 @@ def main() -> None:
                 meaningful_valid = meaningful[valid]
                 if np.any(meaningful_valid):
                     relative_errors.append(error[meaningful_valid] / valid_reference[meaningful_valid])
+        tile_descriptors.append({"x": tile_x, "y": tile_y, "blocks": tile_blocks})
     abs_error = np.concatenate(absolute_errors) if absolute_errors else np.empty(0)
     rel_error = np.concatenate(relative_errors) if relative_errors else np.empty(0)
     report = {
@@ -315,22 +439,48 @@ def main() -> None:
             "physical_max_mmh": physical_max,
             "decode_positive": "(code - 1) / 65534 * physical_max_mmh",
         },
-        "tiles": [
-            {
-                "x": tile_x,
-                "y": tile_y,
-                "blocks": tile_blocks,
-            }
-            for (tile_x, tile_y), tile_blocks in (
-                ((tile_x, tile_y), [block for block in blocks if block["tile_x"] == tile_x and block["tile_y"] == tile_y])
-                for tile_x, tile_y in sorted(tiles)
-            )
-        ],
-        "tile_count": len(tiles),
-        "block_count": len(blocks),
+        "hazards": {
+            "available": True,
+            "channels": ["storm", "hail"],
+            "encoding": {
+                "dtype": HAZARD_DTYPE,
+                "byte_order": "little-endian",
+                "minimum": 0,
+                "maximum": HAZARD_QUANTIZED_MAX,
+                "decode": "code / 255",
+            },
+            "severity_anchors": {
+                "storm": {str(code): value for code, value in THUNDERSTORM_LEVELS.items()},
+                "hail": {str(code): value for code, value in HAIL_LEVELS.items()},
+            },
+            "source": "normalized v3 phenomena categorical codes reconstructed after severity mapping",
+        },
+        "tiles": tile_descriptors,
+        "tile_count": len(rain_tiles),
+        "block_count": len(tile_descriptors) * math.ceil(frame_count / TEMPORAL_BLOCK_SIZE),
         "payload_totals": {
             "raw_u16_bytes": raw_payload_bytes,
             "gzip_bytes": gzip_payload_bytes,
+            "raw_storm_u8_bytes": raw_storm_payload_bytes,
+            "gzip_storm_u8_bytes": gzip_storm_payload_bytes,
+            "raw_hail_u8_bytes": raw_hail_payload_bytes,
+            "gzip_hail_u8_bytes": gzip_hail_payload_bytes,
+            "raw_hazard_u8_bytes": raw_storm_payload_bytes + raw_hail_payload_bytes,
+            "gzip_hazard_u8_bytes": gzip_storm_payload_bytes + gzip_hail_payload_bytes,
+        },
+        "hazard_storage": {
+            "tile_block_count": len(tile_descriptors) * math.ceil(frame_count / TEMPORAL_BLOCK_SIZE),
+            "payload_block_count": hazard_block_count,
+            "all_zero_block_count": hazard_zero_block_count,
+            "logical_sample_count": hazard_logical_sample_count,
+            "logical_zero_sample_count": hazard_logical_zero_count,
+            "logical_zero_percentage": 100.0 * hazard_logical_zero_count / hazard_logical_sample_count if hazard_logical_sample_count else 100.0,
+            "encoded_sample_count": hazard_encoded_sample_count,
+            "encoded_zero_sample_count": hazard_encoded_zero_count,
+            "encoded_zero_percentage": 100.0 * hazard_encoded_zero_count / hazard_encoded_sample_count if hazard_encoded_sample_count else 100.0,
+            "descriptor_json_bytes": hazard_descriptor_bytes,
+            "mean_raw_bytes_per_tile_block": (raw_storm_payload_bytes + raw_hail_payload_bytes) / (len(tile_descriptors) * math.ceil(frame_count / TEMPORAL_BLOCK_SIZE)),
+            "mean_gzip_bytes_per_tile_block": (gzip_storm_payload_bytes + gzip_hail_payload_bytes) / (len(tile_descriptors) * math.ceil(frame_count / TEMPORAL_BLOCK_SIZE)),
         },
         "fidelity_report": report,
     }
@@ -339,12 +489,19 @@ def main() -> None:
     print(json.dumps({
         "output": str(output),
         "source_generation_id": source_generation_id,
-        "tile_count": len(tiles),
-        "block_count": len(blocks),
+        "tile_count": len(rain_tiles),
+        "block_count": len(tile_descriptors) * math.ceil(frame_count / TEMPORAL_BLOCK_SIZE),
         "tile_size": TILE_SIZE,
         "temporal_block_size": TEMPORAL_BLOCK_SIZE,
         "raw_u16_bytes": raw_payload_bytes,
         "gzip_bytes": gzip_payload_bytes,
+        "raw_storm_u8_bytes": raw_storm_payload_bytes,
+        "gzip_storm_u8_bytes": gzip_storm_payload_bytes,
+        "raw_hail_u8_bytes": raw_hail_payload_bytes,
+        "gzip_hail_u8_bytes": gzip_hail_payload_bytes,
+        "raw_hazard_u8_bytes": raw_storm_payload_bytes + raw_hail_payload_bytes,
+        "gzip_hazard_u8_bytes": gzip_storm_payload_bytes + gzip_hail_payload_bytes,
+        "hazard_storage": manifest["hazard_storage"],
         "fidelity_report": report,
     }, indent=2))
 

@@ -486,6 +486,9 @@ function activateWeatherField(field) {
   sourceTimestamps = Array.isArray(field.timestamps) ? field.timestamps : [];
   rawLayer = tiledRainEnabled ? null : new RawWeatherLayer(rawWeatherField);
   state.weatherReady = true;
+  if (tiledRainEnabled) {
+    hazards.closest('.hazards-control')?.toggleAttribute('hidden', !field.hazardsAvailable);
+  }
   for (const control of [...renderModeButtons, hazards, timeSlider]) control.disabled = false;
   markStartup('first-weather-ready');
   tryInitializeWeatherLayer();

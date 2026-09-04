@@ -48,15 +48,16 @@ frames. Its data flow is:
 ```text
 normalized source generation (`data/generated/current/metadata.json`)
         ↓ offline fixed globally anchored L13 reconstruction
-128 × 128 samples, UInt16 temporal blocks of four frames
+128 × 128 samples, UInt16 rain blocks of four frames plus optional aligned
+UInt8 storm/hail severity blocks
         ↓ optional gzip sidecars through the local development server
 bounded browser tile/block residency
-        ↓ WebGL2 R16UI texture arrays
+        ↓ WebGL2 R16UI rain and R8 hazard texture arrays
 procedural instanced Dots
 ```
 
 `tools/generate-tiled-rain.py` reads only the normalized metadata and the exact
-Float32 rain frame assets referenced by that metadata. It does not parse
+Float32 rain and Uint8 phenomena frame assets referenced by that metadata. It does not parse
 NetCDF/provider data. Experimental assets are written to the ignored
 `data/generated/tiled-rain/current/` directory. The manifest records the source
 generation identity, and the browser verifies that identity against the current
@@ -65,12 +66,25 @@ an explicit error; the tiled path never falls back to geographic reconstruction.
 
 The spatial contract is exact and globally anchored: sample identity is the
 L13 integer pair `(i, j)` at `x = i / 2^13`, `y = j / 2^13`. Half-open ownership
-assigns each sample to one 128-sample tile. Tile blocks use a documented
-frame-major, row-major UInt16 layout. Code 0 is NoData, code 1 is valid dry,
+assigns each sample to one 128-sample tile. Rain tile blocks retain their
+documented frame-major, row-major UInt16 layout. Code 0 is NoData, code 1 is valid dry,
 and codes 2–65535 linearly decode positive physical `mm/h` using
 `(code - 1) / 65534 * physical_max_mmh`; the actual finite maximum is recorded
 in the manifest. Presentation mapping remains in the shader and reuses the
 Dots rain/strong-rain transfer anchors.
+
+When the normalized v3 phenomena channel is available, each rain block may
+also carry `storm` and `hail` descriptors with the same frame-major and sample
+ordering. Their optional payloads are UInt8 severity samples decoded as
+`code / 255`; an omitted descriptor is an all-zero channel. The generator first
+maps codes 10/11/12 and 13/14/15 to the existing real-weather storm/hail
+severity anchors, then reconstructs those continuous channels at the exact
+global L13 samples. It never interpolates raw categorical codes and never
+derives hazard severity from rain. The direct GPU Dots shader linearly
+interpolates the reconstructed A/B severity samples and applies the existing
+radius, color, glyph, and hail-over-storm presentation rules. Hazard visibility
+is presentation-only. The motion-warp path keeps hazards unavailable so it
+cannot display unwarped hazards over warped rain.
 
 The tiled loader selects the conservative visible Mercator tile envelope with a
 small deterministic L13 overscan, requests only the current frame pair's
@@ -80,7 +94,7 @@ blocks; stale completions cannot commit. The ready-block LRU has a normal
 320-block cache target, but its true hard ceiling is derived from the manifest:
 `max(tile_count * 2, 320)`, because an atomic frame pair can require two blocks
 per spatial tile. CPU and estimated GPU byte ceilings use the actual maximum
-block payload size and this hard ready-block limit. The newest target has
+combined rain plus hazard payload size and this hard ready-block limit. The newest target has
 priority; already-resident committed fallback blocks are kept for ordinary
 adjacent transitions and evicted before required target data. Pending ownership
 and total tracked block state are separately bounded. Large cross-boundary
