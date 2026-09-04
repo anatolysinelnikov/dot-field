@@ -157,6 +157,7 @@ export function mapDotsWeatherSummary(summary, reusable = null) {
     const spacing = summary.levelData.spacing;
     const rainValues = summary.channels.rainMmh;
     const rainMask = summary.coverageMasks.rain;
+    const directHazard = { stormRadius: 0, hailRadius: 0 };
     for (let position = 0; position < rainValues.length; position++) {
       const rainMmh = rainValues[position];
       const rainCoverage = rainMask[position] & 1 ? 1 : 0;
@@ -166,7 +167,9 @@ export function mapDotsWeatherSummary(summary, reusable = null) {
       geographicHazardRadii({
         storm: summary.channels.storm[position],
         hail: summary.channels.hail[position]
-      }, spacing, state);
+      }, spacing, directHazard);
+      state.stormRadius[position] = directHazard.stormRadius;
+      state.hailRadius[position] = directHazard.hailRadius;
     }
     return state;
   }
