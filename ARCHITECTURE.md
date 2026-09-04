@@ -117,6 +117,53 @@ declare or bind MotionField samplers. Optical flow, advection, radar or model
 motion, single/double warp, and materialized subframes remain deferred to Phase
 0B.
 
+## Staged multi-LOD tiled-rain assets — offline contract
+
+The browser Phase 0A contract above remains unchanged. In parallel, the
+offline generator `tools/generate-tiled-rain-lod.py` produces the ignored
+`data/generated/tiled-rain-lod/current/` asset set with schema
+`dot-field-tiled-rain-lod-v1` and manifest version 1. This staged contract is
+not consumed by `src/app.js`, `src/engine/tiled-rain.js`, or any browser
+loader yet.
+
+The staged asset pyramid covers the complete active display range L10 through
+L14. L13 remains the physical reference level and stores direct UInt16 rain
+plus optional UInt8 storm/hail severity samples using the existing Phase 0A
+reconstruction, categorical severity mapping, and direct encoding semantics.
+Its L13 tile envelope is compatible with the existing Phase 0A envelope and
+the generated L13 direct payloads are byte-identical when the normalized
+source generation matches. L14 independently reconstructs the normalized
+physical source at exact globally anchored L14 identities; it is not an
+upsample, subdivision, or interpolation of L13 transport values.
+
+L10, L11, and L12 are centered dyadic aggregate summaries of unquantized
+Float32 L13 physical samples. The complete selected support domain is
+aggregated recursively before output tiling, so a 128-sample tile boundary
+cannot change a weather value or become an aggregation edge. Their physical
+summary transport uses two frame-major, row-major, four-component little-endian
+Float16 planes: Summary A contains `rainWetMeanMmh`, `rainMaxMmh`,
+`rainCoverage`, and `strongCoverage`; optional Summary B contains
+`stormCoverage`, `stormMaxSeverity`, `hailCoverage`, and `hailMaxSeverity`.
+Coverage `-1.0` in Summary A is the deterministic unsupported/NoData sentinel;
+supported dry samples remain zero-valued. The hazard mean is intentionally
+omitted because the currently active Dots and Squares paths reduce their
+monotonic hazard presentation to coverage plus maximum severity. This is a
+contract optimized for those current renderers, not a universal future
+weather-summary schema.
+
+All levels use 128 × 128 half-open global tile ownership, globally nested
+sample identities, four-source-frame temporal blocks, exact source timestamps,
+and deterministic gzip sidecars. The manifest records level-specific direct
+versus aggregate encoding, support/generated sample extents, tile extents,
+source generation identity, payload sizes, and Float16 fidelity diagnostics.
+L10–L14 asset generation is offline only; browser LOD selection, residency,
+overlap, transitions, and runtime Float16 decoding remain a later task.
+
+MotionField remains bound to the existing Phase 0A L13 manifest and source
+contract. The motion-warp assets likewise remain separately bound to the
+existing Phase 0A L13 manifest and Phase 0B1 MotionField manifest; neither
+pipeline is migrated to the staged multi-LOD schema here.
+
 ## Experimental tiled-rain Phase 0B1 — offline MotionField, non-default
 
 Phase 0B1 adds a separate physical motion channel without changing the
