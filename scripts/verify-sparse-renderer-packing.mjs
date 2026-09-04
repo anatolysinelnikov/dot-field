@@ -1,12 +1,25 @@
 import fs from 'node:fs';
 import { setActiveWeatherField } from '../src/engine/geography.js';
 import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
+import { RealWeatherSequence } from '../src/engine/real-weather.js';
 import { buildCenteredContributions, evaluateDirectWeatherSummary, aggregateWeatherSummary, GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicLodTopology, lodRangeForStableLevel, mercatorXForIndex, mercatorYForIndex } from '../src/engine/geographic-lod.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
-const { weather } = await loadRealWeatherFixture();
+const { weather: loadedWeather } = await loadRealWeatherFixture();
+const weather = new RealWeatherSequence({
+  longitudes: loadedWeather.longitudes,
+  latitudes: loadedWeather.latitudes,
+  sourceFrames: loadedWeather.sourceFrames,
+  frameCount: loadedWeather.frameCount,
+  longitudeSpacing: loadedWeather.longitudeSpacing,
+  latitudeSpacing: loadedWeather.latitudeSpacing,
+  weatherSupport: loadedWeather.weatherSupport,
+  timestamps: loadedWeather.timestamps,
+  potentialWeatherMask: loadedWeather.potentialWeatherMask,
+  sourceFrameCacheLimit: loadedWeather.sourceFrameCacheLimit
+});
 setActiveWeatherField(weather);
 
 const topology = new GeographicLodTopology(undefined, lodRangeForStableLevel(10));

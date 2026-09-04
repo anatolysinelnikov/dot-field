@@ -28,7 +28,13 @@ if (metadata.generation_id) {
 }
 const rainDirectory = resolve(directory, 'rain');
 const rainFrames = (await readdir(rainDirectory)).filter((name) => name.endsWith('.f32')).sort();
-const assets = [...rainFrames.map((name) => resolve(rainDirectory, name)), resolve(directory, 'support.mask')];
+const phenomenaDirectory = resolve(directory, 'phenomena');
+const phenomenaFrames = await readdir(phenomenaDirectory).catch(() => []);
+const assets = [
+  ...rainFrames.map((name) => resolve(rainDirectory, name)),
+  ...phenomenaFrames.filter((name) => name.endsWith('.u8')).sort().map((name) => resolve(phenomenaDirectory, name)),
+  resolve(directory, 'support.mask')
+];
 let logicalBytes = 0;
 let encodedBytes = 0;
 

@@ -11,6 +11,13 @@ export async function loadRealWeatherFixture({ sourceFrameCacheLimit = 19, retai
     index,
     new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / Float32Array.BYTES_PER_ELEMENT)
   ]));
+  const phenomenaFrames = new Map();
+  if (metadata.phenomena?.available) {
+    const phenomenaBuffers = await Promise.all(metadata.phenomena.frame_assets.map((asset) => readFile(new URL(asset, root))));
+    for (const [index, buffer] of phenomenaBuffers.entries()) {
+      phenomenaFrames.set(index, new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength));
+    }
+  }
   const support = await readFile(new URL(metadata.support_mask.asset, root));
   const weather = new RealWeatherSequence({
     longitudes: Float64Array.from({ length: grid.width }, (_, index) => grid.longitude_start + index * grid.longitude_spacing),
@@ -20,6 +27,8 @@ export async function loadRealWeatherFixture({ sourceFrameCacheLimit = 19, retai
     weatherSupport: grid.weather_support,
     timestamps: metadata.time.timestamps,
     potentialWeatherMask: decodePackedWeatherSupport(support.buffer.slice(support.byteOffset, support.byteOffset + support.byteLength), frameSize),
+    phenomenaFrames: metadata.phenomena?.available ? phenomenaFrames : null,
+    phenomenaAvailable: metadata.phenomena?.available === true,
     sourceFrameCacheLimit, retainAllSourceFrames
   });
   return { metadata, weather, sourceFrames };

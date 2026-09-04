@@ -78,6 +78,12 @@ const THUNDERSTORM_COLORS = Object.freeze({
   12: [1, 0, 1, 1]
 });
 const HAIL_COLORS = Object.freeze({
+  13: [200 / 255, 154 / 255, 0, 1],
+  14: [240 / 255, 192 / 255, 0, 1],
+  15: [1, 212 / 255, 0, 1],
+  // Legacy CSV fixtures used the compact 16..18 hail enum. Keep those
+  // presentation keys for that diagnostic input; real NetCDF phenomena use
+  // the provider's 13..15 hail codes.
   16: [200 / 255, 154 / 255, 0, 1],
   17: [240 / 255, 192 / 255, 0, 1],
   18: [1, 212 / 255, 0, 1]

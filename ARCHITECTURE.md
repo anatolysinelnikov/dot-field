@@ -598,11 +598,13 @@ store. Full-residency frames are never re-downloaded, revalidated, or evicted
 by timeline interaction. A source frame is never asynchronously evicted during
 a synchronous evaluation. The prepared spatial rain cache remains a separate
 bounded four-entry cache and is unchanged by source-frame residency.
-Optional future
-phenomena are represented in metadata
-as one mutually-exclusive Uint8 node enum per source frame: 0 none, 1–3 storm,
-4–6 hail, 7 reserved. The current rain-only sequence declares this channel
-unavailable and fabricates no phenomenon data.
+The normalized v3 transport retains the full provider `phenomena` channel as
+one aligned Uint8 frame per source timestep. Its self-describing GIMET-2010
+codebook preserves codes 0–19 and 31 (`missing / NoData`); provider categories
+remain separate from downstream continuous presentation severity. The current
+renderer derives thunderstorm severity from codes 10–12 and hail severity from
+codes 13–15. Other retained codes are future presentation inputs and are not
+rendered yet.
 
 The timeline may visualize actual resident source-frame pairs as muted blue
 segments inside its existing track. Residency snapshots and change callbacks
@@ -618,12 +620,11 @@ separately, including whether it is outside the sequence LRU after eviction.
 `geographic-weather-pyramid.js` retains the generic hazard-capable physical
 summary contract: weighted rain, maximum rain, all seven rain-coverage
 thresholds, and storm/hail coverage, weighted severity, and maxima. Providers
-may explicitly advertise the `rain-only-display` summary profile. The current
-prepared real-weather sequence does so together with explicit unavailable storm
-and hail channels. Provider/engine capability is separate from availability in
-the currently loaded dataset: a future sequence from the same provider may
-expose hazard channels and must use the generic profile even when a particular
-frame contains only zero hazard values. Selection is never a renderer choice
+may explicitly advertise the `rain-only-display` summary profile. The prepared
+real-weather sequence uses the generic profile when its normalized phenomena
+channel is available, even when a particular frame contains no active hazard.
+Provider/engine capability is separate from availability in the currently
+loaded dataset. Selection is never a renderer choice
 or an inference from a zero-valued frame.
 
 That compact profile is shared by Dots and Squares and contains only weighted
@@ -800,7 +801,9 @@ support-derived L14 scalar lattice until viewport-windowed scalar
 reconstruction is implemented.
 
 For a multi-frame sequence, the separate packed `support.mask` sidecar delivers
-one immutable sequence-wide positive source-node union. It is decoded
+one immutable sequence-wide potential-weather source-node union: positive rain
+or a valid non-background phenomenon code 1–19. Code 0 is background and code
+31 is NoData; neither contributes support. It is decoded
 independently of full source-frame residency and is available before the
 complete finite sequence has loaded. Each prepared canonical geometry derives
 its potentially-active sample set from this immutable support mask; full
@@ -813,14 +816,14 @@ Aggregation therefore skips guaranteed-dry child statistics but preserves every
 dry child in the cached denominators and retains the same summary API and
 representation-independent physical semantics.
 
-The sequence geometry owns a bounded four-entry prepared spatial source cache,
-but the active loader retains every validated source `Float32Array` in the
-single `sourceFrames` map for the life of the immutable generation. It does not
-retain a normal-runtime temporal rain array. A provider frame
-exposes a prepared temporal sampling capability through `geography.js`; the
-current sequence implementation captures its two prepared Float64 spatial
-source arrays and performs the existing linear interpolation when a summary
-consumer requests each active value. The capability is provider-owned so a
+The sequence geometry owns bounded four-entry prepared spatial source caches,
+but the active loader retains every validated rain `Float32Array` and aligned
+phenomena `Uint8Array` in paired source-frame maps for the life of the immutable
+generation. It does not retain a normal-runtime temporal rain or category array.
+A provider frame exposes a prepared temporal sampling capability through
+`geography.js`; the current sequence implementation captures prepared Float64
+rain, storm-severity, and hail-severity arrays and performs the existing linear
+interpolation when a summary consumer requests each active value. The capability is provider-owned so a
 future deterministic motion/advection-aware reconstruction can replace linear
 interpolation without changing the pyramid or renderers. `samplePreparedBatch()`
 remains a lazy compatibility/diagnostic path and allocates its temporal scratch
@@ -906,8 +909,9 @@ relative error bounds. Contribution weights remain Float64 because their
 topology is shared and their smaller memory cost does not justify a precision
 tradeoff.
 
-Storm and hail are zero throughout the active rain-only sequence and are never
-inferred from precipitation. Dots and Squares map these same summaries into
+Storm and hail are never inferred from precipitation: they are derived only
+from the categorical phenomena channel, while the categorical code remains
+available on exact source frames. Dots and Squares map these same summaries into
 renderer-owned compact presentation buffers;
 neither renderer recursively aggregates radii, colors, opacity, or hazard
 glyph values. For sequence summaries, the mapped buffers retain canonical

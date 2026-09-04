@@ -6,6 +6,7 @@ import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { createLocalServer } from './serve-local.mjs';
 import { beginRealWeatherSequenceLoad } from '../src/engine/real-weather.js';
+import { V3_PHENOMENA_METADATA } from './sequence-test-metadata.mjs';
 
 const compress = promisify(gzip);
 const compressOptions = { level: 9 };
@@ -31,7 +32,7 @@ function metadataFor(generationId, width, height, value) {
   const frameNodeCount = width * height;
   const frameByteLength = frameNodeCount * Float32Array.BYTES_PER_ELEMENT;
   return {
-    schema_version: 'dot-field-weather-transport-v2',
+    schema_version: 'dot-field-weather-transport-v3',
     generation_id: generationId,
     spatial_grid: {
       width, height, longitude_start: 10, latitude_start: 20,
@@ -54,13 +55,9 @@ function metadataFor(generationId, width, height, value) {
     support_mask: {
       asset: `../${generationId}/support.mask`, encoding: 'bitset-lsb0',
       node_count: frameNodeCount, byte_length: Math.ceil(frameNodeCount / 8),
-      positive_condition: 'rain > 0', trailing_unused_bits: 'zero'
+      potential_weather_condition: 'rain > 0 or phenomenon code in 1..19', trailing_unused_bits: 'zero'
     },
-    phenomena: {
-      available: false, dtype: 'Uint8',
-      enum: { none: 0, thunderstorm_1: 1, thunderstorm_2: 2, thunderstorm_3: 3, hail_1: 4, hail_2: 5, hail_3: 6, reserved: 7 },
-      frame_assets: []
-    },
+    phenomena: V3_PHENOMENA_METADATA,
     test_value: value
   };
 }

@@ -3,9 +3,10 @@ import {
   decodePackedWeatherSupport,
   RealWeatherSequenceAssetsUnavailableError
 } from '../src/engine/real-weather.js';
+import { V3_PHENOMENA_METADATA } from './sequence-test-metadata.mjs';
 
 const metadata = {
-  schema_version: 'dot-field-weather-transport-v2',
+  schema_version: 'dot-field-weather-transport-v3',
   spatial_grid: {
     width: 2, height: 2, longitude_start: 10, latitude_start: 20,
     longitude_spacing: 1, latitude_spacing: 1,
@@ -20,12 +21,8 @@ const metadata = {
     logical_dimensions: ['latitude', 'longitude'], frame_node_count: 4, frame_byte_length: 16,
     frame_assets: ['frame-0', 'frame-1', 'frame-2']
   },
-  support_mask: { asset: 'support', encoding: 'bitset-lsb0', node_count: 4, byte_length: 1, positive_condition: 'rain > 0', trailing_unused_bits: 'zero' },
-  phenomena: {
-    available: false, dtype: 'Uint8',
-    enum: { none: 0, thunderstorm_1: 1, thunderstorm_2: 2, thunderstorm_3: 3, hail_1: 4, hail_2: 5, hail_3: 6, reserved: 7 },
-    frame_assets: []
-  }
+  support_mask: { asset: 'support', encoding: 'bitset-lsb0', node_count: 4, byte_length: 1, potential_weather_condition: 'rain > 0 or phenomenon code in 1..19', trailing_unused_bits: 'zero' },
+  phenomena: V3_PHENOMENA_METADATA
 };
 
 function check(condition, message) {
@@ -96,4 +93,4 @@ try {
   check(String(error.message).includes('trailing unused bits'), 'support trailing-bit validation must remain explicit');
 }
 
-console.log('real weather loader verification passed: v2 manifest, packed support, initial-frame readiness, opt-in bounded LRU reload, and malformed/missing asset handling');
+console.log('real weather loader verification passed: v3 manifest, packed support, initial-frame readiness, opt-in bounded LRU reload, and malformed/missing asset handling');

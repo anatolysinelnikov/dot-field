@@ -7,11 +7,24 @@ import {
   WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY,
   rainCoverageWeightForThreshold
 } from '../src/engine/geographic-weather-pyramid.js';
+import { RealWeatherSequence } from '../src/engine/real-weather.js';
 import { GeographicLodTopology } from '../src/engine/geographic-lod.js';
 import { mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
-const { metadata, weather } = await loadRealWeatherFixture();
+const { metadata, weather: loadedWeather } = await loadRealWeatherFixture();
+const weather = new RealWeatherSequence({
+  longitudes: loadedWeather.longitudes,
+  latitudes: loadedWeather.latitudes,
+  sourceFrames: loadedWeather.sourceFrames,
+  frameCount: loadedWeather.frameCount,
+  longitudeSpacing: loadedWeather.longitudeSpacing,
+  latitudeSpacing: loadedWeather.latitudeSpacing,
+  weatherSupport: loadedWeather.weatherSupport,
+  timestamps: loadedWeather.timestamps,
+  potentialWeatherMask: loadedWeather.potentialWeatherMask,
+  sourceFrameCacheLimit: loadedWeather.sourceFrameCacheLimit
+});
 const time = metadata.time;
 setActiveWeatherField(weather);
 if (weather.prepareFrame(0).weatherSummaryProfile !== WEATHER_SUMMARY_PROFILE_RAIN_ONLY_DISPLAY) throw new Error('sequence did not explicitly select compact rain-only summary profile');

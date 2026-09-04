@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { setActiveWeatherField } from '../src/engine/geography.js';
-import { parseRealWeatherCsv } from '../src/engine/real-weather.js';
+import { parseRealWeatherCsv, RealWeatherSequence } from '../src/engine/real-weather.js';
 import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
 import {
   aggregateWeatherSummary,
@@ -14,7 +14,19 @@ import { GeographicLodTopology, lodRangeForStableLevel, canonicalWindowFromMerca
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
-const { metadata, weather } = await loadRealWeatherFixture();
+const { metadata, weather: loadedWeather } = await loadRealWeatherFixture();
+const weather = new RealWeatherSequence({
+  longitudes: loadedWeather.longitudes,
+  latitudes: loadedWeather.latitudes,
+  sourceFrames: loadedWeather.sourceFrames,
+  frameCount: loadedWeather.frameCount,
+  longitudeSpacing: loadedWeather.longitudeSpacing,
+  latitudeSpacing: loadedWeather.latitudeSpacing,
+  weatherSupport: loadedWeather.weatherSupport,
+  timestamps: loadedWeather.timestamps,
+  potentialWeatherMask: loadedWeather.potentialWeatherMask,
+  sourceFrameCacheLimit: loadedWeather.sourceFrameCacheLimit
+});
 const time = metadata.time;
 setActiveWeatherField(weather);
 

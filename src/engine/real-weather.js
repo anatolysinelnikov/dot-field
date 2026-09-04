@@ -1,13 +1,22 @@
 import { clamp } from './math.js';
 
 const THUNDERSTORM_LEVELS = Object.freeze({ 0: 0, 10: 0.2660123, 11: 0.4818750, 12: 0.6977377 });
-const HAIL_LEVELS = Object.freeze({ 0: 0, 16: 0.2776807, 17: 0.4897500, 18: 0.7018193 });
+const HAIL_LEVELS = Object.freeze({ 0: 0, 13: 0.2776807, 14: 0.4897500, 15: 0.7018193, 16: 0.2776807, 17: 0.4897500, 18: 0.7018193 });
 const EXPECTED_COLUMNS = ['lon', 'lat', 'mmh', 'thunderstorm', 'hail'];
 const REGULAR_SPACING_TOLERANCE = 2e-5;
 const OUTSIDE_SOURCE_INDEX = 0xffffffff;
-const SEQUENCE_SCHEMA_VERSION = 'dot-field-weather-transport-v2';
+const SEQUENCE_SCHEMA_VERSION = 'dot-field-weather-transport-v3';
 const SUPPORT_MASK_ENCODING = 'bitset-lsb0';
-const PHENOMENON_ENUM = Object.freeze({ none: 0, thunderstorm_1: 1, thunderstorm_2: 2, thunderstorm_3: 3, hail_1: 4, hail_2: 5, hail_3: 6, reserved: 7 });
+const PHENOMENON_CODEBOOK = Object.freeze({
+  0: 'no radio echo', 1: 'upper/mid-level cloud', 2: 'stratiform cloud',
+  3: 'weak precipitation', 4: 'moderate precipitation', 5: 'strong precipitation',
+  6: 'convective cloud', 7: 'weak shower', 8: 'moderate shower', 9: 'strong shower',
+  10: 'thunderstorm probability 30-70%', 11: 'thunderstorm probability 71-90%',
+  12: 'thunderstorm probability >90%', 13: 'weak hail', 14: 'moderate hail',
+  15: 'strong hail', 16: 'weak squall', 17: 'moderate squall', 18: 'strong squall',
+  19: 'tornado', 31: 'missing / NoData'
+});
+const PHENOMENON_SUPPORT_CODES = Object.freeze(Array.from({ length: 19 }, (_, index) => index + 1));
 export const DEFAULT_SOURCE_FRAME_CACHE_LIMIT = 6;
 export const INITIAL_PLAYBACK_SOURCE_FRAME_COUNT = 3;
 export const ROLLING_PLAYBACK_BEHIND_FRAME_COUNT = 1;
@@ -54,6 +63,30 @@ function interpolatePrepared(values, baseIndex, x1y0, x0y1, x1y1, longitudeFract
   return clamp(lower + (upper - lower) * latitudeFraction, minimum, maximum);
 }
 
+function interpolateCategoricalSeverity(values, levels, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction) {
+  const lower = (levels[values[baseIndex]] || 0) + ((levels[values[x1y0]] || 0) - (levels[values[baseIndex]] || 0)) * longitudeFraction;
+  const upper = (levels[values[x0y1]] || 0) + ((levels[values[x1y1]] || 0) - (levels[values[x0y1]] || 0)) * longitudeFraction;
+  return clamp(lower + (upper - lower) * latitudeFraction, 0, 1);
+}
+
+function presentationChannelsForPhenomena(values) {
+  const thunderstormCode = new Uint8Array(values.length);
+  const hailCode = new Uint8Array(values.length);
+  const storm = new Float32Array(values.length);
+  const hail = new Float32Array(values.length);
+  for (let index = 0; index < values.length; index++) {
+    const code = values[index];
+    if (code === 10 || code === 11 || code === 12) {
+      thunderstormCode[index] = code;
+      storm[index] = THUNDERSTORM_LEVELS[code];
+    } else if (code === 13 || code === 14 || code === 15) {
+      hailCode[index] = code;
+      hail[index] = HAIL_LEVELS[code];
+    }
+  }
+  return { thunderstormCode, hailCode, storm, hail };
+}
+
 function sortedIndexOf(values, target) {
   let low = 0;
   let high = values.length - 1;
@@ -82,10 +115,11 @@ export function rollingPlaybackSourceFrameIndices(frameCount, normalizedTime, {
 }
 
 export class RealWeatherField {
-  constructor({ longitudes, latitudes, mmh, thunderstormCode, hailCode, rainMmh, storm, hail, sourceRowCount, longitudeSpacing, latitudeSpacing, frameIndex = 0, timestamp = null }) {
+  constructor({ longitudes, latitudes, mmh, phenomenaCode = null, thunderstormCode, hailCode, rainMmh, storm, hail, sourceRowCount, longitudeSpacing, latitudeSpacing, frameIndex = 0, timestamp = null }) {
     this.longitudes = longitudes;
     this.latitudes = latitudes;
     this.mmh = mmh;
+    this.phenomenaCode = phenomenaCode;
     this.thunderstormCode = thunderstormCode;
     this.hailCode = hailCode;
     this.rainMmh = rainMmh;
@@ -135,6 +169,7 @@ export class RealWeatherField {
       lon: this.longitudes[longitudeIndex],
       lat: this.latitudes[latitudeIndex],
       mmh: this.mmh[index],
+      phenomenon: this.phenomenaCode?.[index] ?? 0,
       thunderstorm: this.thunderstormCode[index],
       hail: this.hailCode[index]
     };
@@ -322,12 +357,10 @@ export class RealWeatherSequenceFrame {
     this.frame0 = frame0;
     this.frame1 = frame1;
     this.progress = progress;
-    // This explicit capability is limited to the current rain-only sequence;
-    // generic fields must continue through the full channel-aware path.
-    this.supportsRainOnlyPreparedTemporalSampling = true;
-    this.weatherSummaryProfile = 'rain-only-display';
-    this.stormAvailable = false;
-    this.hailAvailable = false;
+    this.supportsRainOnlyPreparedTemporalSampling = !sequence.phenomenaAvailable;
+    this.weatherSummaryProfile = sequence.phenomenaAvailable ? 'generic' : 'rain-only-display';
+    this.stormAvailable = sequence.phenomenaAvailable;
+    this.hailAvailable = sequence.phenomenaAvailable;
   }
 
   isSamplingGeometryCompatible(geometry) {
@@ -364,7 +397,7 @@ export class RealWeatherSequenceFrame {
 }
 
 export class RealWeatherSequence extends RealWeatherField {
-  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, frameCount, longitudeSpacing, latitudeSpacing, weatherSupport = null, timestamps, potentialWeatherMask = null, generationId = null, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
+  constructor({ longitudes, latitudes, rainFramesMmh = null, sourceFrames = null, phenomenaFrames = null, frameCount, longitudeSpacing, latitudeSpacing, weatherSupport = null, timestamps, potentialWeatherMask = null, generationId = null, phenomenaAvailable = false, sourceFrameCacheLimit = DEFAULT_SOURCE_FRAME_CACHE_LIMIT, retainAllSourceFrames = false, onSourceFrameCacheEvent = null }) {
     const frameSize = longitudes.length * latitudes.length;
     const emptyCodes = new Uint8Array(frameSize);
     const emptyChannel = new Float32Array(frameSize);
@@ -373,6 +406,7 @@ export class RealWeatherSequence extends RealWeatherField {
       longitudes,
       latitudes,
       mmh: firstFrame,
+      phenomenaCode: emptyCodes,
       thunderstormCode: emptyCodes,
       hailCode: emptyCodes,
       rainMmh: firstFrame,
@@ -387,6 +421,7 @@ export class RealWeatherSequence extends RealWeatherField {
     this.frameSize = frameSize;
     this.timestamps = Object.freeze([...timestamps]);
     this.generationId = generationId;
+    this.phenomenaAvailable = Boolean(phenomenaAvailable);
     this.sourceFrameCacheLimit = sourceFrameCacheLimit;
     this.retainAllSourceFrames = Boolean(retainAllSourceFrames);
     this.onSourceFrameCacheEvent = typeof onSourceFrameCacheEvent === 'function' ? onSourceFrameCacheEvent : null;
@@ -394,6 +429,7 @@ export class RealWeatherSequence extends RealWeatherField {
       throw new Error('Real weather sequence source-frame cache limit must be an integer of at least 2.');
     }
     this.sourceFrames = new Map();
+    this.phenomenaFrames = new Map();
     this.validatedSourceFrames = new Set();
     if (rainFramesMmh) {
       if (rainFramesMmh.length !== frameCount * frameSize) throw new Error('Real weather sequence rain frame buffer does not match the declared dimensions.');
@@ -403,7 +439,10 @@ export class RealWeatherSequence extends RealWeatherField {
       }
     } else if (sourceFrames) {
       const entries = sourceFrames instanceof Map ? sourceFrames.entries() : sourceFrames.entries();
-      for (const [frameIndex, values] of entries) this.addSourceFrame(frameIndex, values, { validated: true });
+      for (const [frameIndex, values] of entries) {
+        const phenomenonValues = phenomenaFrames instanceof Map ? phenomenaFrames.get(frameIndex) : phenomenaFrames?.[frameIndex];
+        this.addSourceFrame(frameIndex, values, { phenomenaValues: phenomenonValues, validated: true });
+      }
     }
     // A source node can only contribute positive reconstructed rain when at
     // least one of the four nodes in its bilinear stencil is positive. This
@@ -439,8 +478,18 @@ export class RealWeatherSequence extends RealWeatherField {
     return values;
   }
 
+  phenomenaFrameAt(frameIndex) {
+    if (!this.phenomenaAvailable) return null;
+    if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= this.frameCount) {
+      throw new RangeError(`Source frame index must be an integer from 0 to ${this.frameCount - 1}.`);
+    }
+    const values = this.phenomenaFrames.get(frameIndex);
+    if (!values) throw new Error(`Real weather phenomena frame ${frameIndex} is not available.`);
+    return values;
+  }
+
   isSourceFrameAvailable(frameIndex) {
-    return this.sourceFrames.has(frameIndex);
+    return this.sourceFrames.has(frameIndex) && (!this.phenomenaAvailable || this.phenomenaFrames.has(frameIndex));
   }
 
   residentSourceFrameIndices() {
@@ -456,16 +505,24 @@ export class RealWeatherSequence extends RealWeatherField {
     return this.requiredSourceFrames(time).every((frameIndex) => this.isSourceFrameAvailable(frameIndex));
   }
 
-  addSourceFrame(frameIndex, values, { validated = false } = {}) {
+  addSourceFrame(frameIndex, values, { phenomenaValues = null, validated = false } = {}) {
     if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= this.frameCount) throw new RangeError(`Source frame index must be an integer from 0 to ${this.frameCount - 1}.`);
     if (!(values instanceof Float32Array) || values.length !== this.frameSize) throw new Error(`Real weather source frame ${frameIndex} does not match the source-grid node count.`);
+    if (this.phenomenaAvailable && (!(phenomenaValues instanceof Uint8Array) || phenomenaValues.length !== this.frameSize)) {
+      throw new Error(`Real weather phenomena frame ${frameIndex} does not match the source-grid node count.`);
+    }
     this.sourceFrames.delete(frameIndex);
     this.sourceFrames.set(frameIndex, values);
+    if (this.phenomenaAvailable) {
+      this.phenomenaFrames.delete(frameIndex);
+      this.phenomenaFrames.set(frameIndex, phenomenaValues);
+    }
     if (validated) this.validatedSourceFrames.add(frameIndex);
     if (!this.retainAllSourceFrames) {
       while (this.sourceFrames.size > this.sourceFrameCacheLimit) {
         const evictedFrameIndex = this.sourceFrames.keys().next().value;
         this.sourceFrames.delete(evictedFrameIndex);
+        this.phenomenaFrames.delete(evictedFrameIndex);
         this.onSourceFrameCacheEvent?.({ type: 'eviction', frameIndex: evictedFrameIndex });
       }
     }
@@ -586,15 +643,20 @@ export class RealWeatherSequence extends RealWeatherField {
       throw new RangeError(`Source frame index must be an integer from 0 to ${this.frameCount - 1}.`);
     }
     const frameValues = this.sourceFrameAt(frameIndex);
+    const phenomenonValues = this.phenomenaAvailable ? this.phenomenaFrameAt(frameIndex) : null;
+    const presentation = this.phenomenaAvailable
+      ? presentationChannelsForPhenomena(phenomenonValues)
+      : { thunderstormCode: new Uint8Array(this.frameSize), hailCode: new Uint8Array(this.frameSize), storm: new Float32Array(this.frameSize), hail: new Float32Array(this.frameSize) };
     const frame = new RealWeatherField({
       longitudes: this.longitudes,
       latitudes: this.latitudes,
       mmh: frameValues,
-      thunderstormCode: this.thunderstormCode,
-      hailCode: this.hailCode,
+      phenomenaCode: phenomenonValues,
+      thunderstormCode: presentation.thunderstormCode,
+      hailCode: presentation.hailCode,
       rainMmh: frameValues,
-      storm: this.storm,
-      hail: this.hail,
+      storm: presentation.storm,
+      hail: presentation.hail,
       sourceRowCount: this.frameSize,
       longitudeSpacing: this.longitudeSpacing,
       latitudeSpacing: this.latitudeSpacing,
@@ -665,7 +727,62 @@ export class RealWeatherSequence extends RealWeatherField {
     return values;
   }
 
+  preparedSourceWeatherFrame(geometry, frameIndex) {
+    if (!geometry.spatialWeatherCache) geometry.spatialWeatherCache = new Map();
+    const cached = geometry.spatialWeatherCache.get(frameIndex);
+    if (cached !== undefined) {
+      geometry.spatialWeatherCache.delete(frameIndex);
+      geometry.spatialWeatherCache.set(frameIndex, cached);
+      return cached;
+    }
+    const activeIndices = geometry.potentialActiveIndices || new Uint32Array(0);
+    const rain = this.preparedSourceFrame(geometry, frameIndex);
+    const storm = new Float64Array(activeIndices.length);
+    const hail = new Float64Array(activeIndices.length);
+    const phenomena = this.phenomenaFrameAt(frameIndex);
+    for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
+      const index = activeIndices[activeIndex];
+      let baseIndex;
+      let longitudeFraction;
+      let latitudeFraction;
+      if (geometry.kind === COMPACT_RECTANGULAR_GEOMETRY) {
+        const column = index % geometry.width;
+        const row = (index - column) / geometry.width;
+        baseIndex = geometry.sourceRowBase[row] + geometry.sourceColumn[column];
+        longitudeFraction = geometry.longitudeFraction[column];
+        latitudeFraction = geometry.latitudeFraction[row];
+      } else {
+        baseIndex = geometry.baseIndex[index];
+        longitudeFraction = geometry.longitudeFraction[index];
+        latitudeFraction = geometry.latitudeFraction[index];
+      }
+      const x1y0 = baseIndex + 1;
+      const x0y1 = baseIndex + geometry.sourceWidth;
+      const x1y1 = x0y1 + 1;
+      storm[activeIndex] = interpolateCategoricalSeverity(phenomena, THUNDERSTORM_LEVELS, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
+      hail[activeIndex] = interpolateCategoricalSeverity(phenomena, { 0: 0, 13: HAIL_LEVELS[13], 14: HAIL_LEVELS[14], 15: HAIL_LEVELS[15] }, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
+    }
+    const result = { rain, storm, hail };
+    geometry.spatialWeatherCache.set(frameIndex, result);
+    while (geometry.spatialWeatherCache.size > SPATIAL_RAIN_CACHE_LIMIT) {
+      const oldestFrameIndex = geometry.spatialWeatherCache.keys().next().value;
+      geometry.spatialWeatherCache.delete(oldestFrameIndex);
+    }
+    return result;
+  }
+
   prepareTemporalSampling(frame, geometry) {
+    if (this.phenomenaAvailable) {
+      const weather0 = this.preparedSourceWeatherFrame(geometry, frame.frame0);
+      const weather1 = this.preparedSourceWeatherFrame(geometry, frame.frame1);
+      const progress = frame.progress;
+      return (activeIndex, output = {}) => {
+        output.rainMmh = weather0.rain[activeIndex] + (weather1.rain[activeIndex] - weather0.rain[activeIndex]) * progress;
+        output.storm = weather0.storm[activeIndex] + (weather1.storm[activeIndex] - weather0.storm[activeIndex]) * progress;
+        output.hail = weather0.hail[activeIndex] + (weather1.hail[activeIndex] - weather0.hail[activeIndex]) * progress;
+        return output;
+      };
+    }
     const rain0 = this.preparedSourceFrame(geometry, frame.frame0);
     const rain1 = this.preparedSourceFrame(geometry, frame.frame1);
     const progress = frame.progress;
@@ -714,6 +831,12 @@ export class RealWeatherSequence extends RealWeatherField {
       const rain0 = this.preparedSourceFrame(geometry, frame.frame0)[activeIndex];
       const rain1 = this.preparedSourceFrame(geometry, frame.frame1)[activeIndex];
       output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
+      if (this.phenomenaAvailable) {
+        const weather0 = this.preparedSourceWeatherFrame(geometry, frame.frame0);
+        const weather1 = this.preparedSourceWeatherFrame(geometry, frame.frame1);
+        output.storm = weather0.storm[activeIndex] + (weather1.storm[activeIndex] - weather0.storm[activeIndex]) * frame.progress;
+        output.hail = weather0.hail[activeIndex] + (weather1.hail[activeIndex] - weather0.hail[activeIndex]) * frame.progress;
+      }
       return output;
     }
     const x1y0 = baseIndex + 1;
@@ -722,6 +845,17 @@ export class RealWeatherSequence extends RealWeatherField {
     const rain0 = this.interpolateRain(frame.frame0, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
     const rain1 = this.interpolateRain(frame.frame1, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
     output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
+    if (this.phenomenaAvailable) {
+      const interpolatePhenomena = (levels) => {
+        const phenomena0 = this.phenomenaFrameAt(frame.frame0);
+        const phenomena1 = this.phenomenaFrameAt(frame.frame1);
+        const value0 = interpolateCategoricalSeverity(phenomena0, levels, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
+        const value1 = interpolateCategoricalSeverity(phenomena1, levels, baseIndex, x1y0, x0y1, x1y1, longitudeFraction, latitudeFraction);
+        return value0 + (value1 - value0) * frame.progress;
+      };
+      output.storm = interpolatePhenomena(THUNDERSTORM_LEVELS);
+      output.hail = interpolatePhenomena({ 0: 0, 13: HAIL_LEVELS[13], 14: HAIL_LEVELS[14], 15: HAIL_LEVELS[15] });
+    }
     return output;
   }
 
@@ -740,6 +874,15 @@ export class RealWeatherSequence extends RealWeatherField {
     const rain0 = this.interpolateRain(frame.frame0, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
     const rain1 = this.interpolateRain(frame.frame1, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
     output.rainMmh = rain0 + (rain1 - rain0) * frame.progress;
+    if (this.phenomenaAvailable) {
+      const interpolatePhenomena = (levels) => {
+        const value0 = interpolateCategoricalSeverity(this.phenomenaFrameAt(frame.frame0), levels, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
+        const value1 = interpolateCategoricalSeverity(this.phenomenaFrameAt(frame.frame1), levels, baseIndex, x1y0, x0y1, x1y1, x.fraction, y.fraction);
+        return value0 + (value1 - value0) * frame.progress;
+      };
+      output.storm = interpolatePhenomena(THUNDERSTORM_LEVELS);
+      output.hail = interpolatePhenomena({ 0: 0, 13: HAIL_LEVELS[13], 14: HAIL_LEVELS[14], 15: HAIL_LEVELS[15] });
+    }
     return output;
   }
 }
@@ -884,7 +1027,7 @@ function validateSequenceMetadata(metadata) {
   if (sequenceInteger(supportMask.node_count, 'support_mask.node_count') !== frameNodeCount) failSequence('support_mask.node_count does not match the spatial grid.');
   const expectedSupportByteCount = Math.ceil(frameNodeCount / 8);
   if (sequenceInteger(supportMask.byte_length, 'support_mask.byte_length') !== expectedSupportByteCount) failSequence('support_mask.byte_length does not match the packed node count.');
-  assertSequenceEqual(supportMask.positive_condition, 'rain > 0', 'support_mask.positive_condition');
+  assertSequenceEqual(supportMask.potential_weather_condition, 'rain > 0 or phenomenon code in 1..19', 'support_mask.potential_weather_condition');
   assertSequenceEqual(supportMask.trailing_unused_bits, 'zero', 'support_mask.trailing_unused_bits');
 
   const longitudeStart = sequenceNumber(grid.longitude_start, 'spatial_grid.longitude_start');
@@ -911,19 +1054,29 @@ function validateSequenceMetadata(metadata) {
     failSequence('spatial_grid.weather_support must be contained by the source grid.');
   }
   assertSequenceEqual(source.normalized_units, 'mm/h', 'source.normalized_units');
-  const phenomena = root.phenomena === undefined ? null : objectAt(root.phenomena, 'phenomena');
-  if (phenomena) {
-    if (typeof phenomena.available !== 'boolean') failSequence('phenomena.available must be boolean.');
-    assertSequenceEqual(phenomena.dtype, 'Uint8', 'phenomena.dtype');
-    if (phenomena.byte_order !== undefined) failSequence('phenomena.byte_order must be omitted for Uint8 phenomena.');
-    if (!phenomena.enum || typeof phenomena.enum !== 'object') failSequence('phenomena.enum must be an object.');
-    for (const [name, value] of Object.entries(PHENOMENON_ENUM)) assertSequenceEqual(phenomena.enum[name], value, `phenomena.enum.${name}`);
-    if (phenomena.available) {
-      if (!Array.isArray(phenomena.frame_assets) || phenomena.frame_assets.length !== frameCount) failSequence('available phenomena.frame_assets must contain one asset per source frame.');
-      if (sequenceInteger(phenomena.frame_byte_length, 'phenomena.frame_byte_length') !== frameNodeCount) failSequence('phenomena.frame_byte_length must equal the source node count.');
-    } else if (phenomena.frame_assets !== undefined && (!Array.isArray(phenomena.frame_assets) || phenomena.frame_assets.length !== 0)) {
-      failSequence('unavailable phenomena.frame_assets must be empty when present.');
-    }
+  if (root.phenomena === undefined) failSequence('phenomena metadata is required in transport v3.');
+  const phenomena = objectAt(root.phenomena, 'phenomena');
+  if (typeof phenomena.available !== 'boolean') failSequence('phenomena.available must be boolean.');
+  assertSequenceEqual(phenomena.dtype, 'Uint8', 'phenomena.dtype');
+  if (phenomena.byte_order !== undefined) failSequence('phenomena.byte_order must be omitted for Uint8 phenomena.');
+  if (phenomena.provider !== 'GIMET-2010') failSequence('phenomena.provider must be GIMET-2010.');
+  if (!Array.isArray(phenomena.logical_dimensions) || JSON.stringify(phenomena.logical_dimensions) !== JSON.stringify(['latitude', 'longitude'])) {
+    failSequence('phenomena.logical_dimensions must be ["latitude", "longitude"].');
+  }
+  if (!phenomena.codebook || typeof phenomena.codebook !== 'object' || Array.isArray(phenomena.codebook)) failSequence('phenomena.codebook must be an object.');
+  const codebookKeys = Object.keys(phenomena.codebook).sort((left, right) => Number(left) - Number(right));
+  const expectedCodebookKeys = Object.keys(PHENOMENON_CODEBOOK).sort((left, right) => Number(left) - Number(right));
+  if (JSON.stringify(codebookKeys) !== JSON.stringify(expectedCodebookKeys)) failSequence('phenomena.codebook must contain exactly the GIMET-2010 codes.');
+  for (const [code, label] of Object.entries(PHENOMENON_CODEBOOK)) assertSequenceEqual(phenomena.codebook[code], label, `phenomena.codebook.${code}`);
+  if (JSON.stringify(phenomena.background_codes) !== JSON.stringify([0])) failSequence('phenomena.background_codes must be [0].');
+  assertSequenceEqual(phenomena.missing_code, 31, 'phenomena.missing_code');
+  if (JSON.stringify(phenomena.support_codes) !== JSON.stringify(PHENOMENON_SUPPORT_CODES)) failSequence('phenomena.support_codes must be codes 1..19.');
+  if (phenomena.available) {
+    if (!Array.isArray(phenomena.frame_assets) || phenomena.frame_assets.length !== frameCount) failSequence('available phenomena.frame_assets must contain one asset per source frame.');
+    for (const [index, asset] of phenomena.frame_assets.entries()) sequenceString(asset, `phenomena.frame_assets[${index}]`);
+    if (sequenceInteger(phenomena.frame_byte_length, 'phenomena.frame_byte_length') !== frameNodeCount) failSequence('phenomena.frame_byte_length must equal the source node count.');
+  } else if (phenomena.frame_assets !== undefined && (!Array.isArray(phenomena.frame_assets) || phenomena.frame_assets.length !== 0)) {
+    failSequence('unavailable phenomena.frame_assets must be empty when present.');
   }
   if (channels.phenomena !== Boolean(phenomena?.available)) failSequence('channels.phenomena must match phenomena availability.');
 
@@ -932,7 +1085,10 @@ function validateSequenceMetadata(metadata) {
     longitudeStart, latitudeStart, longitudeSpacing, latitudeSpacing,
     weatherSupport: Object.freeze(supportBounds), timestamps: time.timestamps,
     rainFrameAssets: Object.freeze([...rain.frame_assets]), supportMaskAsset: supportMask.asset,
-    phenomenaAvailable: Boolean(phenomena?.available), generationId
+    phenomenaFrameAssets: Object.freeze(phenomena?.available ? [...phenomena.frame_assets] : []),
+    phenomenaAvailable: Boolean(phenomena?.available), generationId,
+    expectedPhenomenaByteCount: frameNodeCount,
+    expectedSourceFrameByteCount: expectedFrameByteCount + (phenomena?.available ? frameNodeCount : 0)
   };
 }
 
@@ -986,6 +1142,12 @@ function validateRainSourceFrame(values, frameIndex) {
   for (let index = 0; index < values.length; index++) {
     const value = values[index];
     if (!Number.isFinite(value) || value < 0) failSequence(`rain frame ${frameIndex} has an invalid value at element ${index}.`);
+  }
+}
+
+function validatePhenomenaSourceFrame(values, frameIndex) {
+  for (let index = 0; index < values.length; index++) {
+    if (!Object.hasOwn(PHENOMENON_CODEBOOK, values[index])) failSequence(`phenomena frame ${frameIndex} has an unsupported code ${values[index]} at element ${index}.`);
   }
 }
 
@@ -1274,6 +1436,7 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
       longitudeSpacing: validated.longitudeSpacing, latitudeSpacing: validated.latitudeSpacing,
       weatherSupport: validated.weatherSupport,
       timestamps: validated.timestamps, potentialWeatherMask, generationId: validated.generationId,
+      phenomenaAvailable: validated.phenomenaAvailable,
       sourceFrameCacheLimit, retainAllSourceFrames,
       onSourceFrameCacheEvent: (event) => scheduler?.recordCacheEvent(event)
     });
@@ -1290,25 +1453,35 @@ export function beginRealWeatherSequenceLoad(metadataUrl, { onTiming = null, onR
       isAvailable: (frameIndex) => sequence.isSourceFrameAvailable(frameIndex),
       getSourceCacheEntryCount: () => sequence.sourceFrames.size,
       getResidentSourceFrameIndices: () => sequence.residentSourceFrameIndices(),
-      sourceFrameByteLength: validated.expectedFrameByteCount,
+      sourceFrameByteLength: validated.expectedSourceFrameByteCount,
       retainAllSourceFrames: sequence.retainAllSourceFrames,
       onResidencyChange,
       async fetchFrame(frameIndex) {
-      timing(`weather-frame-${frameIndex}-fetch-start`);
-      const response = await fetchSequenceAsset(resolveSequenceAssetUrl(metadataUrl, validated.rainFrameAssets[frameIndex]));
-      timing(`weather-frame-${frameIndex}-fetch-headers`);
-      const buffer = await response.arrayBuffer();
-      timing(`weather-frame-${frameIndex}-body-complete`);
-      if (buffer.byteLength !== validated.expectedFrameByteCount) failSequence(`rain frame ${frameIndex} byte length is ${buffer.byteLength}, expected ${validated.expectedFrameByteCount}.`);
-      const values = new Float32Array(buffer);
-      if (values.length !== validated.frameNodeCount) failSequence(`rain frame ${frameIndex} element count does not match metadata.`);
-      // A re-downloaded logical frame is new transport input. Validate every
-      // payload rather than trusting that an earlier cache entry shared its bytes.
-      scheduler.recordValidationScan();
-      validateRainSourceFrame(values, frameIndex);
-      sequence.addSourceFrame(frameIndex, values, { validated: true });
-      timing(`weather-frame-${frameIndex}-validation-complete`);
-      return values;
+        timing(`weather-frame-${frameIndex}-fetch-start`);
+        const rainResponse = await fetchSequenceAsset(resolveSequenceAssetUrl(metadataUrl, validated.rainFrameAssets[frameIndex]));
+        timing(`weather-frame-${frameIndex}-rain-fetch-headers`);
+        const rainBuffer = await rainResponse.arrayBuffer();
+        if (rainBuffer.byteLength !== validated.expectedFrameByteCount) failSequence(`rain frame ${frameIndex} byte length is ${rainBuffer.byteLength}, expected ${validated.expectedFrameByteCount}.`);
+        const values = new Float32Array(rainBuffer);
+        if (values.length !== validated.frameNodeCount) failSequence(`rain frame ${frameIndex} element count does not match metadata.`);
+        let phenomenonValues = null;
+        if (validated.phenomenaAvailable) {
+          const phenomenonResponse = await fetchSequenceAsset(resolveSequenceAssetUrl(metadataUrl, validated.phenomenaFrameAssets[frameIndex]));
+          timing(`weather-frame-${frameIndex}-phenomena-fetch-headers`);
+          const phenomenonBuffer = await phenomenonResponse.arrayBuffer();
+          if (phenomenonBuffer.byteLength !== validated.expectedPhenomenaByteCount) failSequence(`phenomena frame ${frameIndex} byte length is ${phenomenonBuffer.byteLength}, expected ${validated.expectedPhenomenaByteCount}.`);
+          phenomenonValues = new Uint8Array(phenomenonBuffer);
+          if (phenomenonValues.length !== validated.frameNodeCount) failSequence(`phenomena frame ${frameIndex} element count does not match metadata.`);
+          validatePhenomenaSourceFrame(phenomenonValues, frameIndex);
+        }
+        timing(`weather-frame-${frameIndex}-body-complete`);
+        // A re-downloaded logical frame is new transport input. Validate every
+        // payload rather than trusting that an earlier cache entry shared its bytes.
+        scheduler.recordValidationScan();
+        validateRainSourceFrame(values, frameIndex);
+        sequence.addSourceFrame(frameIndex, values, { phenomenaValues: phenomenonValues, validated: true });
+        timing(`weather-frame-${frameIndex}-validation-complete`);
+        return values;
       }
     });
     return scheduler;

@@ -541,20 +541,23 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
   const activeIndices = samplingGeometry?.potentialActiveIndices ?? null;
   if (levelData.level > WEATHER_REFERENCE_LEVEL && activeIndices) {
     const state = createPackedDirectWeatherState(levelData, activeIndices, ArrayType, profile, reusable);
-    const temporalRain = frame?.supportsRainOnlyPreparedTemporalSampling === true
+    const temporalSampling = samplingGeometry && typeof frame.prepareTemporalSampling === 'function'
       ? geographicPrepareTemporalSampling(frame, samplingGeometry)
       : null;
-    const batchRain = !temporalRain && samplingGeometry && typeof frame.samplePreparedBatch === 'function'
+    const batchRain = !temporalSampling && samplingGeometry && typeof frame.samplePreparedBatch === 'function'
       ? geographicPreparedIntensityAtGeometryBatch(frame, samplingGeometry)
       : null;
     const value = { rainMmh: 0, storm: 0, hail: 0 };
     const storedValue = ArrayType === Float32Array ? Math.fround : (number) => number;
     for (let activeIndex = 0; activeIndex < activeIndices.length; activeIndex++) {
       const index = activeIndices[activeIndex];
-      if (temporalRain) {
-        value.rainMmh = temporalRain(activeIndex);
-        value.storm = 0;
-        value.hail = 0;
+      if (temporalSampling) {
+        const sampled = temporalSampling(activeIndex, value);
+        if (typeof sampled === 'number') {
+          value.rainMmh = sampled;
+          value.storm = 0;
+          value.hail = 0;
+        }
       } else if (batchRain) {
         value.rainMmh = batchRain[activeIndex];
         value.storm = 0;
@@ -589,21 +592,24 @@ export function evaluateDirectWeatherSummary(levelData, frame, reusable = null, 
   }
   summary.potentialActiveIndices = activeIndices;
   summary.potentialActiveIndicesInitialized = true;
-  const temporalRain = samplingGeometry && activeIndices
-    && frame?.supportsRainOnlyPreparedTemporalSampling === true
+  const temporalSampling = samplingGeometry && activeIndices
+    && typeof frame.prepareTemporalSampling === 'function'
     ? geographicPrepareTemporalSampling(frame, samplingGeometry)
     : null;
-  const batchRain = !temporalRain && samplingGeometry && activeIndices && typeof frame.samplePreparedBatch === 'function'
+  const batchRain = !temporalSampling && samplingGeometry && activeIndices && typeof frame.samplePreparedBatch === 'function'
     ? geographicPreparedIntensityAtGeometryBatch(frame, samplingGeometry)
     : null;
   const value = { rainMmh: 0, storm: 0, hail: 0 };
   const count = activeIndices ? activeIndices.length : levelData.count;
   for (let activeIndex = 0; activeIndex < count; activeIndex++) {
     const index = activeIndices ? activeIndices[activeIndex] : activeIndex;
-    if (temporalRain) {
-      value.rainMmh = temporalRain(activeIndex);
-      value.storm = 0;
-      value.hail = 0;
+    if (temporalSampling) {
+      const sampled = temporalSampling(activeIndex, value);
+      if (typeof sampled === 'number') {
+        value.rainMmh = sampled;
+        value.storm = 0;
+        value.hail = 0;
+      }
     } else if (batchRain) {
       value.rainMmh = batchRain[activeIndex];
       value.storm = 0;

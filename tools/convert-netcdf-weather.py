@@ -39,9 +39,34 @@ CSV_COLUMNS = ("lon", "lat", "mmh", "thunderstorm", "hail")
 REGULAR_SPACING_TOLERANCE = 2e-5
 FLOAT_FORMAT = ".9g"
 COORDINATE_FORMAT = ".17g"
-SEQUENCE_SCHEMA_VERSION = "dot-field-weather-transport-v2"
+SEQUENCE_SCHEMA_VERSION = "dot-field-weather-transport-v3"
 SEQUENCE_HALO_CELLS = 1
 DEFAULT_AVAILABILITY_PATH = Path("data/availability/available_region_latest.json")
+PHENOMENON_CODEBOOK = {
+    0: "no radio echo",
+    1: "upper/mid-level cloud",
+    2: "stratiform cloud",
+    3: "weak precipitation",
+    4: "moderate precipitation",
+    5: "strong precipitation",
+    6: "convective cloud",
+    7: "weak shower",
+    8: "moderate shower",
+    9: "strong shower",
+    10: "thunderstorm probability 30-70%",
+    11: "thunderstorm probability 71-90%",
+    12: "thunderstorm probability >90%",
+    13: "weak hail",
+    14: "moderate hail",
+    15: "strong hail",
+    16: "weak squall",
+    17: "moderate squall",
+    18: "strong squall",
+    19: "tornado",
+    31: "missing / NoData",
+}
+PHENOMENON_VALID_CODES = frozenset(PHENOMENON_CODEBOOK)
+PHENOMENON_SUPPORT_CODES = frozenset(range(1, 20))
 
 
 def parser() -> argparse.ArgumentParser:
@@ -283,7 +308,7 @@ def build_metadata(
     }
 
 
-def validate_source_contract(dataset: Any) -> tuple[Any, Any, Any, Any]:
+def validate_source_contract(dataset: Any) -> tuple[Any, Any, Any, Any, Any | None]:
     required = ("time", "lon", "lat", "intensity")
     missing = [name for name in required if name not in dataset.variables]
     if missing:
@@ -300,7 +325,17 @@ def validate_source_contract(dataset: Any) -> tuple[Any, Any, Any, Any]:
         raise ValueError(
             f"intensity has dimensions {precipitation.dimensions}; expected ('time', 'y', 'x')"
         )
-    return time_variable, longitude_variable, latitude_variable, precipitation
+    phenomena = dataset.variables.get("phenomena")
+    if phenomena is not None:
+        if phenomena.dimensions != ("time", "y", "x"):
+            raise ValueError(
+                f"phenomena has dimensions {phenomena.dimensions}; expected ('time', 'y', 'x')"
+            )
+        if phenomena.shape != precipitation.shape:
+            raise ValueError(
+                f"phenomena shape {phenomena.shape} does not match intensity shape {precipitation.shape}"
+            )
+    return time_variable, longitude_variable, latitude_variable, precipitation, phenomena
 
 
 def write_csv(
@@ -364,19 +399,19 @@ def decode_times(time_variable: Any, time_values: np.ndarray) -> list[str]:
 def source_grid_crop(
     longitudes: np.ndarray,
     latitudes: np.ndarray,
-    union_nonzero: np.ndarray,
+    union_support: np.ndarray,
 ) -> dict[str, Any]:
-    wet_y, wet_x = np.nonzero(union_nonzero)
-    if not len(wet_x):
-        raise ValueError("the full precipitation sequence contains no positive source values")
-    wet_x0 = int(wet_x.min())
-    wet_x1 = int(wet_x.max())
-    wet_y0 = int(wet_y.min())
-    wet_y1 = int(wet_y.max())
-    support_x0 = wet_x0 - SEQUENCE_HALO_CELLS
-    support_x1 = wet_x1 + SEQUENCE_HALO_CELLS
-    support_y0 = wet_y0 - SEQUENCE_HALO_CELLS
-    support_y1 = wet_y1 + SEQUENCE_HALO_CELLS
+    weather_y, weather_x = np.nonzero(union_support)
+    if not len(weather_x):
+        raise ValueError("the full weather sequence contains no positive rain or retained phenomena")
+    weather_x0 = int(weather_x.min())
+    weather_x1 = int(weather_x.max())
+    weather_y0 = int(weather_y.min())
+    weather_y1 = int(weather_y.max())
+    support_x0 = weather_x0 - SEQUENCE_HALO_CELLS
+    support_x1 = weather_x1 + SEQUENCE_HALO_CELLS
+    support_y0 = weather_y0 - SEQUENCE_HALO_CELLS
+    support_y1 = weather_y1 + SEQUENCE_HALO_CELLS
     x0 = support_x0 - SEQUENCE_HALO_CELLS
     x1 = support_x1 + SEQUENCE_HALO_CELLS
     y0 = support_y0 - SEQUENCE_HALO_CELLS
@@ -386,10 +421,10 @@ def source_grid_crop(
     width = x1 - x0 + 1
     height = y1 - y0 + 1
     return {
-        "wet_x_start": wet_x0,
-        "wet_x_end": wet_x1,
-        "wet_y_start": wet_y0,
-        "wet_y_end": wet_y1,
+        "weather_x_start": weather_x0,
+        "weather_x_end": weather_x1,
+        "weather_y_start": weather_y0,
+        "weather_y_end": weather_y1,
         "x_start": x0,
         "x_end": x1,
         "y_start": y0,
@@ -422,6 +457,33 @@ def read_validated_source_frame(precipitation: Any, time_index: int) -> np.ndarr
     if stats["negative_cells"]:
         raise SystemExit(f"timestep {time_index} contains negative precipitation cells")
     return values
+
+
+def read_validated_phenomena_frame(phenomena: Any, time_index: int) -> np.ndarray:
+    masked_values = np.ma.asarray(phenomena[time_index, :, :])
+    values = np.asarray(masked_values.filled(np.nan), dtype=np.float64)
+    finite = np.isfinite(values)
+    integral = finite & (values == np.floor(values))
+    supported = finite & np.isin(values, list(PHENOMENON_VALID_CODES))
+    invalid = np.isinf(values) | (finite & (~integral | ~supported))
+    if invalid.any():
+        examples = values[invalid][:8].tolist()
+        raise SystemExit(
+            f"timestep {time_index} contains unsupported/non-integral phenomenon values: {examples}"
+        )
+    normalized = np.full(values.shape, 31, dtype=np.uint8)
+    normalized[finite] = values[finite].astype(np.uint8)
+    return normalized
+
+
+def phenomenon_frame_statistics(values: np.ndarray) -> dict[str, Any]:
+    counts = {str(code): int(np.count_nonzero(values == code)) for code in PHENOMENON_CODEBOOK}
+    return {
+        "code_counts": counts,
+        "valid_cells": int(values.size - counts["31"]),
+        "missing_cells": counts["31"],
+        "non_background_cells": int(sum(counts[str(code)] for code in PHENOMENON_SUPPORT_CODES)),
+    }
 
 
 def load_observation_polygons(path: Path) -> tuple[list[list[list[float]]], dict[str, Any]]:
@@ -545,7 +607,12 @@ def sequence_metadata(
     timestamps: list[str],
     crop: dict[str, Any],
     frame_statistics: list[dict[str, Any]],
-    union_nonzero: np.ndarray,
+    phenomena: Any | None,
+    phenomena_frame_statistics: list[dict[str, Any]],
+    union_rain: np.ndarray,
+    union_phenomena: np.ndarray,
+    union_support: np.ndarray,
+    rain_only_crop: dict[str, Any],
     crop_longitudes: np.ndarray,
     crop_latitudes: np.ndarray,
     original_units: str | None,
@@ -558,7 +625,7 @@ def sequence_metadata(
     first_frame_coverage: dict[str, Any] | None,
     per_frame_coverage: list[dict[str, Any] | None],
 ) -> dict[str, Any]:
-    union_y, union_x = np.nonzero(union_nonzero)
+    union_y, union_x = np.nonzero(union_support)
     frame_node_count = crop["node_count"]
     frame_byte_length = frame_node_count * 4
     union_bounds = {
@@ -580,6 +647,9 @@ def sequence_metadata(
             "precipitation_variable": precipitation.name,
             "precipitation_dimensions": list(precipitation.dimensions),
             "precipitation_dtype": str(precipitation.dtype),
+            "phenomena_variable": phenomena.name if phenomena is not None else None,
+            "phenomena_dimensions": list(phenomena.dimensions) if phenomena is not None else None,
+            "phenomena_dtype": str(phenomena.dtype) if phenomena is not None else None,
             "original_units": original_units,
             "normalized_units": "mm/h",
             "unit_basis": unit_basis,
@@ -617,11 +687,11 @@ def sequence_metadata(
                 "y_start": crop["support_y_start"],
                 "y_end": crop["support_y_end"],
             },
-            "union_wet_indices": {
-                "x_start": crop["wet_x_start"],
-                "x_end": crop["wet_x_end"],
-                "y_start": crop["wet_y_start"],
-                "y_end": crop["wet_y_end"],
+            "union_weather_indices": {
+                "x_start": crop["weather_x_start"],
+                "x_end": crop["weather_x_end"],
+                "y_start": crop["weather_y_start"],
+                "y_end": crop["weather_y_end"],
             },
             "crop_bounds": {
                 "west": crop["longitude_start"],
@@ -642,7 +712,7 @@ def sequence_metadata(
             "encoding": "bitset-lsb0",
             "node_count": frame_node_count,
             "byte_length": (frame_node_count + 7) // 8,
-            "positive_condition": "rain > 0",
+            "potential_weather_condition": "rain > 0 or phenomenon code in 1..19",
             "trailing_unused_bits": "zero",
         },
         "rain": {
@@ -655,27 +725,46 @@ def sequence_metadata(
             "frame_byte_length": frame_byte_length,
             "frame_assets": [f"rain/frame-{index:03d}.f32" for index in range(len(timestamps))],
             "union_nonzero_bounds": union_bounds,
-            "union_distinct_nonzero_nodes": int(union_nonzero.sum()),
+            "union_distinct_nonzero_nodes": int(union_rain.sum()),
             "per_frame_statistics": frame_statistics,
         },
         "channels": {
             "rain": True,
-            "phenomena": False,
+            "phenomena": phenomena is not None,
         },
         "phenomena": {
-            "available": False,
+            "available": phenomena is not None,
+            "provider": "GIMET-2010",
             "dtype": "Uint8",
-            "enum": {
-                "none": 0,
-                "thunderstorm_1": 1,
-                "thunderstorm_2": 2,
-                "thunderstorm_3": 3,
-                "hail_1": 4,
-                "hail_2": 5,
-                "hail_3": 6,
-                "reserved": 7,
+            "logical_dimensions": ["latitude", "longitude"],
+            "codebook": {str(code): label for code, label in PHENOMENON_CODEBOOK.items()},
+            "background_codes": [0],
+            "missing_code": 31,
+            "support_codes": list(range(1, 20)),
+            "rendered_codes": {
+                "thunderstorm": {"10": 0.2660123, "11": 0.481875, "12": 0.6977377},
+                "hail": {"13": 0.2776807, "14": 0.48975, "15": 0.7018193},
             },
-            "frame_assets": [],
+            "frame_byte_length": frame_node_count if phenomena is not None else 0,
+            "frame_assets": [f"phenomena/frame-{index:03d}.u8" for index in range(len(timestamps))] if phenomena is not None else [],
+            "union_distinct_non_background_nodes": int(union_phenomena.sum()),
+            "per_frame_statistics": phenomena_frame_statistics,
+        },
+        "crop_comparison": {
+            "previous_rain_only": {
+                "width": int(rain_only_crop["width"]),
+                "height": int(rain_only_crop["height"]),
+                "node_count": int(rain_only_crop["node_count"]),
+                "raw_rain_bytes_per_frame": int(rain_only_crop["node_count"] * 4),
+                "phenomena_bytes_per_frame": 0,
+            },
+            "current_union_support": {
+                "width": int(crop["width"]),
+                "height": int(crop["height"]),
+                "node_count": int(crop["node_count"]),
+                "raw_rain_bytes_per_frame": int(crop["node_count"] * 4),
+                "phenomena_bytes_per_frame": int(crop["node_count"] if phenomena is not None else 0),
+            },
         },
         "observation_coverage_diagnostic": {
             **observation,
@@ -706,7 +795,7 @@ def convert_sequence(args: argparse.Namespace) -> int:
         observation = unavailable_observation_diagnostic(availability_path)
     with Dataset(source, "r") as dataset:
         dataset.set_auto_mask(True)
-        time_variable, longitude_variable, latitude_variable, precipitation = validate_source_contract(dataset)
+        time_variable, longitude_variable, latitude_variable, precipitation, phenomena = validate_source_contract(dataset)
         original_units, unit_basis, factor, conversion = resolve_precipitation_units(precipitation, args.assume_units)
         time_values = np.asarray(time_variable[:])
         timestamps = decode_times(time_variable, time_values)
@@ -718,15 +807,23 @@ def convert_sequence(args: argparse.Namespace) -> int:
         latitudes = np.asarray(latitude_variable[:], dtype=np.float64)
         longitude_spacing, _ = coordinate_spacing(longitudes, "longitude")
         latitude_spacing, _ = coordinate_spacing(latitudes, "latitude")
-        union_nonzero = np.zeros((latitudes.size, longitudes.size), dtype=bool)
+        union_rain = np.zeros((latitudes.size, longitudes.size), dtype=bool)
+        union_phenomena = np.zeros((latitudes.size, longitudes.size), dtype=bool)
         frame_statistics = []
+        phenomena_frame_statistics = []
         for time_index, timestamp in enumerate(timestamps):
             values = read_validated_source_frame(precipitation, time_index)
             normalized = values * factor
             frame_statistics.append(sequence_frame_statistics(normalized, longitudes, latitudes))
-            union_nonzero |= normalized > 0
+            union_rain |= normalized > 0
+            if phenomena is not None:
+                normalized_phenomena = read_validated_phenomena_frame(phenomena, time_index)
+                phenomena_frame_statistics.append(phenomenon_frame_statistics(normalized_phenomena))
+                union_phenomena |= np.isin(normalized_phenomena, list(PHENOMENON_SUPPORT_CODES))
 
-        crop = source_grid_crop(longitudes, latitudes, union_nonzero)
+        union_support = union_rain | union_phenomena
+        crop = source_grid_crop(longitudes, latitudes, union_support)
+        rain_only_crop = source_grid_crop(longitudes, latitudes, union_rain)
         crop["longitude_spacing"] = longitude_spacing
         crop["latitude_spacing"] = latitude_spacing
         crop_longitudes = longitudes[crop["x_start"]:crop["x_end"] + 1]
@@ -745,9 +842,12 @@ def convert_sequence(args: argparse.Namespace) -> int:
         output_dir = args.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         rain_dir = output_dir / "rain"
+        phenomena_dir = output_dir / "phenomena"
         support_path = output_dir / "support.mask"
         metadata_path = output_dir / "metadata.json"
         rain_dir.mkdir(parents=True, exist_ok=True)
+        if phenomena is not None:
+            phenomena_dir.mkdir(parents=True, exist_ok=True)
         try:
             for time_index, timestamp in enumerate(timestamps):
                 values = read_validated_source_frame(precipitation, time_index)
@@ -761,6 +861,17 @@ def convert_sequence(args: argparse.Namespace) -> int:
                     temporary_frame_path.replace(frame_path)
                 finally:
                     temporary_frame_path.unlink(missing_ok=True)
+                if phenomena is not None:
+                    normalized_phenomena = read_validated_phenomena_frame(phenomena, time_index)
+                    crop_phenomena = normalized_phenomena[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1]
+                    phenomenon_path = phenomena_dir / f"frame-{time_index:03d}.u8"
+                    with NamedTemporaryFile(dir=phenomena_dir, prefix=f".frame-{time_index:03d}.", suffix=".u8.tmp", delete=False) as temporary:
+                        temporary_phenomena_path = Path(temporary.name)
+                    try:
+                        np.asarray(crop_phenomena, dtype=np.uint8, order="C").tofile(temporary_phenomena_path)
+                        temporary_phenomena_path.replace(phenomenon_path)
+                    finally:
+                        temporary_phenomena_path.unlink(missing_ok=True)
                 nonzero = crop_values > 0
                 nonzero_y, nonzero_x = np.nonzero(nonzero)
                 inside = crop_availability[nonzero_y, nonzero_x] if crop_availability is not None else None
@@ -772,7 +883,7 @@ def convert_sequence(args: argparse.Namespace) -> int:
                 })
 
             packed_support = np.packbits(
-                np.asarray(union_nonzero[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1], dtype=np.uint8).ravel(order="C"),
+                np.asarray(union_support[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1], dtype=np.uint8).ravel(order="C"),
                 bitorder="little",
             )
             with NamedTemporaryFile(dir=output_dir, prefix=".support.", suffix=".mask.tmp", delete=False) as temporary:
@@ -791,7 +902,12 @@ def convert_sequence(args: argparse.Namespace) -> int:
                 timestamps,
                 crop,
                 frame_statistics,
-                union_nonzero[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1],
+                phenomena,
+                phenomena_frame_statistics,
+                union_rain[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1],
+                union_phenomena[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1],
+                union_support[crop["y_start"]:crop["y_end"] + 1, crop["x_start"]:crop["x_end"] + 1],
+                rain_only_crop,
                 crop_longitudes,
                 crop_latitudes,
                 original_units,
@@ -813,12 +929,26 @@ def convert_sequence(args: argparse.Namespace) -> int:
             (output_dir / "rain.f32").unlink(missing_ok=True)
 
     print(f"wrote {rain_dir} ({len(timestamps)} x {metadata['rain']['frame_byte_length']} bytes)")
+    if phenomena is not None:
+        print(f"wrote {phenomena_dir} ({len(timestamps)} x {metadata['phenomena']['frame_byte_length']} bytes)")
     print(f"wrote {support_path} ({metadata['support_mask']['byte_length']} bytes)")
     print(f"wrote {metadata_path}")
     print(
         f"sequence {timestamps[0]}..{timestamps[-1]}: "
         f"crop={crop['width']}x{crop['height']} "
         f"union_nonzero_nodes={metadata['rain']['union_distinct_nonzero_nodes']}"
+    )
+    comparison = metadata["crop_comparison"]
+    print(
+        "crop comparison: "
+        f"rain-only={comparison['previous_rain_only']['width']}x{comparison['previous_rain_only']['height']} "
+        f"({comparison['previous_rain_only']['node_count']} nodes, "
+        f"{comparison['previous_rain_only']['raw_rain_bytes_per_frame']} rain bytes, "
+        f"{comparison['previous_rain_only']['phenomena_bytes_per_frame']} phenomena bytes) -> "
+        f"union={comparison['current_union_support']['width']}x{comparison['current_union_support']['height']} "
+        f"({comparison['current_union_support']['node_count']} nodes, "
+        f"{comparison['current_union_support']['raw_rain_bytes_per_frame']} rain bytes, "
+        f"{comparison['current_union_support']['phenomena_bytes_per_frame']} phenomena bytes)"
     )
     if observation["available"]:
         print(
@@ -840,7 +970,7 @@ def convert_csv(args: argparse.Namespace) -> int:
 
     with Dataset(source, "r") as dataset:
         dataset.set_auto_mask(True)
-        time_variable, longitude_variable, latitude_variable, precipitation = validate_source_contract(dataset)
+        time_variable, longitude_variable, latitude_variable, precipitation, _ = validate_source_contract(dataset)
         time_values = np.asarray(time_variable[:])
         if args.time_index < 0 or args.time_index >= time_values.size:
             raise SystemExit(

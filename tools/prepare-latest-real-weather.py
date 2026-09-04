@@ -234,6 +234,21 @@ def validate_generated_directory(directory: Path, expected_generation_id: str | 
         path = resolve_manifest_asset(directory, asset, expected_generation_id)
         if path.stat().st_size != expected_frame_bytes:
             raise SystemExit(f"generated rain frame has the wrong byte length: {path}")
+    phenomena = metadata.get("phenomena") or {}
+    if metadata.get("channels", {}).get("phenomena") != (phenomena.get("available") is True):
+        raise SystemExit("generated phenomena availability does not match channels.phenomena")
+    if phenomena.get("available") is True:
+        phenomenon_assets = phenomena.get("frame_assets")
+        if not isinstance(phenomenon_assets, list) or frame_count != len(phenomenon_assets):
+            raise SystemExit("generated phenomena frame assets do not match the metadata frame count")
+        if phenomena.get("frame_byte_length") != frame_node_count:
+            raise SystemExit("generated phenomena metadata has an invalid frame byte length")
+        for asset in phenomenon_assets:
+            path = resolve_manifest_asset(directory, asset, expected_generation_id)
+            if path.stat().st_size != frame_node_count:
+                raise SystemExit(f"generated phenomena frame has the wrong byte length: {path}")
+    elif phenomena.get("frame_assets") not in (None, []):
+        raise SystemExit("unavailable phenomena frame assets must be empty")
     return metadata
 
 

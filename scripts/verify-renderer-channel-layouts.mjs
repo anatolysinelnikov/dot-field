@@ -1,12 +1,25 @@
 import fs from 'node:fs';
 import { setActiveWeatherField } from '../src/engine/geography.js';
 import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
+import { RealWeatherSequence } from '../src/engine/real-weather.js';
 import { createWeatherSummary, GeographicWeatherPyramid, WEATHER_SUMMARY_PROFILE_GENERIC } from '../src/engine/geographic-weather-pyramid.js';
 import { GeographicLodTopology } from '../src/engine/geographic-lod.js';
 import { GeographicDotsLayer, mapDotsWeatherSummary } from '../src/engine/geographic-dots-layer.js';
 import { GeographicSquaresLayer, mapSquaresWeatherSummary } from '../src/engine/geographic-squares-layer.js';
 
-const { weather } = await loadRealWeatherFixture();
+const { weather: loadedWeather } = await loadRealWeatherFixture();
+const weather = new RealWeatherSequence({
+  longitudes: loadedWeather.longitudes,
+  latitudes: loadedWeather.latitudes,
+  sourceFrames: loadedWeather.sourceFrames,
+  frameCount: loadedWeather.frameCount,
+  longitudeSpacing: loadedWeather.longitudeSpacing,
+  latitudeSpacing: loadedWeather.latitudeSpacing,
+  weatherSupport: loadedWeather.weatherSupport,
+  timestamps: loadedWeather.timestamps,
+  potentialWeatherMask: loadedWeather.potentialWeatherMask,
+  sourceFrameCacheLimit: loadedWeather.sourceFrameCacheLimit
+});
 setActiveWeatherField(weather);
 const topology = new GeographicLodTopology(undefined, { minLevel: 13, maxLevel: 14 });
 const pyramid = new GeographicWeatherPyramid(Float32Array, topology);
