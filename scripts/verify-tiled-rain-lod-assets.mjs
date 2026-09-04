@@ -7,6 +7,7 @@ import { loadRealWeatherFixture } from './real-weather-fixture.mjs';
 import { setActiveWeatherField } from '../src/engine/geography.js';
 import {
   GeographicLodTopology,
+  lngLatToMercator,
   setGeographicWeatherSupport,
   mercatorToLngLat
 } from '../src/engine/geographic-lod.js';
@@ -292,8 +293,18 @@ async function directL14Reference(manifest, levels, weather) {
   const rainBuffer = (await readPayload(rainDescriptor, root)).raw;
   const physicalMax = level.encoding.rain.physical_max_mmh;
   const samples = representativeAxis(extent.min_i, extent.max_i).flatMap((x) => representativeAxis(extent.min_j, extent.max_j).map((y) => ({ x, y })));
+  const phenomena = weather.phenomenaFrames?.get(0);
+  const hazardSourceIndex = phenomena?.findIndex((code) => code >= 10 && code <= 15) ?? -1;
+  if (hazardSourceIndex >= 0) {
+    const sourceX = hazardSourceIndex % weather.longitudes.length;
+    const sourceY = Math.floor(hazardSourceIndex / weather.longitudes.length);
+    const [sourceMercatorX, sourceMercatorY] = lngLatToMercator(weather.longitudes[sourceX], weather.latitudes[sourceY]);
+    samples.push({ x: Math.round(sourceMercatorX * 2 ** 14), y: Math.round(sourceMercatorY * 2 ** 14) });
+  }
+  const hazardBuffers = new Map();
   let checked = 0;
   let maximumError = 0;
+  const maximumHazardErrors = { storm: 0, hail: 0 };
   for (const { x, y } of samples) {
     const tile = tileFor(level, x, y);
     const block = tile.blocks[0];
@@ -304,13 +315,30 @@ async function directL14Reference(manifest, levels, weather) {
     const code = buffer.readUInt16LE(offset * 2);
     const decoded = code === 0 ? Number.NaN : code === 1 ? 0 : (code - 1) / 65534 * physicalMax;
     const [longitude, latitude] = mercatorToLngLat(x / 2 ** 14, y / 2 ** 14);
-    const expected = frame.sample(longitude, latitude, {}).rainMmh;
+    const expectedSample = frame.sample(longitude, latitude, {});
+    const expected = expectedSample.rainMmh;
     const error = Math.abs(decoded - expected);
     compareClose(decoded, expected, `L14 rain ${x},${y}`, physicalMax / 65534 * 0.51 + 1e-5);
     maximumError = Math.max(maximumError, error);
+    for (const channel of ['storm', 'hail']) {
+      const hazardDescriptor = block[channel];
+      let actualHazard = 0;
+      if (hazardDescriptor) {
+        let hazardBuffer = hazardBuffers.get(hazardDescriptor.asset);
+        if (!hazardBuffer) {
+          hazardBuffer = (await readPayload(hazardDescriptor, root)).raw;
+          hazardBuffers.set(hazardDescriptor.asset, hazardBuffer);
+        }
+        actualHazard = hazardBuffer[offset];
+        actualHazard /= 255;
+      }
+      const expectedHazard = expectedSample[channel] || 0;
+      compareClose(actualHazard, expectedHazard, `L14 ${channel} ${x},${y}`, 0.5 / 255 + 1e-6);
+      maximumHazardErrors[channel] = Math.max(maximumHazardErrors[channel], Math.abs(actualHazard - expectedHazard));
+    }
     checked++;
   }
-  return { status: 'passed', checked_samples: checked, maximum_decoded_rain_error_mmh: maximumError };
+  return { status: 'passed', checked_samples: checked, checked_hazard_samples: checked * 2, maximum_decoded_rain_error_mmh: maximumError, maximum_decoded_hazard_errors: maximumHazardErrors };
 }
 
 async function aggregateReference(manifest, levels, weather) {
