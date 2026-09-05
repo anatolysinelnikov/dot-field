@@ -5,8 +5,10 @@ import {
   aggregateSquaresInputs,
   adjacentTiledRainLod,
   automaticTiledRainLod,
+  initialTiledRainLod,
   selectTiledRainLod,
   sourceFrameForTime,
+  tiledRainProgramCacheKey,
   TiledRainLayer,
   TiledRainTileStore,
   validateTiledRainLodManifest
@@ -94,6 +96,10 @@ assert.equal(selectTiledRainLod(undefined), 13);
 assert.throws(() => selectTiledRainLod('10'));
 assert.throws(() => selectTiledRainLod('13.5'));
 assert.deepEqual([0, 5, 10, 20].map((zoom) => automaticTiledRainLod(zoom)), [11, 11, 14, 14]);
+assert.equal(initialTiledRainLod(5.8), 12);
+assert.equal(initialTiledRainLod(5.8, 11), 11);
+assert.equal(initialTiledRainLod(5.8, 14), 14);
+assert.equal(initialTiledRainLod(5.8, 14, true), 13);
 assert.deepEqual([11, 12, 13].map((level) => adjacentTiledRainLod(level, 14)), [12, 13, 14]);
 assert.equal(adjacentTiledRainLod(14, 11), 13);
 assert.throws(() => adjacentTiledRainLod(10, 11));
@@ -135,6 +141,14 @@ for (const level of validated.levels) {
     assert.equal(gl.uploads[0][8], 10);
   }
 }
+
+const aggregateL11CacheKey = tiledRainProgramCacheKey({ aggregateSummary: true, lodLevel: 11, gridSize: 2 ** 11, variantName: 'dots', hazardsAvailable: true });
+const aggregateL12CacheKey = tiledRainProgramCacheKey({ aggregateSummary: true, lodLevel: 12, gridSize: 2 ** 12, variantName: 'dots', hazardsAvailable: true });
+const directL13CacheKey = tiledRainProgramCacheKey({ lodLevel: 13, gridSize: 2 ** 13, variantName: 'dots', hazardsAvailable: true });
+const directL14CacheKey = tiledRainProgramCacheKey({ lodLevel: 14, gridSize: 2 ** 14, variantName: 'dots', hazardsAvailable: true });
+assert.notEqual(aggregateL11CacheKey, aggregateL12CacheKey, 'adjacent aggregate levels must have distinct compile-time grid identities');
+assert.notEqual(directL13CacheKey, directL14CacheKey, 'adjacent direct levels must have distinct compile-time grid identities');
+assert.notEqual(aggregateL12CacheKey, directL13CacheKey, 'aggregate and direct payload kinds must have distinct program identities');
 
 const first = { rainWetMeanMmh: 4, rainMaxMmh: 12, rainCoverage: 0.25, strongCoverage: 0.5, stormCoverage: 0.36, stormMaxSeverity: 0.8, hailCoverage: 0.16, hailMaxSeverity: 0.7 };
 const second = { ...first, rainWetMeanMmh: 8, rainMaxMmh: 20, rainCoverage: 1, strongCoverage: 0.25, stormMaxSeverity: 0.4 };
@@ -201,6 +215,16 @@ lifecycleStore.setProtectedBlockKeys(new Set(Array.from({ length: 1000 }, (_, in
 assert.equal(lifecycleStore.diagnosticsState.effectiveReadyBlockLimit, 1000);
 lifecycleStore.setProtectedBlockKeys(new Set());
 assert.equal(lifecycleStore.diagnosticsState.effectiveReadyBlockLimit, 320);
+
+const expectedMaxCombinedBytes = Math.max(...validated.levels.flatMap((level) => level.tiles.flatMap((tile) => tile.blocks.map((entry) => {
+  const primary = level.kind === 'aggregate-summary' ? entry.summary_a : entry.rain;
+  const hazard = level.kind === 'aggregate-summary'
+    ? entry.summary_b
+    : [entry.storm, entry.hail].filter(Boolean).reduce((total, descriptor) => total + descriptor.byte_length, 0);
+  return primary.byte_length + (typeof hazard === 'number' ? hazard : hazard?.byte_length || 0);
+}))));
+assert.equal(lifecycleStore.diagnosticsState.maxCombinedBlockBytes, expectedMaxCombinedBytes);
+assert.ok(lifecycleStore.diagnosticsState.readyCacheByteTarget >= 320 * expectedMaxCombinedBytes);
 
 const sharedStore = { hazardsAvailable: true, aggregateSummary: true, gridSize: 2 ** 11, lodLevel: 11, manifest: { frame_count: 2, temporal_block_size: 1 }, tiles: new Map(), blocks: new Map() };
 const sharedLayer = new TiledRainLayer(sharedStore);

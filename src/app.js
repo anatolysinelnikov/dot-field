@@ -20,7 +20,7 @@ import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
-import { automaticTiledRainLod, beginTiledRainLoad, selectTiledRainLod, TiledRainLayer } from './engine/tiled-rain.js';
+import { automaticTiledRainLod, beginTiledRainLoad, initialTiledRainLod, selectTiledRainLod, TiledRainLayer } from './engine/tiled-rain.js';
 import {
   buildMotionProbe,
   sampleIdentityFromMercator,
@@ -35,7 +35,7 @@ const motionWarpEnabled = tiledRainEnabled && queryParameters.get('motionWarp') 
 const tiledRainLodParameter = queryParameters.get('tiledRainLod');
 const tiledRainLodOverride = motionWarpEnabled || tiledRainLodParameter === null || tiledRainLodParameter === ''
   ? null : selectTiledRainLod(tiledRainLodParameter);
-const tiledRainLod = motionWarpEnabled ? 13 : tiledRainLodOverride || 13;
+const tiledRainLod = initialTiledRainLod(WEATHER_REGION.initialZoom, tiledRainLodOverride, motionWarpEnabled);
 const tiledRainAutomaticLod = tiledRainEnabled && !motionWarpEnabled && tiledRainLodOverride === null;
 const motionWarpDebugMode = motionWarpEnabled && queryParameters.get('motionWarpDebug') === 'full' ? 'full' : null;
 const motionProbeEnabled = tiledRainEnabled && diagnosticsEnabled && queryParameters.get('motionProbe') === '1';

@@ -172,6 +172,9 @@ pipeline is migrated to the staged multi-LOD schema here.
 
 Non-motion `?tiledRain=1` loads the multi-LOD root manifest and maps the
 existing logical geographic zoom to a clamped tiled weather level L11–L14.
+The initial load uses the known `WEATHER_REGION.initialZoom` through that same
+mapping, so automatic startup begins at the correct level without an artificial
+L13 preload transition.
 The diagnostic `tiledRainLod=11`, `12`, `13`, or `14` query selects a fixed
 level and disables automatic selection. Each endpoint supplies its own grid
 size, globally anchored sample identity, tile envelope, spacing

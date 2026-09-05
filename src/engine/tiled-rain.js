@@ -97,6 +97,36 @@ export function automaticTiledRainLod(logicalZoom, minLevel = 11, maxLevel = 14)
   return Math.max(minLevel, Math.min(maxLevel, unclamped));
 }
 
+export function initialTiledRainLod(logicalZoom, override = null, motionWarp = false) {
+  if (motionWarp) return TILED_RAIN_LOD_LEVEL;
+  if (override === undefined || override === null || override === '') {
+    return automaticTiledRainLod(logicalZoom);
+  }
+  return selectTiledRainLod(override);
+}
+
+export function tiledRainProgramCacheKey({
+  motionWarp = false,
+  motionWarpDebugMode = null,
+  aggregateSummary = false,
+  lodLevel = 'legacy',
+  gridSize = TILED_RAIN_GRID_SIZE,
+  variantName = 'unknown',
+  presentationMode = 'dots',
+  hazardsAvailable = false
+} = {}) {
+  const payloadKind = motionWarp ? 'motion' : aggregateSummary ? 'aggregate' : 'direct';
+  return [
+    payloadKind,
+    `L${lodLevel}`,
+    `grid${gridSize}`,
+    variantName,
+    presentationMode,
+    motionWarpDebugMode || 'standard',
+    hazardsAvailable ? 'hazards' : 'no-hazards'
+  ].join(':');
+}
+
 export function adjacentTiledRainLod(currentLevel, desiredLevel) {
   if (!TILED_RAIN_LOD_LEVELS.includes(currentLevel) || !TILED_RAIN_LOD_LEVELS.includes(desiredLevel)) {
     throw new Error('Tiled rain LOD levels must be one of 11, 12, 13, or 14.');
@@ -712,18 +742,31 @@ export class TiledRainTileStore {
     this.latestUsefulMotionTileKeys = new Set();
     this.protectedBlockKeys = new Set();
     this.maxTargetBlocks = 0;
-    const blockByteLengths = [...this.tiles.values()].flatMap((tile) => tile.blocks.map((block) => this.primaryDescriptor(block).byte_length));
-    const hazardByteLengths = this.hazardsAvailable
-      ? [...this.tiles.values()].flatMap((tile) => tile.blocks.flatMap((block) => this.aggregateSummary
-        ? [block.summary_b?.byte_length || 0]
-        : [block.storm?.byte_length || 0, block.hail?.byte_length || 0]))
-      : [];
-    this.maxBlockBytes = Math.max(0, ...blockByteLengths);
-    this.maxHazardBlockBytes = Math.max(0, ...hazardByteLengths);
-    this.maxCombinedBlockBytes = this.maxBlockBytes + this.maxHazardBlockBytes;
+    const payloadByteSizes = [...this.levels].flatMap(([level, levelData]) => {
+      const levelHazardsAvailable = this.multiLod
+        ? levelData.hasHazardPayload === true
+        : this.hazardsAvailable;
+      return [...(this.tilesByLevel.get(level)?.values() || [])].flatMap((tile) => tile.blocks.map((block) => {
+        const primary = levelData.kind === 'aggregate-summary'
+          ? block.summary_a
+          : block.rain || block;
+        const hazardBytes = levelHazardsAvailable
+          ? levelData.kind === 'aggregate-summary'
+            ? block.summary_b?.byte_length || 0
+            : (block.storm?.byte_length || 0) + (block.hail?.byte_length || 0)
+          : 0;
+        const primaryBytes = primary?.byte_length || 0;
+        return { primaryBytes, hazardBytes, combinedBytes: primaryBytes + hazardBytes };
+      }));
+    });
+    this.maxBlockBytes = Math.max(0, ...payloadByteSizes.map(({ primaryBytes }) => primaryBytes));
+    this.maxHazardBlockBytes = Math.max(0, ...payloadByteSizes.map(({ hazardBytes }) => hazardBytes));
+    this.maxCombinedBlockBytes = Math.max(0, ...payloadByteSizes.map(({ combinedBytes }) => combinedBytes));
     this.effectiveReadyBlockLimit = Math.max(READY_CACHE_BLOCK_LIMIT, this.protectedBlockKeys.size);
     this.maxTrackedBlocks = this.effectiveReadyBlockLimit + TILED_RAIN_MAX_CONCURRENT_FETCHES;
     this.diagnosticsState.readyCacheBlockLimit = READY_CACHE_BLOCK_LIMIT;
+    this.diagnosticsState.byteLimitLevelCount = this.levels.size;
+    this.diagnosticsState.maxCombinedBlockBytes = this.maxCombinedBlockBytes;
     this.diagnosticsState.effectiveReadyBlockLimit = this.effectiveReadyBlockLimit;
     this.diagnosticsState.maxTargetBlockCount = this.maxTargetBlocks;
     this.diagnosticsState.readyCacheByteTarget = READY_CACHE_BLOCK_LIMIT * this.maxCombinedBlockBytes;
@@ -2018,7 +2061,16 @@ export class TiledRainLayer {
   }
 
   programsFor(gl, shaderData) {
-    const cacheKey = `${this.store.motionWarp ? 'motion' : this.store.aggregateSummary ? 'aggregate' : 'direct'}:${shaderData.variantName}:${this.presentationMode}`;
+    const cacheKey = tiledRainProgramCacheKey({
+      motionWarp: this.store.motionWarp,
+      motionWarpDebugMode: this.store.motionWarpDebugMode,
+      aggregateSummary: this.store.aggregateSummary,
+      lodLevel: this.store.lodLevel,
+      gridSize: this.store.gridSize,
+      variantName: shaderData.variantName,
+      presentationMode: this.presentationMode,
+      hazardsAvailable: this.hazardsAvailable
+    });
     let program = this.programs.get(cacheKey);
     if (!program) {
       program = makeProgram(gl, shaderData, this.store.motionWarp, this.store.motionWarpDebugMode, this.hazardsAvailable, this.presentationMode, this.store.aggregateSummary, this.store.gridSize);
