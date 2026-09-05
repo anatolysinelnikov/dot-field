@@ -1293,6 +1293,21 @@ export class TiledRainTileStore {
     return texture;
   }
 
+  zeroHazardTexture(gl) {
+    if (this.emptyHazardTexture) return this.emptyHazardTexture;
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, 1, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
+    this.emptyHazardTexture = texture;
+    this.gl = gl;
+    return texture;
+  }
+
   uploadSummaryBlock(gl, state) {
     if (!(state.aggregateSummary ?? this.aggregateSummary) || !state.payloads?.secondary || state.summaryTexture) return state.summaryTexture || null;
     const started = now();
@@ -1592,7 +1607,7 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAva
     '  float hailCoverage = validA && validB ? mix(hailCoverageA, hailCoverageB, u_temporalProgress) : validA ? hailCoverageA : validB ? hailCoverageB : 0.0;',
     '  float hailMax = validA && validB ? mix(hailMaxA, hailMaxB, u_temporalProgress) : validA ? hailMaxA : validB ? hailMaxB : 0.0;'
   ];
-  const hazardUniforms = hazardsAvailable ? [
+  const hazardUniforms = hazardsAvailable && !aggregate ? [
     'uniform sampler2DArray u_stormA; uniform sampler2DArray u_stormB; uniform sampler2DArray u_hailA; uniform sampler2DArray u_hailB;',
     'uniform int u_stormAvailableA; uniform int u_stormAvailableB; uniform int u_hailAvailableA; uniform int u_hailAvailableB;'
   ] : [];
@@ -1865,6 +1880,7 @@ export class TiledRainLayer {
     for (const state of this.store.blocks.values()) if (state.gpuTexture) gl.deleteTexture(state.gpuTexture);
     for (const state of this.store.blocks.values()) if (state.summaryTexture) gl.deleteTexture(state.summaryTexture);
     for (const state of this.store.blocks.values()) for (const texture of Object.values(state.hazardTextures || {})) if (texture) gl.deleteTexture(texture);
+    if (this.store.emptyHazardTexture) gl.deleteTexture(this.store.emptyHazardTexture);
     for (const state of this.store.motionTilesState?.values() || []) if (state.gpuTexture) gl.deleteTexture(state.gpuTexture);
     if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);
     if (this.squareVertexBuffer) gl.deleteBuffer(this.squareVertexBuffer);
@@ -2271,7 +2287,7 @@ export class TiledRainLayer {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockB.gpuTexture || this.store.uploadBlock(gl, blockB));
     }
-    if (!this.store.aggregateSummary && this.hazardsAvailable && (this.presentationMode === 'squares' || mode >= 2)) {
+    if (!this.store.aggregateSummary && this.hazardsAvailable) {
       const hazardBindings = [
         ['stormA', blockA, 'storm', 2, 'stormAvailableA'],
         ['stormB', blockB, 'storm', 3, 'stormAvailableB'],
@@ -2283,8 +2299,14 @@ export class TiledRainLayer {
         gl.uniform1i(locations[uniform], textureUnit);
         gl.uniform1i(locations[availableUniform], texture ? 1 : 0);
         gl.activeTexture(gl[`TEXTURE${textureUnit}`]);
-        gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture || this.store.zeroHazardTexture(gl));
       }
+      // A first-time hazard upload binds on whichever texture unit was active.
+      // Restore both integer rain endpoints after those uploads before drawing.
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockA.gpuTexture);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockB.gpuTexture);
     }
     if (this.store.motionWarp) {
       const motionState = this.store.motionTilesState.get(`${tile.x}:${tile.y}`);
@@ -2309,10 +2331,9 @@ export class TiledRainLayer {
 
   renderLevel(gl, args, level, opacity, modes) {
     this.store.activateLevel(level);
-    const levelData = this.store.levelData(level);
     const tileKeys = this.tileKeysForBounds(this.viewportBounds, level);
-    const blockAIndex = Math.floor(this.committedFrame.frame0 / levelData.temporal_block_size);
-    const blockBIndex = Math.floor(this.committedFrame.frame1 / levelData.temporal_block_size);
+    const blockAIndex = Math.floor(this.committedFrame.frame0 / this.store.manifest.temporal_block_size);
+    const blockBIndex = Math.floor(this.committedFrame.frame1 / this.store.manifest.temporal_block_size);
     const renderableTiles = [];
     for (const tileKey of tileKeys) {
       const tile = this.store.tilesByLevel.get(Number(level))?.get(tileKey)

@@ -74,13 +74,20 @@ function fixtureManifest() {
 
 function fakeGl() {
   const uploads = [];
+  const draws = [];
   return {
-    uploads,
+    uploads, draws,
     TEXTURE_2D_ARRAY: 1, TEXTURE_MIN_FILTER: 2, TEXTURE_MAG_FILTER: 3, NEAREST: 4,
     TEXTURE_WRAP_S: 5, TEXTURE_WRAP_T: 6, CLAMP_TO_EDGE: 7,
     R16UI: 8, RED_INTEGER: 9, UNSIGNED_SHORT: 10, RGBA16F: 11, RGBA: 12, HALF_FLOAT: 13,
+    TEXTURE0: 14, ARRAY_BUFFER: 15, FLOAT: 16, TRIANGLES: 17, BLEND: 18, DEPTH_TEST: 19,
+    SRC_ALPHA: 20, ONE_MINUS_SRC_ALPHA: 21, POLYGON_OFFSET_FILL: 22,
     createTexture: () => ({}), bindTexture: () => {}, texParameteri: () => {}, pixelStorei: () => {},
-    texImage3D: (...args) => uploads.push(args)
+    texImage3D: (...args) => uploads.push(args), useProgram: () => {}, uniform2f: () => {}, uniform1i: () => {},
+    uniform1f: () => {}, uniform4fv: () => {}, activeTexture: () => {}, bindBuffer: () => {},
+    enableVertexAttribArray: () => {}, vertexAttribPointer: () => {},
+    drawArraysInstanced: (...args) => draws.push(args), enable: () => {}, disable: () => {}, blendFunc: () => {},
+    depthMask: () => {}, polygonOffset: () => {}
   };
 }
 
@@ -140,6 +147,37 @@ for (const level of validated.levels) {
     assert.equal(gl.uploads[0][7], 9);
     assert.equal(gl.uploads[0][8], 10);
   }
+}
+
+// Rendering must resolve level-qualified ready states into the upload/draw path.
+// This specifically guards the fixed-L13 parity path that previously produced
+// ready CPU blocks but NaN render block indexes, preventing every upload.
+for (const level of [validated.levels[1], validated.levels[2]]) {
+  const dataset = { manifest: validated, level, manifestUrl: '/lod/manifest.json', tiles: new Map([['0:0', level.tiles[0]]]), isMultiLod: true };
+  const store = new TiledRainTileStore(dataset);
+  const layer = new TiledRainLayer(store);
+  const sourceBlock = level.tiles[0].blocks[0];
+  const aggregateSummary = level.kind === 'aggregate-summary';
+  const state = {
+    key: `${level.level}:0:0:0`, level: level.level, tileKey: '0:0', blockIndex: 0, descriptor: sourceBlock,
+    status: 'ready', aggregateSummary, hazardsAvailable: false,
+    payload: new ArrayBuffer((aggregateSummary ? sourceBlock.summary_a : sourceBlock.rain).byte_length),
+    payloads: { primary: null, secondary: null }, hazardPayloads: {}, hazardTextures: {}, gpuTexture: null, summaryTexture: null
+  };
+  state.payloads.primary = state.payload;
+  if (aggregateSummary) state.payloads.secondary = new ArrayBuffer(sourceBlock.summary_b.byte_length);
+  store.blocks.set(state.key, state);
+  layer.hazardsAvailable = false;
+  layer.viewportBounds = { minX: 64 / store.gridSize, maxX: 64 / store.gridSize, minY: 64 / store.gridSize, maxY: 64 / store.gridSize };
+  layer.viewportTileKeys = ['0:0'];
+  layer.committedFrame = { frame0: 0, frame1: 0, progress: 0 };
+  layer.programsFor = () => ({ program: {}, locations: {} });
+  layer.vertexBuffer = {}; layer.squareVertexBuffer = {}; layer.hazardVertexBuffers = { storm: {}, hail: {} };
+  const gl = fakeGl();
+  layer.render(gl, { shaderData: { variantName: 'fixture', vertexShaderPrelude: '' }, defaultProjectionData: {} });
+  assert.ok(gl.uploads.length >= (aggregateSummary ? 2 : 1), `fixed L${level.level} ready blocks reach GPU texture upload`);
+  assert.ok(gl.draws.length > 0, `fixed L${level.level} ready blocks reach a draw call`);
+  assert.ok(store.diagnosticsState.tileUploadCount > 0, `fixed L${level.level} increments GPU upload diagnostics`);
 }
 
 const aggregateL11CacheKey = tiledRainProgramCacheKey({ aggregateSummary: true, lodLevel: 11, gridSize: 2 ** 11, variantName: 'dots', hazardsAvailable: true });
