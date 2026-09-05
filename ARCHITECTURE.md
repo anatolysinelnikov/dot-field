@@ -40,13 +40,13 @@ of the current active application/runtime path.
 
 ## Experimental tiled-rain Phase 0A — non-default
 
-The opt-in `?tiledRain=1` path is a separate first vertical slice for proving
-the tiled browser data path. It exposes Dots and Squares through one shared
-tiled runtime/residency owner. Both are presentation modes over the same
-physical payloads; switching modes does not duplicate residency or payload
-ownership. The experiment remains limited to one fixed Mercator reference
-level (L13) and direct shader interpolation between source frames. Its data
-flow is:
+The fixed-L13 direct contract described here is the Phase 0A parity baseline
+for the opt-in tiled browser path. It exposes Dots and Squares through one
+shared tiled runtime/residency owner. Both are presentation modes over the
+same physical payloads; switching modes does not duplicate residency or
+payload ownership. The non-motion runtime now adds automatic L11–L14 staged
+assets as described below, while the motion-warp path remains fixed L13. The
+baseline data flow is:
 
 ```text
 normalized source generation (`data/generated/current/metadata.json`)
@@ -94,21 +94,17 @@ small deterministic L13 overscan, requests only the current frame pair's
 blocks, and keeps a committed renderable frame pair while a newer requested
 pair loads. A bounded eight-fetch queue cancels obsolete queued and in-flight
 blocks; stale completions cannot commit. The ready-block LRU has a normal
-320-block cache target, but its true hard ceiling is derived from the manifest:
-`max(tile_count * 2, 320)`, because an atomic frame pair can require two blocks
-per spatial tile. CPU and estimated GPU byte ceilings use the actual maximum
-combined rain plus hazard payload size and this hard ready-block limit. The newest target has
-priority; already-resident committed fallback blocks are kept for ordinary
-adjacent transitions and evicted before required target data. Pending ownership
-and total tracked block state are separately bounded. Large cross-boundary
-transitions may therefore reach the derived hard ceiling, after which fallback
-cannot add more ready blocks; once the target shrinks, LRU eviction returns
-toward the 320-block cache target. It uploads block payloads directly as
+320-block cache target. Protected target blocks are never evicted merely to
+meet a fixed numeric ceiling; effective residency expands to fit them and
+contracts back toward 320 after protection shrinks. CPU and estimated GPU byte
+diagnostics use the actual maximum combined rain plus hazard payload size and
+that effective protected bound. It uploads block payloads directly as
 WebGL2 integer texture arrays without expanding the tile to Float32 arrays or
 constructing per-sample JavaScript positions. Camera movement changes tile
 orchestration; it does not reconstruct a weather field or rebuild a geographic
-pyramid. RAW and multi-LOD tiled rendering remain deferred; the fixed L13
-contract and direct A/B interpolation are temporary Phase 0A constraints.
+pyramid. RAW remains deferred. The fixed L13 contract and direct A/B
+interpolation are the legacy Phase 0A baseline; automatic multi-LOD selection
+and transitions are implemented by the staged runtime below.
 
 Phase 0A intentionally does not solve temporal motion: the shader uses direct
 `mix(rainA, rainB, progress)` interpolation. The tiled runtime constructs a
@@ -156,11 +152,11 @@ sample identities, four-source-frame temporal blocks, exact source timestamps,
 and deterministic gzip sidecars. The manifest records level-specific direct
 versus aggregate encoding, support/generated sample extents, tile extents,
 source generation identity, payload sizes, and Float16 fidelity diagnostics.
-The browser currently selects exactly one of L11–L14 for the lifetime of a
-tiled-rain load. Automatic zoom selection, overlap, and cross-level
-transitions remain deferred; the map itself still uses its existing zoom
-limits and the general geographic engine still supports L10. Only the tiled
-multi-LOD asset set omits L10.
+The non-motion browser path now consumes this staged set through automatic
+zoom-driven selection of L11–L14. L11 is the weather floor even when the map
+continues zooming out, and L14 is the weather ceiling. A diagnostic
+`tiledRainLod=11..14` query remains a fixed-level override. Only the tiled
+multi-LOD asset set omits L10; the map zoom limits are unchanged.
 
 Only the 19 normalized source timestamps/frames are materialized. No
 intermediate coarse temporal frames are generated; the existing temporal block
@@ -172,23 +168,25 @@ contract. The motion-warp assets likewise remain separately bound to the
 existing Phase 0A L13 manifest and Phase 0B1 MotionField manifest; neither
 pipeline is migrated to the staged multi-LOD schema here.
 
-## Fixed selected-level multi-LOD tiled runtime — `src/engine/tiled-rain.js`
+## Automatic multi-LOD tiled runtime — `src/engine/tiled-rain.js`
 
-Non-motion `?tiledRain=1` loads the multi-LOD root manifest and selects L13 by
-default. The diagnostic `tiledRainLod=11`, `12`, `13`, or `14` query selects a
-fixed level; it is intentionally independent of map zoom. The selected level
-supplies its own grid size, globally anchored sample identity, tile envelope,
-spacing (`1 / grid_size`), temporal block descriptors, and direct physical
-rain maximum. The loader requests only selected-level tiles intersecting the
-visible viewport (with deterministic overscan) and the current source-frame
-block pair.
+Non-motion `?tiledRain=1` loads the multi-LOD root manifest and maps the
+existing logical geographic zoom to a clamped tiled weather level L11–L14.
+The diagnostic `tiledRainLod=11`, `12`, `13`, or `14` query selects a fixed
+level and disables automatic selection. Each endpoint supplies its own grid
+size, globally anchored sample identity, tile envelope, spacing
+(`1 / grid_size`), temporal block descriptors, encoding, and direct physical
+rain maximum. The loader requests only the current level's visible/overscan
+tiles and source-frame block pair, plus one adjacent target while preparing a
+transition.
 
-The tile store is the single residency owner for both Dots and Squares. A
-presentation switch changes only the procedural shader variant and does not
-refetch or duplicate block payloads. Source-frame endpoints retain the
-manifest's four-frame block semantics. Direct L13/L14 values preserve the
-Phase 0A endpoint handling and UInt16 decoding, while the selected direct
-level's grid size and physical maximum replace the former fixed L13 constants.
+The tile store is the single multi-LOD residency owner for both Dots and
+Squares. A presentation switch changes only the procedural shader variant and
+does not refetch or duplicate block payloads. Source-frame endpoints retain
+the manifest's four-frame block semantics. Direct L13/L14 values preserve the
+Phase 0A endpoint handling and UInt16 decoding, while aggregate L11/L12 values
+use their Float16 summary planes. Runtime block identities include the LOD
+level.
 
 Aggregate L11/L12 blocks remain compact raw payloads in browser memory. Summary
 A and optional Summary B are uploaded directly as WebGL2 `RGBA16F`
@@ -202,19 +200,24 @@ summary inputs and applies its existing monotonic transfer using maximum
 hazard severity. Direct L13/L14 blocks continue to use compact `R16UI` rain
 texture arrays and optional `R8` hazard texture arrays.
 
-Residency retains the bounded request queue, stale cancellation, committed
-renderable fallback, and LRU behavior. The normal ready target is 320 blocks
-with a 640-block hard cache bound; a protected visible target may temporarily
-exceed the normal target, but the bound is independent of the global selected
-level tile count (including L14's 1,040 tiles), and eviction returns toward
-320 when the target shrinks. Diagnostics report the selected level and
-payload format, using generic payload byte totals for aggregate summaries
-instead of labeling them UInt16 rain bytes.
+Residency retains the bounded eight-fetch request queue, stale cancellation,
+committed renderable fallback, and LRU behavior. The normal ready target is
+320 blocks. During preload or a transition, all required endpoint blocks are
+protected and the effective allowed residency expands to fit that protected
+set; it is not a fixed 640-block bound and does not depend on global L14 tile
+count. Once protection shrinks, eviction returns toward 320. Diagnostics
+expose stable, desired, pending-preload, and transition endpoint levels,
+dynamic protected-cache bounds, and payload format.
 
-Automatic zoom-driven weather LOD selection and cross-LOD transitions are the
-next task. MotionField and motion-warp remain on their existing legacy L13
-manifests, validation, residency, and shader path; `tiledRainLod` does not
-alter them.
+Only adjacent levels transition: L11 ↔ L12 ↔ L13 ↔ L14. The complete target
+visible/overscan state and the current source-frame block pair are loaded before
+the fade starts. Dots preserve rain → strong rain → storm → hail pass order
+across the two endpoint representations; Squares crossfade the two complete
+representations. A direction reversal reuses resident endpoints, while a
+continued jump chains adjacent transitions. Stale viewport/LOD completions
+cannot promote state. MotionField and motion-warp remain on their existing
+legacy L13 manifests, validation, residency, and shader path; `tiledRainLod`
+does not alter them.
 
 ## Experimental tiled-rain Phase 0B1 — offline MotionField, non-default
 

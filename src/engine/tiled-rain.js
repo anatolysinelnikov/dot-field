@@ -9,9 +9,10 @@ import {
   RAIN_VISIBILITY_SHADER,
   STRONG_RAIN_SHADER
 } from './precipitation-mapping.js';
-import { RAIN_VISIBILITY_FLOOR_MMH } from './config.js';
+import { LOD_MORPH_SECONDS, RAIN_VISIBILITY_FLOOR_MMH } from './config.js';
 import { sha256ArrayBuffer } from './sha256.js';
 import { geographicHazardRadiusForSeverity } from './hazard-renderer.js';
+import { zoomToMercatorGridLevel } from './geographic-lod.js';
 
 export const TILED_RAIN_SCHEMA = 'dot-field-tiled-rain-v0';
 export const TILED_RAIN_LOD_SCHEMA = 'dot-field-tiled-rain-lod-v1';
@@ -24,10 +25,6 @@ export const TILED_RAIN_WARP_HALO_SIZE = 13;
 export const TILED_RAIN_WARP_STORED_SIZE = TILED_RAIN_TILE_SIZE + 2 * TILED_RAIN_WARP_HALO_SIZE;
 // The LRU returns toward this target whenever the required target permits it.
 const READY_CACHE_BLOCK_LIMIT = 320;
-// This is intentionally independent of the global tile count. A protected
-// viewport target may temporarily exceed it, but ordinary residency returns
-// toward READY_CACHE_BLOCK_LIMIT after the target changes.
-const HARD_READY_CACHE_BLOCK_LIMIT = READY_CACHE_BLOCK_LIMIT * 2;
 export const TILED_RAIN_MAX_CONCURRENT_FETCHES = 8;
 const VIEWPORT_OVERSCAN_SAMPLES = 64;
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
@@ -57,6 +54,10 @@ const STORM = new Float32Array(unitShape(circularPoints(8).map((point, index) =>
 })));
 const COLORS = { rain: [0, 0.565, 1, 1], strong: [0, 0, 1, 1], storm: [1, 0, 1, 1], hail: [1, 0.831, 0, 1] };
 const now = () => globalThis.performance?.now?.() ?? Date.now();
+const smoothstep = (edge0, edge1, value) => {
+  const t = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+};
 
 function clearError(message) {
   throw new Error(`Tiled rain asset validation failed: ${message}`);
@@ -89,6 +90,29 @@ export function selectTiledRainLod(value, fallback = TILED_RAIN_LOD_LEVEL) {
     throw new Error(`tiledRainLod must be one of ${TILED_RAIN_LOD_LEVELS.join(', ')}.`);
   }
   return level;
+}
+
+export function automaticTiledRainLod(logicalZoom, minLevel = 11, maxLevel = 14) {
+  const unclamped = zoomToMercatorGridLevel(Number.isFinite(logicalZoom) ? logicalZoom : 0);
+  return Math.max(minLevel, Math.min(maxLevel, unclamped));
+}
+
+export function adjacentTiledRainLod(currentLevel, desiredLevel) {
+  if (!TILED_RAIN_LOD_LEVELS.includes(currentLevel) || !TILED_RAIN_LOD_LEVELS.includes(desiredLevel)) {
+    throw new Error('Tiled rain LOD levels must be one of 11, 12, 13, or 14.');
+  }
+  if (currentLevel === desiredLevel) return currentLevel;
+  return currentLevel + Math.sign(desiredLevel - currentLevel);
+}
+
+function qualifiedBlockKey(level, tileKey, blockIndex, multiLod) {
+  return multiLod ? `${level}:${tileKey}:${blockIndex}` : `${tileKey}:${blockIndex}`;
+}
+
+function parseQualifiedBlockKey(key, multiLod) {
+  const parts = key.split(':');
+  if (multiLod) return { level: Number(parts.shift()), tileKey: parts.slice(0, 2).join(':'), blockIndex: Number(parts.at(-1)) };
+  return { level: null, tileKey: parts.slice(0, 2).join(':'), blockIndex: Number(parts.at(-1)) };
 }
 
 function aggregateSummaryValid(summary) {
@@ -561,14 +585,21 @@ export class TiledRainTileStore {
     this.dataset = dataset;
     this.rootManifest = dataset.manifest;
     this.level = dataset.level || dataset.manifest;
+    this.motionWarp = Boolean(dataset.isMotionWarp);
+    this.multiLod = dataset.isMultiLod === true || Array.isArray(dataset.manifest?.levels);
     // Keep the selected level's runtime fields at the historical manifest
     // access path while retaining the multi-LOD root fields for diagnostics.
     this.manifest = dataset.level
       ? Object.freeze({ ...dataset.manifest, ...dataset.level })
       : dataset.manifest;
+    this.levels = this.multiLod
+      ? new Map(dataset.manifest.levels.map((level) => [Number(level.level), level]))
+      : new Map([[this.level.level ?? this.level.lod_level ?? TILED_RAIN_LOD_LEVEL, this.level]]);
+    this.tilesByLevel = new Map([...this.levels].map(([level, data]) => [
+      level,
+      new Map((data.tiles || []).map((tile) => [`${tile.x}:${tile.y}`, tile]))
+    ]));
     this.tiles = dataset.tiles;
-    this.motionWarp = Boolean(dataset.isMotionWarp);
-    this.multiLod = dataset.isMultiLod === true;
     this.aggregateSummary = this.level.kind === 'aggregate-summary';
     this.lodLevel = this.level.level ?? this.level.lod_level ?? TILED_RAIN_LOD_LEVEL;
     this.gridSize = this.level.grid?.grid_size ?? this.level.grid_size ?? TILED_RAIN_GRID_SIZE;
@@ -690,15 +721,15 @@ export class TiledRainTileStore {
     this.maxBlockBytes = Math.max(0, ...blockByteLengths);
     this.maxHazardBlockBytes = Math.max(0, ...hazardByteLengths);
     this.maxCombinedBlockBytes = this.maxBlockBytes + this.maxHazardBlockBytes;
-    this.hardReadyBlockLimit = HARD_READY_CACHE_BLOCK_LIMIT;
-    this.maxTrackedBlocks = this.hardReadyBlockLimit + HARD_READY_CACHE_BLOCK_LIMIT + TILED_RAIN_MAX_CONCURRENT_FETCHES;
+    this.effectiveReadyBlockLimit = Math.max(READY_CACHE_BLOCK_LIMIT, this.protectedBlockKeys.size);
+    this.maxTrackedBlocks = this.effectiveReadyBlockLimit + TILED_RAIN_MAX_CONCURRENT_FETCHES;
     this.diagnosticsState.readyCacheBlockLimit = READY_CACHE_BLOCK_LIMIT;
-    this.diagnosticsState.hardReadyBlockLimit = this.hardReadyBlockLimit;
+    this.diagnosticsState.effectiveReadyBlockLimit = this.effectiveReadyBlockLimit;
     this.diagnosticsState.maxTargetBlockCount = this.maxTargetBlocks;
     this.diagnosticsState.readyCacheByteTarget = READY_CACHE_BLOCK_LIMIT * this.maxCombinedBlockBytes;
-    this.diagnosticsState.hardCpuResidentByteLimit = this.hardReadyBlockLimit * this.maxCombinedBlockBytes;
-    this.diagnosticsState.hardGpuResidentByteLimit = this.diagnosticsState.hardCpuResidentByteLimit;
-    this.diagnosticsState.maxPendingBlocks = HARD_READY_CACHE_BLOCK_LIMIT + TILED_RAIN_MAX_CONCURRENT_FETCHES;
+    this.diagnosticsState.effectiveCpuResidentByteLimit = this.effectiveReadyBlockLimit * this.maxCombinedBlockBytes;
+    this.diagnosticsState.effectiveGpuResidentByteLimit = this.diagnosticsState.effectiveCpuResidentByteLimit;
+    this.diagnosticsState.maxPendingBlocks = this.effectiveReadyBlockLimit + TILED_RAIN_MAX_CONCURRENT_FETCHES;
     this.diagnosticsState.maxTrackedBlocks = this.maxTrackedBlocks;
     this.diagnosticsState.trackedBlockCount = 0;
     this.diagnosticsState.peakTrackedBlockCount = 0;
@@ -709,12 +740,48 @@ export class TiledRainTileStore {
     return block?.rain || block || null;
   }
 
+  levelData(level = this.lodLevel) {
+    const normalizedLevel = Number(level);
+    const data = this.levels.get(normalizedLevel);
+    if (data) return data;
+    if (!this.multiLod) return this.level;
+    throw new Error(`Tiled rain level L${level} is not present in the manifest.`);
+  }
+
+  activateLevel(level) {
+    if (!this.multiLod || level === this.lodLevel) return this.level;
+    const next = this.levelData(level);
+    if (!next) throw new Error(`Tiled rain level L${level} is not present in the manifest.`);
+    this.level = next;
+    this.manifest = Object.freeze({ ...this.rootManifest, ...next });
+    this.tiles = this.tilesByLevel.get(level);
+    this.aggregateSummary = next.kind === 'aggregate-summary';
+    this.lodLevel = level;
+    this.gridSize = next.grid?.grid_size ?? next.grid_size ?? TILED_RAIN_GRID_SIZE;
+    this.hazardsAvailable = !this.motionWarp && (this.multiLod ? next.hasHazardPayload === true : this.manifest.hazardsAvailable === true);
+    this.diagnosticsState.lodLevel = level;
+    this.diagnosticsState.payloadKind = this.aggregateSummary ? 'aggregate-summary' : 'direct';
+    this.diagnosticsState.payloadDtype = this.aggregateSummary ? 'Float16 RGBA summary textures' : 'UInt16 rain / UInt8 hazards';
+    return next;
+  }
+
   secondaryDescriptor(block) {
     return this.aggregateSummary ? block?.summary_b || null : null;
   }
 
-  descriptor(tileKey, blockIndex) {
-    const tile = this.tiles.get(tileKey);
+  primaryDescriptorForState(state) {
+    return state.aggregateSummary ? state.descriptor?.summary_a || null : state.descriptor?.rain || state.descriptor || null;
+  }
+
+  secondaryDescriptorForState(state) {
+    return state.aggregateSummary ? state.descriptor?.summary_b || null : null;
+  }
+
+  descriptor(levelOrTileKey, tileOrBlockIndex, maybeBlockIndex) {
+    const level = maybeBlockIndex === undefined ? this.lodLevel : levelOrTileKey;
+    const tileKey = maybeBlockIndex === undefined ? levelOrTileKey : tileOrBlockIndex;
+    const blockIndex = maybeBlockIndex === undefined ? tileOrBlockIndex : maybeBlockIndex;
+    const tile = (this.tilesByLevel.get(Number(level)) || new Map()).get(tileKey);
     return tile?.blocks.find((block) => block.index === blockIndex) || null;
   }
 
@@ -722,19 +789,26 @@ export class TiledRainTileStore {
     return this.motionTiles.get(tileKey) || null;
   }
 
-  ensureBlock(tileKey, blockIndex) {
-    const key = `${tileKey}:${blockIndex}`;
+  ensureBlock(levelOrTileKey, tileOrBlockIndex, maybeBlockIndex) {
+    const level = maybeBlockIndex === undefined ? this.lodLevel : levelOrTileKey;
+    const tileKey = maybeBlockIndex === undefined ? levelOrTileKey : tileOrBlockIndex;
+    const blockIndex = maybeBlockIndex === undefined ? tileOrBlockIndex : maybeBlockIndex;
+    const key = qualifiedBlockKey(level, tileKey, blockIndex, this.multiLod);
     let state = this.blocks.get(key);
     if (state?.status === 'ready') {
       state.lastUsed = ++this.lastUsed;
       return Promise.resolve(state);
     }
     if (state?.promise && !state.obsolete && state.status !== 'error' && state.status !== 'aborted') return state.promise;
-    const descriptor = this.descriptor(tileKey, blockIndex);
+    const descriptor = this.descriptor(level, tileKey, blockIndex);
     if (!descriptor) throw new Error(`Tiled rain block ${key} is not present in the manifest.`);
     if (!state || state.obsolete || state.status === 'error' || state.status === 'aborted') {
       state = {
-        key, tileKey, blockIndex, descriptor, kind: 'rain', status: 'queued', lastUsed: ++this.lastUsed,
+        key, level, tileKey, blockIndex, descriptor, aggregateSummary: this.levelData(level).kind === 'aggregate-summary',
+        hazardsAvailable: this.multiLod
+          ? this.levelData(level).hasHazardPayload === true
+          : this.hazardsAvailable,
+        kind: 'rain', status: 'queued', lastUsed: ++this.lastUsed,
         payload: null, payloads: { primary: null, secondary: null },
         hazardPayloads: { storm: null, hail: null }, gpuTexture: null, summaryTexture: null,
         hazardTextures: { storm: null, hail: null }
@@ -859,7 +933,7 @@ export class TiledRainTileStore {
   }
 
   fetchHazardPayload(state, channel) {
-    if (!this.hazardsAvailable || !state.descriptor[channel]) return Promise.resolve(null);
+    if (!state.hazardsAvailable || !state.descriptor[channel]) return Promise.resolve(null);
     return this.fetchDescriptorPayload(state, state.descriptor[channel], channel);
   }
 
@@ -875,7 +949,7 @@ export class TiledRainTileStore {
     if (state.kind === 'motion') this.diagnosticsState.motionRequestCount++;
     else this.diagnosticsState.rainBlockRequestCount = (this.diagnosticsState.rainBlockRequestCount || 0) + 1;
     const assetManifestUrl = state.kind === 'motion' ? this.motionManifestUrl : this.dataset.manifestUrl;
-    const payloadDescriptor = state.kind === 'motion' ? state.descriptor : this.primaryDescriptor(state.descriptor);
+    const payloadDescriptor = state.kind === 'motion' ? state.descriptor : this.primaryDescriptorForState(state);
     const url = resolveAssetUrl(assetManifestUrl, payloadDescriptor.asset);
     this.onTiming(`${state.kind === 'motion' ? 'tiled-rain-motion' : 'tiled-rain-block'}-${state.tileKey}${state.kind === 'motion' ? '' : `-${state.blockIndex}`}-fetch-start`);
     void fetch(url, { signal: state.controller.signal })
@@ -906,11 +980,11 @@ export class TiledRainTileStore {
         }
         const expectedBytes = payloadDescriptor.byte_length;
         if (payload.byteLength !== expectedBytes) throw new Error(`${state.kind === 'motion' ? 'MotionField tile' : 'Tiled rain block'} ${state.key} byte length is ${payload.byteLength}, expected ${expectedBytes}.`);
-        if (state.kind === 'rain' && this.aggregateSummary) {
-          return this.fetchDescriptorPayload(state, this.secondaryDescriptor(state.descriptor), 'summaryB')
+        if (state.kind === 'rain' && state.aggregateSummary) {
+          return this.fetchDescriptorPayload(state, this.secondaryDescriptorForState(state), 'summaryB')
             .then((secondary) => ({ primary: payload, secondary, storm: null, hail: null }));
         }
-        if (state.kind === 'rain' && this.hazardsAvailable) {
+        if (state.kind === 'rain' && state.hazardsAvailable && !state.aggregateSummary) {
           return Promise.all(['storm', 'hail'].map((channel) => this.fetchHazardPayload(state, channel)))
             .then(([storm, hail]) => ({ primary: payload, secondary: null, storm, hail }));
         }
@@ -977,7 +1051,13 @@ export class TiledRainTileStore {
       .filter((state) => state.status === 'ready' && !keepKeys.has(state.key))
       .sort((left, right) => left.lastUsed - right.lastUsed);
     let readyBlockCount = [...this.blocks.values()].filter((state) => state.status === 'ready').length;
-    const readyCacheLimit = Math.min(this.hardReadyBlockLimit, Math.max(READY_CACHE_BLOCK_LIMIT, keepKeys.size));
+    const readyCacheLimit = Math.max(READY_CACHE_BLOCK_LIMIT, keepKeys.size);
+    this.effectiveReadyBlockLimit = readyCacheLimit;
+    this.maxTrackedBlocks = readyCacheLimit + TILED_RAIN_MAX_CONCURRENT_FETCHES;
+    this.diagnosticsState.effectiveReadyBlockLimit = readyCacheLimit;
+    this.diagnosticsState.effectiveCpuResidentByteLimit = readyCacheLimit * this.maxCombinedBlockBytes;
+    this.diagnosticsState.effectiveGpuResidentByteLimit = this.diagnosticsState.effectiveCpuResidentByteLimit;
+    this.diagnosticsState.maxTrackedBlocks = this.maxTrackedBlocks;
     while (readyBlockCount > readyCacheLimit && candidates.length) {
       const state = candidates.shift();
       if (this.gl) {
@@ -1000,10 +1080,12 @@ export class TiledRainTileStore {
     this.protectedBlockKeys = new Set(keys);
     this.maxTargetBlocks = Math.max(this.maxTargetBlocks, this.protectedBlockKeys.size);
     this.diagnosticsState.currentTargetBlockCount = this.protectedBlockKeys.size;
+    this.effectiveReadyBlockLimit = Math.max(READY_CACHE_BLOCK_LIMIT, this.protectedBlockKeys.size);
+    this.diagnosticsState.effectiveReadyBlockLimit = this.effectiveReadyBlockLimit;
     this.diagnosticsState.maxTargetBlockCount = this.maxTargetBlocks;
     this.diagnosticsState.maxPendingBlocks = Math.max(
       this.diagnosticsState.maxPendingBlocks,
-      this.protectedBlockKeys.size + TILED_RAIN_MAX_CONCURRENT_FETCHES
+      this.effectiveReadyBlockLimit + TILED_RAIN_MAX_CONCURRENT_FETCHES
     );
     this.evict(this.protectedBlockKeys);
   }
@@ -1023,9 +1105,9 @@ export class TiledRainTileStore {
       bytes += primaryPayload?.byteLength || 0;
       secondaryBytes += secondaryPayload?.byteLength || 0;
       const storedSize = this.motionWarp ? TILED_RAIN_WARP_STORED_SIZE : TILED_RAIN_TILE_SIZE;
-      const primaryBytesPerSample = this.aggregateSummary ? 8 : 2;
+      const primaryBytesPerSample = state.aggregateSummary ? 8 : 2;
       gpuBytes += state.gpuTexture ? storedSize * storedSize * state.descriptor.frame_count * primaryBytesPerSample : 0;
-      if (this.aggregateSummary) {
+      if (state.aggregateSummary) {
         gpuBytes += state.summaryTexture
           ? TILED_RAIN_TILE_SIZE * TILED_RAIN_TILE_SIZE * state.descriptor.frame_count * 8
           : 0;
@@ -1039,7 +1121,9 @@ export class TiledRainTileStore {
     this.diagnosticsState.residentTileBlockCount = [...this.blocks.values()].filter((state) => state.status === 'ready').length;
     this.diagnosticsState.logicalResidentPayloadBytes = bytes + secondaryBytes + hazardBytes;
     this.diagnosticsState.estimatedGpuPayloadBytes = gpuBytes + hazardGpuBytes;
-    this.diagnosticsState.logicalUInt16ResidentBytes = this.aggregateSummary ? 0 : bytes;
+    this.diagnosticsState.logicalUInt16ResidentBytes = [...this.blocks.values()]
+      .filter((state) => state.status === 'ready' && !state.aggregateSummary)
+      .reduce((total, state) => total + (state.payloads?.primary || state.payload)?.byteLength || 0, 0);
     this.diagnosticsState.estimatedGpuTextureBytes = gpuBytes;
     this.diagnosticsState.logicalHazardResidentBytes = hazardBytes;
     this.diagnosticsState.estimatedHazardGpuBytes = hazardGpuBytes;
@@ -1083,7 +1167,7 @@ export class TiledRainTileStore {
     gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, this.motionWarp ? gl.REPEAT : gl.CLAMP_TO_EDGE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     const payload = state.payloads?.primary || state.payload;
-    if (this.aggregateSummary) {
+    if (state.aggregateSummary ?? this.aggregateSummary) {
       gl.texImage3D(
         gl.TEXTURE_2D_ARRAY, 0, gl.RGBA16F, TILED_RAIN_TILE_SIZE, TILED_RAIN_TILE_SIZE,
         state.descriptor.frame_count, 0, gl.RGBA, gl.HALF_FLOAT, new Uint16Array(payload)
@@ -1107,7 +1191,7 @@ export class TiledRainTileStore {
   }
 
   uploadSummaryBlock(gl, state) {
-    if (!this.aggregateSummary || !state.payloads?.secondary || state.summaryTexture) return state.summaryTexture || null;
+    if (!(state.aggregateSummary ?? this.aggregateSummary) || !state.payloads?.secondary || state.summaryTexture) return state.summaryTexture || null;
     const started = now();
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
@@ -1130,7 +1214,8 @@ export class TiledRainTileStore {
   }
 
   uploadHazardBlock(gl, state, channel) {
-    if (this.aggregateSummary || !this.hazardsAvailable || !state.hazardPayloads?.[channel]) return null;
+    if ((state.aggregateSummary ?? this.aggregateSummary)
+      || !(state.hazardsAvailable ?? this.hazardsAvailable) || !state.hazardPayloads?.[channel]) return null;
     if (state.hazardTextures?.[channel]) return state.hazardTextures[channel];
     const started = now();
     const texture = gl.createTexture();
@@ -1526,8 +1611,8 @@ void main() {
   fragColor = vec4(color, rain * u_opacity);
 }`
   ].join('\n') : [
-    '#version 300 es', 'precision highp float; precision highp int;', 'in vec2 v_local; in float v_radius; uniform vec4 u_color; uniform int u_mode; out vec4 fragColor;',
-    'void main() { if (v_radius <= 0.0) discard; if (u_mode >= 2) { fragColor = u_color; return; } float distanceToCenter = length(v_local); float edge = fwidth(distanceToCenter); float alpha = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distanceToCenter); fragColor = vec4(u_color.rgb, u_color.a * alpha); }'
+    '#version 300 es', 'precision highp float; precision highp int;', 'in vec2 v_local; in float v_radius; uniform vec4 u_color; uniform int u_mode; uniform float u_opacity; out vec4 fragColor;',
+    'void main() { if (v_radius <= 0.0) discard; if (u_mode >= 2) { fragColor = vec4(u_color.rgb, u_color.a * u_opacity); return; } float distanceToCenter = length(v_local); float edge = fwidth(distanceToCenter); float alpha = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distanceToCenter); fragColor = vec4(u_color.rgb, u_color.a * alpha * u_opacity); }'
   ].join('\n');
   const program = gl.createProgram();
   gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
@@ -1597,6 +1682,12 @@ export class TiledRainLayer {
     this.presentationMode = 'dots';
     this.hazardsVisible = true;
     this.viewportTileKeys = [];
+    this.viewportBounds = null;
+    this.stableLevel = store.lodLevel;
+    this.desiredLevel = store.lodLevel;
+    this.pendingLod = null;
+    this.lodTransition = null;
+    this.lodGeneration = 0;
     this.requestedFrame = sourceFrameForTime(store.manifest.frame_count, 0);
     this.committedFrame = null;
     this.requestGeneration = 0;
@@ -1635,17 +1726,22 @@ export class TiledRainLayer {
     for (const buffer of Object.values(this.hazardVertexBuffers || {})) if (buffer) gl.deleteBuffer(buffer);
   }
 
-  tileKeysForBounds(bounds) {
-    const minX = Math.floor((bounds.minX * this.store.gridSize - VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
-    const maxX = Math.floor((bounds.maxX * this.store.gridSize + VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
-    const minY = Math.floor((bounds.minY * this.store.gridSize - VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
-    const maxY = Math.floor((bounds.maxY * this.store.gridSize + VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
-    const indexBounds = this.store.manifest.tile_index_bounds;
+  tileKeysForBounds(bounds, level = this.stableLevel) {
+    const levelData = this.store.levelData(level);
+    const gridSize = levelData.grid?.grid_size ?? levelData.grid_size ?? TILED_RAIN_GRID_SIZE;
+    const tiles = this.store.multiLod
+      ? this.store.tilesByLevel.get(Number(level)) || new Map()
+      : this.store.tiles;
+    const minX = Math.floor((bounds.minX * gridSize - VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
+    const maxX = Math.floor((bounds.maxX * gridSize + VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
+    const minY = Math.floor((bounds.minY * gridSize - VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
+    const maxY = Math.floor((bounds.maxY * gridSize + VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
+    const indexBounds = levelData.tile_index_bounds;
     const keys = [];
     for (let y = Math.max(indexBounds.min_y, minY); y <= Math.min(indexBounds.max_y, maxY); y++) {
       for (let x = Math.max(indexBounds.min_x, minX); x <= Math.min(indexBounds.max_x, maxX); x++) {
         const key = `${x}:${y}`;
-        if (this.store.tiles.has(key)) keys.push(key);
+        if (tiles.has(key)) keys.push(key);
       }
     }
     return keys;
@@ -1653,11 +1749,80 @@ export class TiledRainLayer {
 
   setViewportBounds(bounds) {
     if (!bounds) return;
-    const nextKeys = this.tileKeysForBounds(bounds);
-    if (nextKeys.join(',') === this.viewportTileKeys.join(',')) return;
+    this.viewportBounds = bounds;
+    const nextKeys = this.tileKeysForBounds(bounds, this.stableLevel);
+    if (nextKeys.join(',') === this.viewportTileKeys.join(',') && !this.pendingLod && !this.lodTransition) return;
     this.viewportTileKeys = nextKeys;
     this.store.setVisibleTileCount(nextKeys.length);
     this.requestState();
+  }
+
+  setDesiredLod(level) {
+    if (!this.store.multiLod) return;
+    const nextLevel = selectTiledRainLod(level, this.stableLevel);
+    this.desiredLevel = nextLevel;
+    if (nextLevel === this.stableLevel && !this.lodTransition) {
+      if (this.pendingLod) {
+        this.pendingLod = null;
+        this.lodGeneration++;
+        this.requestState();
+      }
+      return;
+    }
+    const transition = this.lodTransition;
+    if (transition) {
+      const direction = Math.sign(transition.toLevel - transition.fromLevel);
+      if (nextLevel === transition.fromLevel || Math.sign(nextLevel - transition.toLevel) !== direction) {
+        const progress = Math.max(0, Math.min(1, (now() - transition.start) / (LOD_MORPH_SECONDS * 1000)));
+        transition.rawProgress = progress;
+        this.lodTransition = {
+          fromLevel: transition.toLevel,
+          toLevel: transition.fromLevel,
+          start: now() - (1 - progress) * LOD_MORPH_SECONDS * 1000,
+          rawProgress: 1 - progress
+        };
+        this.pendingLod = null;
+        this.lodGeneration++;
+        this.requestState();
+      }
+      return;
+    }
+    if (this.pendingLod) {
+      if (nextLevel !== this.pendingLod.toLevel) {
+        this.pendingLod = null;
+        this.lodGeneration++;
+        this.requestState();
+      }
+      return;
+    }
+    this.beginLodPreload();
+  }
+
+  beginLodPreload() {
+    if (!this.store.multiLod || this.stableLevel === this.desiredLevel) return;
+    const toLevel = adjacentTiledRainLod(this.stableLevel, this.desiredLevel);
+    this.pendingLod = { fromLevel: this.stableLevel, toLevel, generation: ++this.lodGeneration };
+    this.requestState();
+  }
+
+  updateLodTransition(timestamp = now()) {
+    const transition = this.lodTransition;
+    if (!transition) return false;
+    const rawProgress = Math.max(0, Math.min(1, (timestamp - transition.start) / (LOD_MORPH_SECONDS * 1000)));
+    transition.rawProgress = rawProgress;
+    if (rawProgress < 1) {
+      this.map?.triggerRepaint();
+      return true;
+    }
+    this.stableLevel = transition.toLevel;
+    this.lodTransition = null;
+    this.store.activateLevel(this.stableLevel);
+    this.viewportTileKeys = this.tileKeysForBounds(this.viewportBounds, this.stableLevel);
+    this.store.setVisibleTileCount(this.viewportTileKeys.length);
+    this.onTiming('tiled-rain-lod-transition-end');
+    this.requestState();
+    if (this.desiredLevel !== this.stableLevel) this.beginLodPreload();
+    return false;
   }
 
   setTime(time) {
@@ -1675,6 +1840,10 @@ export class TiledRainLayer {
   }
 
   requestState() {
+    if (this.store.multiLod) {
+      this.requestMultiLodState();
+      return;
+    }
     const generation = ++this.requestGeneration;
     const requestedFrame = this.requestedFrame;
     const targetKeys = this.blockKeysForFrame(requestedFrame, this.viewportTileKeys);
@@ -1726,12 +1895,71 @@ export class TiledRainLayer {
     });
   }
 
-  blockKeysForFrame(frame, tileKeys) {
+  requestMultiLodState() {
+    const generation = ++this.requestGeneration;
+    const levels = new Set([this.stableLevel]);
+    if (this.lodTransition) {
+      levels.add(this.lodTransition.fromLevel);
+      levels.add(this.lodTransition.toLevel);
+    } else if (this.pendingLod) {
+      levels.add(this.pendingLod.toLevel);
+    }
+    const requiredKeys = new Set();
+    for (const level of levels) {
+      const tileKeys = level === this.stableLevel && !this.lodTransition
+        ? this.viewportTileKeys
+        : this.tileKeysForBounds(this.viewportBounds, level);
+      for (const key of this.blockKeysForFrame(this.requestedFrame, tileKeys, level)) requiredKeys.add(key);
+    }
+    this.desiredBlockKeys = requiredKeys;
+    this.store.setProtectedBlockKeys(requiredKeys);
+    this.store.updateDesiredBlockKeys(requiredKeys);
+    this.store.evict(requiredKeys);
+    const ensure = [...requiredKeys].map((key) => {
+      const parsed = parseQualifiedBlockKey(key, true);
+      return this.store.ensureBlock(parsed.level, parsed.tileKey, parsed.blockIndex);
+    });
+    void Promise.all(ensure).then(() => {
+      if (generation !== this.requestGeneration) {
+        this.store.diagnosticsState.staleDesiredStates++;
+        return;
+      }
+      if (!this.allBlocksReady(requiredKeys)) return;
+      if (this.pendingLod) {
+        const pending = this.pendingLod;
+        const pendingDirection = Math.sign(pending.toLevel - pending.fromLevel);
+        if (pending.generation !== this.lodGeneration
+          || pendingDirection * (this.desiredLevel - pending.fromLevel) < 1) return;
+        if (!this.committedFrame) {
+          this.committedFrame = this.requestedFrame;
+          this.onCommit(this.committedFrame);
+        }
+        this.pendingLod = null;
+        this.lodTransition = {
+          fromLevel: pending.fromLevel,
+          toLevel: pending.toLevel,
+          start: now(),
+          rawProgress: 0
+        };
+        this.onTiming(`tiled-rain-lod-transition-start-${pending.fromLevel}-${pending.toLevel}`);
+        this.requestState();
+      } else if (!this.committedFrame || this.requestedFrame.frame0 !== this.committedFrame.frame0
+        || this.requestedFrame.frame1 !== this.committedFrame.frame1 || this.requestedFrame.progress !== this.committedFrame.progress) {
+        this.commitFrame(this.requestedFrame);
+      }
+      this.map?.triggerRepaint();
+    }).catch((error) => {
+      if (generation !== this.requestGeneration || error?.name === 'AbortError') return;
+      this.store.diagnosticsState.lastError = error instanceof Error ? error.message : String(error);
+    });
+  }
+
+  blockKeysForFrame(frame, tileKeys, level = this.stableLevel) {
     const blockA = Math.floor(frame.frame0 / this.store.manifest.temporal_block_size);
     const blockB = Math.floor(frame.frame1 / this.store.manifest.temporal_block_size);
     return new Set(tileKeys.flatMap((tileKey) => [blockA, blockB]
       .filter((block, index, values) => values.indexOf(block) === index)
-      .map((block) => `${tileKey}:${block}`)));
+      .map((block) => qualifiedBlockKey(level, tileKey, block, this.store.multiLod))));
   }
 
   allBlocksReady(keys) {
@@ -1743,6 +1971,10 @@ export class TiledRainLayer {
   }
 
   canRenderFrame(frame) {
+    if (this.store.multiLod) {
+      const levels = this.lodTransition ? [this.lodTransition.fromLevel, this.lodTransition.toLevel] : [this.stableLevel];
+      return levels.every((level) => this.allBlocksReady(this.blockKeysForFrame(frame, this.tileKeysForBounds(this.viewportBounds, level), level)));
+    }
     return this.allBlocksReady(this.blockKeysForFrame(frame, this.viewportTileKeys))
       && this.allMotionTilesReady(this.store.motionWarp ? new Set(this.viewportTileKeys) : new Set());
   }
@@ -1752,7 +1984,10 @@ export class TiledRainLayer {
     // commit. The committed pair is always complete for the current viewport.
     this.requestGeneration++;
     this.committedFrame = frame;
-    const targetKeys = this.blockKeysForFrame(frame, this.viewportTileKeys);
+    const targetKeys = this.store.multiLod
+      ? new Set([...(this.lodTransition ? [this.lodTransition.fromLevel, this.lodTransition.toLevel] : [this.stableLevel])]
+        .flatMap((level) => this.blockKeysForFrame(frame, this.tileKeysForBounds(this.viewportBounds, level), level)))
+      : this.blockKeysForFrame(frame, this.viewportTileKeys);
     this.desiredBlockKeys = targetKeys;
     this.store.setProtectedBlockKeys(targetKeys);
     this.store.updateDesiredBlockKeys(targetKeys, this.store.motionWarp ? new Set(this.viewportTileKeys) : new Set());
@@ -1792,7 +2027,7 @@ export class TiledRainLayer {
     return program;
   }
 
-  renderPass(gl, program, projection, tile, blockA, blockB, mode) {
+  renderPass(gl, program, projection, tile, blockA, blockB, mode, opacity = 1) {
     const { locations } = program;
     gl.useProgram(program.program);
     setGeographicProjection(gl, locations, projection);
@@ -1823,9 +2058,10 @@ export class TiledRainLayer {
     gl.uniform1f(locations.temporalProgress, this.committedFrame.progress);
     if (!this.store.aggregateSummary) gl.uniform1f(locations.physicalMaxMmh, this.store.manifest.encoding.physical_max_mmh);
     if (this.presentationMode === 'squares') {
-      gl.uniform1f(locations.opacity, 1);
+      gl.uniform1f(locations.opacity, opacity);
       gl.uniform1f(locations.hazardsVisible, this.hazardsVisible ? 1 : 0);
     } else {
+      gl.uniform1f(locations.opacity, opacity);
       gl.uniform1i(locations.mode, mode);
       const type = ['rain', 'strong', 'storm', 'hail'][mode];
       gl.uniform4fv(locations.color, COLORS[type]);
@@ -1879,50 +2115,61 @@ export class TiledRainLayer {
     gl.drawArraysInstanced(gl.TRIANGLES, 0, vertexCount, TILED_RAIN_TILE_SIZE * TILED_RAIN_TILE_SIZE);
   }
 
-  render(gl, args) {
-    if (!this.active) return;
-    if (!this.committedFrame) return;
-    const program = this.programsFor(gl, args.shaderData);
-    const blockAIndex = Math.floor(this.committedFrame.frame0 / this.store.manifest.temporal_block_size);
-    const blockBIndex = Math.floor(this.committedFrame.frame1 / this.store.manifest.temporal_block_size);
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthMask(false);
+  renderLevel(gl, args, level, opacity, modes) {
+    this.store.activateLevel(level);
+    const levelData = this.store.levelData(level);
+    const tileKeys = this.tileKeysForBounds(this.viewportBounds, level);
+    const blockAIndex = Math.floor(this.committedFrame.frame0 / levelData.temporal_block_size);
+    const blockBIndex = Math.floor(this.committedFrame.frame1 / levelData.temporal_block_size);
     const renderableTiles = [];
-    for (const tileKey of this.viewportTileKeys) {
-      const tile = this.store.tiles.get(tileKey);
-      const blockA = this.store.blocks.get(`${tileKey}:${blockAIndex}`);
-      const blockB = this.store.blocks.get(`${tileKey}:${blockBIndex}`);
+    for (const tileKey of tileKeys) {
+      const tile = this.store.tilesByLevel.get(Number(level))?.get(tileKey)
+        || (!this.store.multiLod ? this.store.tiles.get(tileKey) : null);
+      const blockA = this.store.blocks.get(qualifiedBlockKey(level, tileKey, blockAIndex, this.store.multiLod));
+      const blockB = this.store.blocks.get(qualifiedBlockKey(level, tileKey, blockBIndex, this.store.multiLod));
       const motionTile = this.store.motionWarp ? this.store.motionTilesState?.get(tileKey) : null;
       if (!tile || blockA?.status !== 'ready' || blockB?.status !== 'ready'
         || (this.store.motionWarp && motionTile?.status !== 'ready')) continue;
       renderableTiles.push({ tile, blockA, blockB });
     }
+    const program = this.programsFor(gl, args.shaderData);
+    for (const mode of modes) {
+      for (const { tile, blockA, blockB } of renderableTiles) {
+        this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, mode, opacity);
+      }
+    }
+    return renderableTiles.length;
+  }
+
+  render(gl, args) {
+    if (!this.active) return;
+    if (!this.committedFrame) return;
+    this.updateLodTransition(now());
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    const modes = this.presentationMode === 'squares' ? [0] : [0, 1, ...(this.hazardsAvailable && this.hazardsVisible ? [2, 3] : [])];
+    const endpoints = this.store.multiLod && this.lodTransition
+      ? [
+        [this.lodTransition.fromLevel, 1 - smoothstep(0, 1, this.lodTransition.rawProgress)],
+        [this.lodTransition.toLevel, smoothstep(0, 1, this.lodTransition.rawProgress)]
+      ]
+      : [[this.stableLevel, 1]];
+    let rendered = 0;
     if (this.presentationMode === 'squares') {
       gl.enable(gl.POLYGON_OFFSET_FILL);
       gl.polygonOffset(-1, -1);
-      for (const { tile, blockA, blockB } of renderableTiles) {
-        this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 0);
-      }
+      for (const [level, opacity] of endpoints) rendered += this.renderLevel(gl, args, level, opacity, modes);
       gl.disable(gl.POLYGON_OFFSET_FILL);
     } else {
-      for (const { tile, blockA, blockB } of renderableTiles) {
-        this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 0);
-      }
-      for (const { tile, blockA, blockB } of renderableTiles) {
-        this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 1);
-      }
-    }
-    if (this.presentationMode === 'dots' && this.hazardsAvailable && this.hazardsVisible) {
-      for (const { tile, blockA, blockB } of renderableTiles) {
-        this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 2);
-      }
-      for (const { tile, blockA, blockB } of renderableTiles) {
-        this.renderPass(gl, program, args.defaultProjectionData, tile, blockA, blockB, 3);
+      // Keep rain -> strong -> storm -> hail ordering across both complete
+      // endpoint representations during a multi-LOD fade.
+      for (const mode of modes) {
+        for (const [level, opacity] of endpoints) rendered += this.renderLevel(gl, args, level, opacity, [mode]);
       }
     }
-    const rendered = renderableTiles.length;
+    this.store.activateLevel(this.stableLevel);
     gl.depthMask(true);
     if (rendered && !this.firstVisibleReported) {
       this.firstVisibleReported = true;
@@ -1958,7 +2205,19 @@ export class TiledRainLayer {
         || this.requestedFrame.frame1 !== this.committedFrame.frame1
         || this.requestedFrame.progress !== this.committedFrame.progress,
       currentTemporalBlocks: [blockA, blockB],
-      lodLevel: this.store.lodLevel,
+      lodLevel: this.stableLevel,
+      stableLevel: this.stableLevel,
+      desiredLevel: this.desiredLevel,
+      lodTransition: this.lodTransition ? {
+        fromLevel: this.lodTransition.fromLevel,
+        toLevel: this.lodTransition.toLevel,
+        progress: this.lodTransition.rawProgress,
+        easedProgress: smoothstep(0, 1, this.lodTransition.rawProgress)
+      } : null,
+      lodPreloadPending: this.pendingLod ? {
+        fromLevel: this.pendingLod.fromLevel,
+        toLevel: this.pendingLod.toLevel
+      } : null,
       payloadKind: this.store.aggregateSummary ? 'aggregate-summary' : 'direct',
       payloadDtype: this.store.aggregateSummary ? 'Float16 RGBA summary textures' : 'UInt16 rain / UInt8 hazards',
       gridSize: this.store.gridSize,

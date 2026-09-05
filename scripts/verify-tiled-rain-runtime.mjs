@@ -3,6 +3,8 @@ import {
   aggregateDotsRadiusFractions,
   aggregateDotsTemporalRadius,
   aggregateSquaresInputs,
+  adjacentTiledRainLod,
+  automaticTiledRainLod,
   selectTiledRainLod,
   sourceFrameForTime,
   TiledRainLayer,
@@ -91,6 +93,10 @@ assert.deepEqual([11, 12, 13, 14].map((value) => selectTiledRainLod(String(value
 assert.equal(selectTiledRainLod(undefined), 13);
 assert.throws(() => selectTiledRainLod('10'));
 assert.throws(() => selectTiledRainLod('13.5'));
+assert.deepEqual([0, 5, 10, 20].map((zoom) => automaticTiledRainLod(zoom)), [11, 11, 14, 14]);
+assert.deepEqual([11, 12, 13].map((level) => adjacentTiledRainLod(level, 14)), [12, 13, 14]);
+assert.equal(adjacentTiledRainLod(14, 11), 13);
+assert.throws(() => adjacentTiledRainLod(10, 11));
 assert.deepEqual(sourceFrameForTime(19, 0.5), { frame0: 9, frame1: 9, progress: 0 });
 assert.deepEqual(sourceFrameForTime(19, 0.525), { frame0: 9, frame1: 10, progress: 0.45000000000000107 });
 
@@ -106,6 +112,8 @@ for (const level of validated.levels) {
   const sourceBlock = level.tiles[0].blocks[0];
   const state = {
     descriptor: sourceBlock, status: 'ready', payload: new ArrayBuffer(sourceBlock[payloadName].byte_length),
+    aggregateSummary: level.kind === 'aggregate-summary',
+    hazardsAvailable: level.hasHazardPayload === true,
     payloads: { primary: null, secondary: null }, hazardPayloads: { storm: null, hail: null },
     gpuTexture: null, summaryTexture: null, hazardTextures: {}
   };
@@ -146,6 +154,53 @@ assert.deepEqual(aggregateDotsRadiusFractions({ ...first, rainCoverage: -1 }), {
 assert.deepEqual(aggregateSquaresInputs({ ...first, rainCoverage: -1 }, second, 0), {
   rainWetMeanMmh: 8, rainCoverage: 1, stormCoverage: 0.36, stormMaxSeverity: 0.4, hailCoverage: 0.16, hailMaxSeverity: 0.7
 });
+
+const lifecycleDataset = {
+  manifest: validated,
+  level: validated.levels[0],
+  manifestUrl: '/lod/manifest.json',
+  tiles: new Map([['0:0', validated.levels[0].tiles[0]]]),
+  isMultiLod: true
+};
+const lifecycleStore = new TiledRainTileStore(lifecycleDataset);
+const lifecycleLayer = new TiledRainLayer(lifecycleStore);
+const readyStates = new Map();
+lifecycleStore.ensureBlock = (level, tileKey, blockIndex) => {
+  const key = `${level}:${tileKey}:${blockIndex}`;
+  let state = readyStates.get(key);
+  if (!state) {
+    const descriptor = lifecycleStore.descriptor(level, tileKey, blockIndex);
+    state = { key, level, tileKey, blockIndex, descriptor, status: 'ready', aggregateSummary: level < 13, hazardsAvailable: false,
+      payload: new ArrayBuffer(0), payloads: { primary: null, secondary: null }, hazardPayloads: {}, hazardTextures: {} };
+    readyStates.set(key, state);
+    lifecycleStore.blocks.set(key, state);
+  }
+  return Promise.resolve(state);
+};
+const lifecycleBounds = { minX: 64 / 2 ** 11, maxX: 64 / 2 ** 11, minY: 64 / 2 ** 11, maxY: 64 / 2 ** 11 };
+lifecycleLayer.setViewportBounds(lifecycleBounds);
+assert.deepEqual(lifecycleLayer.viewportTileKeys, ['0:0']);
+lifecycleLayer.setDesiredLod(14);
+assert.deepEqual(lifecycleLayer.pendingLod, { fromLevel: 11, toLevel: 12, generation: lifecycleLayer.pendingLod.generation });
+await Promise.resolve();
+await Promise.resolve();
+await new Promise((resolve) => setTimeout(resolve, 0));
+await Promise.resolve();
+assert.deepEqual(lifecycleLayer.lodTransition && [lifecycleLayer.lodTransition.fromLevel, lifecycleLayer.lodTransition.toLevel], [11, 12]);
+assert.ok([...lifecycleStore.blocks.keys()].some((key) => key.startsWith('11:')));
+assert.ok([...lifecycleStore.blocks.keys()].some((key) => key.startsWith('12:')));
+lifecycleLayer.setDesiredLod(11);
+assert.deepEqual([lifecycleLayer.lodTransition.fromLevel, lifecycleLayer.lodTransition.toLevel], [12, 11]);
+lifecycleLayer.updateLodTransition(lifecycleLayer.lodTransition.start + 1000);
+await Promise.resolve();
+await Promise.resolve();
+assert.equal(lifecycleLayer.stableLevel, 11);
+lifecycleLayer.setDesiredLod(14);
+assert.equal(lifecycleLayer.pendingLod?.toLevel, 12);
+lifecycleStore.setProtectedBlockKeys(new Set(Array.from({ length: 1000 }, (_, index) => `14:0:0:${index}`)));
+assert.equal(lifecycleStore.diagnosticsState.effectiveReadyBlockLimit, 1000);
+lifecycleStore.setProtectedBlockKeys(new Set());
+assert.equal(lifecycleStore.diagnosticsState.effectiveReadyBlockLimit, 320);
 
 const sharedStore = { hazardsAvailable: true, aggregateSummary: true, gridSize: 2 ** 11, lodLevel: 11, manifest: { frame_count: 2, temporal_block_size: 1 }, tiles: new Map(), blocks: new Map() };
 const sharedLayer = new TiledRainLayer(sharedStore);

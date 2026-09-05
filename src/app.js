@@ -20,7 +20,7 @@ import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
-import { beginTiledRainLoad, selectTiledRainLod, TiledRainLayer } from './engine/tiled-rain.js';
+import { automaticTiledRainLod, beginTiledRainLoad, selectTiledRainLod, TiledRainLayer } from './engine/tiled-rain.js';
 import {
   buildMotionProbe,
   sampleIdentityFromMercator,
@@ -32,7 +32,11 @@ const queryParameters = new URLSearchParams(window.location.search);
 const tiledRainEnabled = queryParameters.get('tiledRain') === '1';
 const diagnosticsEnabled = queryParameters.get('diagnostics') === '1';
 const motionWarpEnabled = tiledRainEnabled && queryParameters.get('motionWarp') === '1';
-const tiledRainLod = motionWarpEnabled ? 13 : selectTiledRainLod(queryParameters.get('tiledRainLod'));
+const tiledRainLodParameter = queryParameters.get('tiledRainLod');
+const tiledRainLodOverride = motionWarpEnabled || tiledRainLodParameter === null || tiledRainLodParameter === ''
+  ? null : selectTiledRainLod(tiledRainLodParameter);
+const tiledRainLod = motionWarpEnabled ? 13 : tiledRainLodOverride || 13;
+const tiledRainAutomaticLod = tiledRainEnabled && !motionWarpEnabled && tiledRainLodOverride === null;
 const motionWarpDebugMode = motionWarpEnabled && queryParameters.get('motionWarpDebug') === 'full' ? 'full' : null;
 const motionProbeEnabled = tiledRainEnabled && diagnosticsEnabled && queryParameters.get('motionProbe') === '1';
 const startupTimings = Object.create(null);
@@ -331,12 +335,14 @@ function diagnosticsSnapshot() {
       bearing: map.getBearing?.() ?? null
     },
     lod: {
-      stableLevel: tiledRainEnabled ? (weatherLayer?.diagnostics()?.lodLevel || tiledRainLod) : state.lod.level,
-      transition: state.lodTransition ? {
+      stableLevel: tiledRainEnabled ? (weatherLayer?.diagnostics()?.stableLevel || tiledRainLod) : state.lod.level,
+      desiredLevel: tiledRainEnabled ? (weatherLayer?.diagnostics()?.desiredLevel || tiledRainLod) : state.desiredLevel,
+      transition: tiledRainEnabled ? weatherLayer?.diagnostics()?.lodTransition || null : state.lodTransition ? {
         fromLevel: state.lodTransition.fromLevel,
         toLevel: state.lodTransition.toLevel,
         progress: state.lodTransition.rawProgress
       } : null,
+      preload: tiledRainEnabled ? weatherLayer?.diagnostics()?.lodPreloadPending || null : null,
       leafCount: tiledRainEnabled ? weatherLayer?.diagnostics()?.proceduralInstancesPerTile || 0 : state.levelData?.count || 0
     },
     canonicalWindow: {
@@ -732,7 +738,12 @@ function updateLodDiagnostics() {
   const zoom = state.logicalSamplingZoom.toFixed(2);
   if (tiledRainEnabled) {
     const tiled = weatherLayer?.diagnostics();
-    const value = `Zoom ${zoom} · L${tiled?.lodLevel || tiledRainLod} tiled · ${tiled?.visibleTileCount || 0} tiles`;
+    const levelText = tiled?.lodTransition
+      ? `L${tiled.stableLevel} → L${tiled.lodTransition.toLevel}`
+      : tiled?.lodPreloadPending
+        ? `L${tiled.stableLevel} ⇢ L${tiled.lodPreloadPending.toLevel}`
+        : `L${tiled?.stableLevel || tiledRainLod}`;
+    const value = `Zoom ${zoom} · ${levelText} tiled · ${tiled?.visibleTileCount || 0} tiles`;
     if (diagnosticsHud) diagnosticsHud.setBaseText(value);
     else lodDiagnostics.textContent = value;
     return;
@@ -758,12 +769,20 @@ function updateRawMapMaxZoom(latitude) {
   map.setMaxZoom(nextRawMaxZoom);
 }
 
+function updateTiledRainDesiredLod() {
+  if (!tiledRainAutomaticLod || !weatherLayer) return;
+  weatherLayer.setDesiredLod(automaticTiledRainLod(state.logicalSamplingZoom));
+}
+
 function updateLogicalSamplingZoom() {
   const next = cameraState();
   updateRawMapMaxZoom(next.latitude);
   if (state.resettingView) {
     state.camera = next;
-    if (tiledRainEnabled) state.logicalSamplingZoom = next.rawZoom;
+    if (tiledRainEnabled) {
+      state.logicalSamplingZoom = next.rawZoom;
+      updateTiledRainDesiredLod();
+    }
     updateResetViewControl();
     updateLodDiagnostics();
     return;
@@ -771,14 +790,20 @@ function updateLogicalSamplingZoom() {
   const previous = state.camera;
   if (!previous) {
     state.camera = next;
-    if (tiledRainEnabled) state.logicalSamplingZoom = next.rawZoom;
+    if (tiledRainEnabled) {
+      state.logicalSamplingZoom = next.rawZoom;
+      updateTiledRainDesiredLod();
+    }
     updateLodDiagnostics();
     return;
   }
   if (tiledRainEnabled) {
-    state.logicalSamplingZoom = next.rawZoom;
+    let delta = next.rawZoom - previous.rawZoom;
+    delta -= logicalZoomLatitudeAdjustment(next.latitude, previous.latitude);
+    if (Number.isFinite(delta)) state.logicalSamplingZoom = Math.min(MAX_LOGICAL_SAMPLING_ZOOM, state.logicalSamplingZoom + delta);
     state.camera = next;
     weatherLayer?.setViewportBounds(visibleMercatorBounds());
+    updateTiledRainDesiredLod();
     updateLodDiagnostics();
     return;
   }
@@ -936,6 +961,9 @@ function tryInitializeTiledRainLayer() {
   state.mapReady = true;
   state.canonicalWindow = null;
   weatherLayer.setViewportBounds(initialBounds);
+  weatherLayer.setDesiredLod(tiledRainAutomaticLod
+    ? automaticTiledRainLod(state.logicalSamplingZoom)
+    : tiledRainLod);
   weatherLayer.setTime(state.time / LOOP_SECONDS);
   updateLodDiagnostics();
   applyRenderMode();
@@ -994,6 +1022,11 @@ function rebuildSamples(level, now = performance.now()) {
 }
 
 function updateLODTransition(now) {
+  if (tiledRainEnabled) {
+    weatherLayer?.updateLodTransition(now);
+    updateLodDiagnostics();
+    return;
+  }
   const transition = state.lodTransition;
   if (!transition) return;
   const rawProgress = clamp((now - transition.start) / (LOD_MORPH_SECONDS * 1000), 0, 1);
@@ -1451,6 +1484,7 @@ map.on('moveend', () => {
   rebaseCamera();
   if (tiledRainEnabled) {
     weatherLayer?.setViewportBounds(visibleMercatorBounds());
+    updateTiledRainDesiredLod();
     updateResetViewControl();
     return;
   }
@@ -1562,7 +1596,8 @@ function frame(now) {
       : String(state.time / LOOP_SECONDS);
   }
   updateTimestamp();
-  if ((state.playing && !state.scrubbing && !state.playbackStalled) || state.lodTransition) wakeApplicationFrame();
+  if ((state.playing && !state.scrubbing && !state.playbackStalled) || state.lodTransition
+    || (tiledRainEnabled && (weatherLayer?.lodTransition || weatherLayer?.pendingLod))) wakeApplicationFrame();
 }
 
 wakeApplicationFrame();
