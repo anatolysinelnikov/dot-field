@@ -12,13 +12,14 @@ import {
 import { LOD_MORPH_SECONDS, RAIN_VISIBILITY_FLOOR_MMH } from './config.js';
 import { sha256ArrayBuffer } from './sha256.js';
 import { geographicHazardRadiusForSeverity } from './hazard-renderer.js';
-import { zoomToMercatorGridLevel } from './geographic-lod.js';
+import { mercatorGridLevelBoundary, zoomToMercatorGridLevel } from './geographic-lod.js';
 
 export const TILED_RAIN_SCHEMA = 'dot-field-tiled-rain-v0';
 export const TILED_RAIN_LOD_SCHEMA = 'dot-field-tiled-rain-lod-v1';
 export const TILED_RAIN_WARP_SCHEMA = 'dot-field-tiled-rain-warp-v1';
 export const TILED_RAIN_LOD_LEVEL = 13;
 export const TILED_RAIN_LOD_LEVELS = Object.freeze([11, 12, 13, 14]);
+export const TILED_RAIN_LOD_HYSTERESIS = 0.08;
 export const TILED_RAIN_TILE_SIZE = 128;
 export const TILED_RAIN_GRID_SIZE = 2 ** TILED_RAIN_LOD_LEVEL;
 export const TILED_RAIN_WARP_HALO_SIZE = 13;
@@ -95,6 +96,39 @@ export function selectTiledRainLod(value, fallback = TILED_RAIN_LOD_LEVEL) {
 export function automaticTiledRainLod(logicalZoom, minLevel = 11, maxLevel = 14) {
   const unclamped = zoomToMercatorGridLevel(Number.isFinite(logicalZoom) ? logicalZoom : 0);
   return Math.max(minLevel, Math.min(maxLevel, unclamped));
+}
+
+// Automatic tiled LOD alone carries selection state.  The regular CPU
+// renderer continues to use its nearest-level mapping without a dead band.
+export function automaticTiledRainLodWithHysteresis(logicalZoom, selectedLevel, minLevel = 11, maxLevel = 14) {
+  const zoom = Number.isFinite(logicalZoom) ? logicalZoom : 0;
+  let level = TILED_RAIN_LOD_LEVELS.includes(selectedLevel)
+    ? Math.max(minLevel, Math.min(maxLevel, selectedLevel))
+    : automaticTiledRainLod(zoom, minLevel, maxLevel);
+  while (level < maxLevel && zoom >= mercatorGridLevelBoundary(level) + TILED_RAIN_LOD_HYSTERESIS) level++;
+  while (level > minLevel && zoom <= mercatorGridLevelBoundary(level - 1) - TILED_RAIN_LOD_HYSTERESIS) level--;
+  return level;
+}
+
+// A fine 128-square tile belongs to exactly one coarse tile.  These helpers
+// mirror the transition shader arithmetic and keep deterministic verification
+// independent of WebGL.
+export function tiledRainCoarseTileForFineTile(fineTileX, fineTileY) {
+  return { x: Math.floor(fineTileX / 2), y: Math.floor(fineTileY / 2) };
+}
+
+export function tiledRainCoarseLocalForFineSample(fineTileX, fineTileY, fineLocalX, fineLocalY) {
+  const shared = fineLocalX % 2 === 0 && fineLocalY % 2 === 0;
+  return {
+    shared,
+    x: shared ? ((fineTileX & 1) * 64 + fineLocalX / 2) : null,
+    y: shared ? ((fineTileY & 1) * 64 + fineLocalY / 2) : null
+  };
+}
+
+export function tiledRainDotsMorphRadius(coarseRadius, fineRadius, refineProgress) {
+  const progress = Math.max(0, Math.min(1, refineProgress));
+  return Math.sqrt(Math.max(0, coarseRadius * coarseRadius + (fineRadius * fineRadius - coarseRadius * coarseRadius) * progress));
 }
 
 export function initialTiledRainLod(logicalZoom, override = null, motionWarp = false) {
@@ -1312,6 +1346,21 @@ export class TiledRainTileStore {
     return texture;
   }
 
+  zeroSummaryTexture(gl) {
+    if (this.emptySummaryTexture) return this.emptySummaryTexture;
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA16F, 1, 1, 1, 0, gl.RGBA, gl.HALF_FLOAT, new Uint16Array(4));
+    this.emptySummaryTexture = texture;
+    this.gl = gl;
+    return texture;
+  }
+
   uploadSummaryBlock(gl, state) {
     if (!(state.aggregateSummary ?? this.aggregateSummary) || !state.payloads?.secondary || state.summaryTexture) return state.summaryTexture || null;
     const started = now();
@@ -1792,6 +1841,106 @@ void main() {
   return { program, locations };
 }
 
+// This program deliberately exists beside the stable program.  It is compiled
+// only for an adjacent tiled Dots transition; stable draws retain their exact
+// shader, texture bindings, and submission cost.
+function makeDotsTransitionProgram(gl, shaderData, lowerAggregate, fineAggregate, hazardsAvailable, lowerGridSize, fineGridSize) {
+  const endpoint = (prefix, aggregate) => {
+    if (aggregate) return [
+      `uniform sampler2DArray u_${prefix}_summaryA; uniform sampler2DArray u_${prefix}_summaryB;`,
+      `uniform sampler2DArray u_${prefix}_hazardA; uniform sampler2DArray u_${prefix}_hazardB;`,
+      `uniform int u_${prefix}_hazardAvailableA; uniform int u_${prefix}_hazardAvailableB;`,
+      `uniform int u_${prefix}_frameLayerA; uniform int u_${prefix}_frameLayerB;`,
+      `float ${prefix}EndpointRadius(ivec2 coordinate) {`,
+      `  vec4 summaryA = texelFetch(u_${prefix}_summaryA, ivec3(coordinate, u_${prefix}_frameLayerA), 0);`,
+      `  vec4 summaryB = texelFetch(u_${prefix}_summaryB, ivec3(coordinate, u_${prefix}_frameLayerB), 0);`,
+      '  bool validA = summaryA.z >= -0.5; bool validB = summaryB.z >= -0.5;',
+      `  vec4 hazardA = u_${prefix}_hazardAvailableA == 1 ? texelFetch(u_${prefix}_hazardA, ivec3(coordinate, u_${prefix}_frameLayerA), 0) : vec4(0.0);`,
+      `  vec4 hazardB = u_${prefix}_hazardAvailableB == 1 ? texelFetch(u_${prefix}_hazardB, ivec3(coordinate, u_${prefix}_frameLayerB), 0) : vec4(0.0);`,
+      '  float rainA = validA ? sqrt(max(summaryA.z, 0.0)) * rainVisibility(summaryA.x) * ' + DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6) + ' : 0.0;',
+      '  float rainB = validB ? sqrt(max(summaryB.z, 0.0)) * rainVisibility(summaryB.x) * ' + DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6) + ' : 0.0;',
+      '  float strongA = validA ? sqrt(max(summaryA.w, 0.0)) * strongRain(summaryA.y) : 0.0;',
+      '  float strongB = validB ? sqrt(max(summaryB.w, 0.0)) * strongRain(summaryB.y) : 0.0;',
+      '  float stormA = validA ? sqrt(max(hazardA.x, 0.0)) * stormRadius(hazardA.y) : 0.0;',
+      '  float stormB = validB ? sqrt(max(hazardB.x, 0.0)) * stormRadius(hazardB.y) : 0.0;',
+      '  float hailA = validA ? sqrt(max(hazardA.z, 0.0)) * hailRadius(hazardA.w) : 0.0;',
+      '  float hailB = validB ? sqrt(max(hazardB.z, 0.0)) * hailRadius(hazardB.w) : 0.0;',
+      '  float radiusA = u_mode == 0 ? rainA : u_mode == 1 ? strongA : u_mode == 2 ? (hailA > 0.0 ? 0.0 : stormA) : hailA;',
+      '  float radiusB = u_mode == 0 ? rainB : u_mode == 1 ? strongB : u_mode == 2 ? (hailB > 0.0 ? 0.0 : stormB) : hailB;',
+      '  return validA && validB ? sqrt(mix(radiusA * radiusA, radiusB * radiusB, u_temporalProgress)) : validA ? radiusA : validB ? radiusB : 0.0;',
+      '}'
+    ];
+    return [
+      `uniform usampler2DArray u_${prefix}_rainA; uniform usampler2DArray u_${prefix}_rainB;`,
+      `uniform int u_${prefix}_frameLayerA; uniform int u_${prefix}_frameLayerB; uniform float u_${prefix}_physicalMaxMmh;`,
+      ...(hazardsAvailable ? [
+        `uniform sampler2DArray u_${prefix}_stormA; uniform sampler2DArray u_${prefix}_stormB; uniform sampler2DArray u_${prefix}_hailA; uniform sampler2DArray u_${prefix}_hailB;`,
+        `uniform int u_${prefix}_stormAvailableA; uniform int u_${prefix}_stormAvailableB; uniform int u_${prefix}_hailAvailableA; uniform int u_${prefix}_hailAvailableB;`
+      ] : []),
+      `float ${prefix}DecodeRain(uint code) { return code <= 1u ? 0.0 : (float(code) - 1.0) / 65534.0 * u_${prefix}_physicalMaxMmh; }`,
+      `float ${prefix}EndpointRadius(ivec2 coordinate) {`,
+      `  uint codeA = texelFetch(u_${prefix}_rainA, ivec3(coordinate, u_${prefix}_frameLayerA), 0).r; uint codeB = texelFetch(u_${prefix}_rainB, ivec3(coordinate, u_${prefix}_frameLayerB), 0).r;`,
+      `  bool validA = codeA != 0u; bool validB = codeB != 0u; float rainA = ${prefix}DecodeRain(codeA); float rainB = ${prefix}DecodeRain(codeB);`,
+      '  float rain = validA && validB ? mix(rainA, rainB, u_temporalProgress) : validA ? rainA : validB ? rainB : 0.0;',
+      ...(hazardsAvailable ? [
+        `  float storm = mix(u_${prefix}_stormAvailableA == 1 ? texelFetch(u_${prefix}_stormA, ivec3(coordinate, u_${prefix}_frameLayerA), 0).r : 0.0, u_${prefix}_stormAvailableB == 1 ? texelFetch(u_${prefix}_stormB, ivec3(coordinate, u_${prefix}_frameLayerB), 0).r : 0.0, u_temporalProgress);`,
+        `  float hail = mix(u_${prefix}_hailAvailableA == 1 ? texelFetch(u_${prefix}_hailA, ivec3(coordinate, u_${prefix}_frameLayerA), 0).r : 0.0, u_${prefix}_hailAvailableB == 1 ? texelFetch(u_${prefix}_hailB, ivec3(coordinate, u_${prefix}_frameLayerB), 0).r : 0.0, u_temporalProgress);`,
+        '  return u_mode == 0 ? rainVisibility(rain) * ' + DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6) + ' : u_mode == 1 ? strongRain(rain) : u_mode == 2 ? (hailRadius(hail) > 0.0 ? 0.0 : stormRadius(storm)) : hailRadius(hail);'
+      ] : [
+        '  return u_mode == 0 ? rainVisibility(rain) * ' + DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6) + ' : strongRain(rain);'
+      ]),
+      '}'
+    ];
+  };
+  const vertexSource = [
+    '#version 300 es', shaderData.vertexShaderPrelude,
+    'precision highp float; precision highp int; precision highp sampler2DArray; precision highp usampler2DArray;',
+    'in vec2 a_vertex; out vec2 v_local; out float v_radius;',
+    'uniform vec2 u_fineTileOrigin; uniform ivec2 u_coarseLocalBase; uniform float u_temporalProgress; uniform float u_refineProgress; uniform int u_mode;',
+    RAIN_VISIBILITY_SHADER, strongRainShader(),
+    'float stormRadius(float severity) { return severity <= 0.033750 ? 0.0 : mix(0.30, 0.72, pow(smoothstep(0.033750, 0.930000, severity), 0.47)); }',
+    'float hailRadius(float severity) { return severity <= 0.049500 ? 0.0 : mix(0.34, 1.00, pow(smoothstep(0.049500, 0.930000, severity), 0.47)); }',
+    ...endpoint('coarse', lowerAggregate), ...endpoint('fine', fineAggregate),
+    'void main() {',
+    `  int localIndex = gl_InstanceID; int localX = localIndex % ${TILED_RAIN_TILE_SIZE}; int localY = localIndex / ${TILED_RAIN_TILE_SIZE};`,
+    '  ivec2 fineLocal = ivec2(localX, localY); bool shared = (localX & 1) == 0 && (localY & 1) == 0;',
+    '  float coarseRadius = shared ? coarseEndpointRadius(u_coarseLocalBase + fineLocal / 2) : 0.0;',
+    '  float fineRadius = fineEndpointRadius(fineLocal);',
+    '  float radiusFraction = sqrt(mix(coarseRadius * coarseRadius, fineRadius * fineRadius, u_refineProgress));',
+    `  v_radius = radiusFraction / ${fineGridSize}.0; v_local = a_vertex;`,
+    `  vec2 center = u_fineTileOrigin + vec2(float(localX), float(localY)) / ${fineGridSize}.0;`,
+    '  gl_Position = projectTile(center + a_vertex * v_radius);',
+    '}'
+  ].join('\n');
+  const fragmentSource = [
+    '#version 300 es', 'precision highp float; precision highp int;',
+    'in vec2 v_local; in float v_radius; uniform vec4 u_color; uniform int u_mode; out vec4 fragColor;',
+    'void main() { if (v_radius <= 0.0) discard; if (u_mode >= 2) { fragColor = u_color; return; } float distanceToCenter = length(v_local); float edge = fwidth(distanceToCenter); float alpha = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distanceToCenter); fragColor = vec4(u_color.rgb, u_color.a * alpha); }'
+  ].join('\n');
+  const program = gl.createProgram();
+  gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertexSource));
+  gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'Tiled rain Dots transition shader linking failed.');
+  const locations = {
+    fineTileOrigin: gl.getUniformLocation(program, 'u_fineTileOrigin'),
+    coarseLocalBase: gl.getUniformLocation(program, 'u_coarseLocalBase'),
+    temporalProgress: gl.getUniformLocation(program, 'u_temporalProgress'),
+    refineProgress: gl.getUniformLocation(program, 'u_refineProgress'),
+    mode: gl.getUniformLocation(program, 'u_mode'), color: gl.getUniformLocation(program, 'u_color'),
+    matrix: gl.getUniformLocation(program, 'u_matrix'), fallbackMatrix: gl.getUniformLocation(program, 'u_projection_fallback_matrix'),
+    projectionMatrix: gl.getUniformLocation(program, 'u_projection_matrix'), tileMercatorCoords: gl.getUniformLocation(program, 'u_projection_tile_mercator_coords'),
+    clippingPlane: gl.getUniformLocation(program, 'u_projection_clipping_plane'), projectionTransition: gl.getUniformLocation(program, 'u_projection_transition')
+  };
+  for (const prefix of ['coarse', 'fine']) {
+    for (const suffix of ['RainA', 'RainB', 'SummaryA', 'SummaryB', 'HazardA', 'HazardB', 'HazardAvailableA', 'HazardAvailableB', 'FrameLayerA', 'FrameLayerB', 'PhysicalMaxMmh', 'StormA', 'StormB', 'HailA', 'HailB', 'StormAvailableA', 'StormAvailableB', 'HailAvailableA', 'HailAvailableB']) {
+      locations[`${prefix}${suffix}`] = gl.getUniformLocation(program, `u_${prefix}_${suffix[0].toLowerCase()}${suffix.slice(1)}`);
+    }
+  }
+  locations.vertex = gl.getAttribLocation(program, 'a_vertex');
+  return { program, locations };
+}
+
 export class TiledRainLayer {
   constructor(store, { onTiming = null, onCommit = null, onDiagnosticEvent = null } = {}) {
     this.id = 'tiled-rain';
@@ -1885,6 +2034,7 @@ export class TiledRainLayer {
     for (const state of this.store.blocks.values()) if (state.summaryTexture) gl.deleteTexture(state.summaryTexture);
     for (const state of this.store.blocks.values()) for (const texture of Object.values(state.hazardTextures || {})) if (texture) gl.deleteTexture(texture);
     if (this.store.emptyHazardTexture) gl.deleteTexture(this.store.emptyHazardTexture);
+    if (this.store.emptySummaryTexture) gl.deleteTexture(this.store.emptySummaryTexture);
     for (const state of this.store.motionTilesState?.values() || []) if (state.gpuTexture) gl.deleteTexture(state.gpuTexture);
     if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);
     if (this.squareVertexBuffer) gl.deleteBuffer(this.squareVertexBuffer);
@@ -1976,6 +2126,14 @@ export class TiledRainLayer {
       return;
     }
     this.beginLodPreload();
+  }
+
+  automaticDesiredLod(logicalZoom) {
+    return automaticTiledRainLodWithHysteresis(logicalZoom, this.desiredLevel);
+  }
+
+  setAutomaticDesiredLod(logicalZoom) {
+    this.setDesiredLod(this.automaticDesiredLod(logicalZoom));
   }
 
   beginLodPreload() {
@@ -2239,6 +2397,119 @@ export class TiledRainLayer {
     return program;
   }
 
+  transitionProgramsFor(gl, shaderData, lowerLevel, fineLevel, hazardsAvailable) {
+    const lower = this.store.levelData(lowerLevel);
+    const fine = this.store.levelData(fineLevel);
+    const lowerGridSize = lower.grid?.grid_size ?? lower.grid_size;
+    const fineGridSize = fine.grid?.grid_size ?? fine.grid_size;
+    const cacheKey = ['dots-split-merge', shaderData.variantName, lowerLevel, fineLevel, lower.kind, fine.kind, hazardsAvailable ? 'hazards' : 'rain-only'].join(':');
+    let program = this.programs.get(cacheKey);
+    if (!program) {
+      program = makeDotsTransitionProgram(gl, shaderData, lower.kind === 'aggregate-summary', fine.kind === 'aggregate-summary', hazardsAvailable, lowerGridSize, fineGridSize);
+      this.programs.set(cacheKey, program);
+    }
+    return program;
+  }
+
+  transitionHazardsAvailable() {
+    if (!this.lodTransition) return this.hazardsAvailable;
+    return [this.lodTransition.fromLevel, this.lodTransition.toLevel]
+      .some((level) => this.store.levelData(level).hasHazardPayload === true);
+  }
+
+  bindTransitionEndpoint(gl, locations, prefix, blockA, blockB, aggregate, textureUnit) {
+    const set = (name, value) => gl.uniform1i(locations[`${prefix}${name}`], value);
+    set('FrameLayerA', this.committedFrame.frame0 - blockA.descriptor.frame_start);
+    set('FrameLayerB', this.committedFrame.frame1 - blockB.descriptor.frame_start);
+    const bind = (unit, texture) => {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+    };
+    if (aggregate) {
+      set('SummaryA', textureUnit); set('SummaryB', textureUnit + 1); set('HazardA', textureUnit + 2); set('HazardB', textureUnit + 3);
+      set('HazardAvailableA', blockA.payloads?.secondary ? 1 : 0); set('HazardAvailableB', blockB.payloads?.secondary ? 1 : 0);
+      bind(textureUnit, blockA.gpuTexture || this.store.uploadBlock(gl, blockA));
+      bind(textureUnit + 1, blockB.gpuTexture || this.store.uploadBlock(gl, blockB));
+      bind(textureUnit + 2, blockA.summaryTexture || this.store.uploadSummaryBlock(gl, blockA) || this.store.zeroSummaryTexture(gl));
+      bind(textureUnit + 3, blockB.summaryTexture || this.store.uploadSummaryBlock(gl, blockB) || this.store.zeroSummaryTexture(gl));
+      // Summary-B uploads may have used the last primary endpoint unit.
+      bind(textureUnit, blockA.gpuTexture);
+      bind(textureUnit + 1, blockB.gpuTexture);
+      return textureUnit + 4;
+    }
+    set('RainA', textureUnit); set('RainB', textureUnit + 1);
+    gl.uniform1f(locations[`${prefix}PhysicalMaxMmh`], this.store.levelData(blockA.level).encoding.rain.physical_max_mmh);
+    bind(textureUnit, blockA.gpuTexture || this.store.uploadBlock(gl, blockA));
+    bind(textureUnit + 1, blockB.gpuTexture || this.store.uploadBlock(gl, blockB));
+    const hazardBindings = [['StormA', blockA, 'storm'], ['StormB', blockB, 'storm'], ['HailA', blockA, 'hail'], ['HailB', blockB, 'hail']];
+    for (let index = 0; index < hazardBindings.length; index++) {
+      const [name, block, channel] = hazardBindings[index];
+      const texture = this.store.uploadHazardBlock(gl, block, channel);
+      set(name, textureUnit + 2 + index);
+      set(`${name.replace(/[AB]$/, 'Available')}${name.at(-1)}`, texture ? 1 : 0);
+      bind(textureUnit + 2 + index, texture || this.store.zeroHazardTexture(gl));
+    }
+    // First-time hazard uploads bind their source texture on the currently
+    // active rain unit. Restore both integer endpoint bindings before draw.
+    bind(textureUnit, blockA.gpuTexture);
+    bind(textureUnit + 1, blockB.gpuTexture);
+    return textureUnit + 6;
+  }
+
+  renderDotsTransition(gl, args, modes) {
+    const transition = this.lodTransition;
+    const lowerLevel = Math.min(transition.fromLevel, transition.toLevel);
+    const fineLevel = Math.max(transition.fromLevel, transition.toLevel);
+    const lower = this.store.levelData(lowerLevel);
+    const fine = this.store.levelData(fineLevel);
+    const lowerAggregate = lower.kind === 'aggregate-summary';
+    const fineAggregate = fine.kind === 'aggregate-summary';
+    const hazardsAvailable = this.transitionHazardsAvailable();
+    const program = this.transitionProgramsFor(gl, args.shaderData, lowerLevel, fineLevel, hazardsAvailable);
+    const fineGridSize = fine.grid?.grid_size ?? fine.grid_size;
+    const blockAIndex = Math.floor(this.committedFrame.frame0 / this.store.manifest.temporal_block_size);
+    const blockBIndex = Math.floor(this.committedFrame.frame1 / this.store.manifest.temporal_block_size);
+    const fineTiles = this.tileKeysForBounds(this.viewportBounds, fineLevel);
+    const renderable = [];
+    for (const fineKey of fineTiles) {
+      const fineTile = this.store.tilesByLevel.get(fineLevel)?.get(fineKey);
+      const coarseCoordinates = tiledRainCoarseTileForFineTile(fineTile?.x, fineTile?.y);
+      const coarseKey = `${coarseCoordinates.x}:${coarseCoordinates.y}`;
+      const coarseTile = this.store.tilesByLevel.get(lowerLevel)?.get(coarseKey);
+      const fineA = this.store.blocks.get(qualifiedBlockKey(fineLevel, fineKey, blockAIndex, true));
+      const fineB = this.store.blocks.get(qualifiedBlockKey(fineLevel, fineKey, blockBIndex, true));
+      const coarseA = this.store.blocks.get(qualifiedBlockKey(lowerLevel, coarseKey, blockAIndex, true));
+      const coarseB = this.store.blocks.get(qualifiedBlockKey(lowerLevel, coarseKey, blockBIndex, true));
+      if (fineTile && coarseTile && fineA?.status === 'ready' && fineB?.status === 'ready' && coarseA?.status === 'ready' && coarseB?.status === 'ready') {
+        renderable.push({ fineTile, coarseTile, fineA, fineB, coarseA, coarseB });
+      }
+    }
+    const eased = smoothstep(0, 1, transition.rawProgress);
+    const refineProgress = transition.toLevel > transition.fromLevel ? eased : 1 - eased;
+    for (const mode of modes) {
+      for (const item of renderable) {
+        const { locations } = program;
+        gl.useProgram(program.program);
+        setGeographicProjection(gl, locations, args.defaultProjectionData);
+        gl.uniform2f(locations.fineTileOrigin, item.fineTile.x * TILED_RAIN_TILE_SIZE / fineGridSize, item.fineTile.y * TILED_RAIN_TILE_SIZE / fineGridSize);
+        gl.uniform2i(locations.coarseLocalBase, (item.fineTile.x & 1) * 64, (item.fineTile.y & 1) * 64);
+        gl.uniform1f(locations.temporalProgress, this.committedFrame.progress);
+        gl.uniform1f(locations.refineProgress, refineProgress);
+        gl.uniform1i(locations.mode, mode);
+        gl.uniform4fv(locations.color, COLORS[['rain', 'strong', 'storm', 'hail'][mode]]);
+        let unit = this.bindTransitionEndpoint(gl, locations, 'coarse', item.coarseA, item.coarseB, lowerAggregate, 0);
+        this.bindTransitionEndpoint(gl, locations, 'fine', item.fineA, item.fineB, fineAggregate, unit);
+        const vertexBuffer = mode === 2 ? this.hazardVertexBuffers.storm : mode === 3 ? this.hazardVertexBuffers.hail : this.vertexBuffer;
+        const vertexCount = mode === 2 ? STORM.length / 2 : mode === 3 ? HAIL.length / 2 : 6;
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+        gl.enableVertexAttribArray(locations.vertex);
+        gl.vertexAttribPointer(locations.vertex, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, vertexCount, TILED_RAIN_TILE_SIZE * TILED_RAIN_TILE_SIZE);
+      }
+    }
+    return renderable.length;
+  }
+
   renderPass(gl, program, projection, tile, blockA, blockB, mode, opacity = 1) {
     const { locations } = program;
     gl.useProgram(program.program);
@@ -2379,6 +2650,10 @@ export class TiledRainLayer {
       gl.polygonOffset(-1, -1);
       for (const [level, opacity] of endpoints) rendered += this.renderLevel(gl, args, level, opacity, modes);
       gl.disable(gl.POLYGON_OFFSET_FILL);
+    } else if (this.store.multiLod && this.lodTransition) {
+      // One fine-grid representation procedurally samples both endpoints.
+      // There is no independent endpoint-grid opacity fade for Dots.
+      rendered += this.renderDotsTransition(gl, args, modes);
     } else {
       // Keep rain -> strong -> storm -> hail ordering across both complete
       // endpoint representations during a multi-LOD fade.

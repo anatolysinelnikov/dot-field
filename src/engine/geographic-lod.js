@@ -12,9 +12,9 @@ export const MAX_GRID_LEVEL = 15;
 // resolution and the engine can still be exercised explicitly through L15.
 export const MAX_DISPLAY_GRID_LEVEL = 14;
 
-const LOD_LEVEL_OFFSET = Math.log2(MERCATOR_WORLD_SIZE / TARGET_GRID_SPACING);
+export const MERCATOR_GRID_LEVEL_OFFSET = Math.log2(MERCATOR_WORLD_SIZE / TARGET_GRID_SPACING);
 // The rounded zoom mapping first reaches the next level at N + 0.5.
-export const MAX_LOGICAL_SAMPLING_ZOOM = MAX_DISPLAY_GRID_LEVEL + 0.5 - LOD_LEVEL_OFFSET;
+export const MAX_LOGICAL_SAMPLING_ZOOM = MAX_DISPLAY_GRID_LEVEL + 0.5 - MERCATOR_GRID_LEVEL_OFFSET;
 
 const MAX_GRID_SIZE = 2 ** MAX_GRID_LEVEL;
 const MAX_MERCATOR_LATITUDE = 85.05112878;
@@ -220,8 +220,15 @@ export function canonicalWindowFromMercatorBounds(bounds) {
 // depends only on zoom, so map navigation and projection never reseat samples.
 export function zoomToMercatorGridLevel(zoom) {
   const boundedZoom = Math.min(Number(zoom), MAX_LOGICAL_SAMPLING_ZOOM);
-  const desired = boundedZoom + LOD_LEVEL_OFFSET;
+  const desired = boundedZoom + MERCATOR_GRID_LEVEL_OFFSET;
   return clamp(Math.round(desired), MIN_GRID_LEVEL, MAX_DISPLAY_GRID_LEVEL);
+}
+
+// The rounded mapping changes from L to L + 1 at this logical zoom.  Consumers
+// that need a stateful dead band should use this exact boundary rather than
+// re-encoding the grid-density offset.
+export function mercatorGridLevelBoundary(level) {
+  return Number(level) + 0.5 - MERCATOR_GRID_LEVEL_OFFSET;
 }
 
 export function selectMercatorGridLevel(level, canonicalWindow = null) {

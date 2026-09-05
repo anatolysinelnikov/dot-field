@@ -784,7 +784,7 @@ function updateRawMapMaxZoom(latitude) {
 
 function updateTiledRainDesiredLod() {
   if (!tiledRainAutomaticLod || !weatherLayer) return;
-  weatherLayer.setDesiredLod(automaticTiledRainLod(state.logicalSamplingZoom));
+  weatherLayer.setAutomaticDesiredLod(state.logicalSamplingZoom);
 }
 
 function updateLogicalSamplingZoom() {
@@ -979,7 +979,7 @@ function tryInitializeTiledRainLayer() {
   state.canonicalWindow = null;
   weatherLayer.setViewportBounds(initialBounds);
   weatherLayer.setDesiredLod(tiledRainAutomaticLod
-    ? automaticTiledRainLod(state.logicalSamplingZoom)
+    ? weatherLayer.automaticDesiredLod(state.logicalSamplingZoom)
     : tiledRainLod);
   weatherLayer.setTime(state.time / LOOP_SECONDS);
   updateLodDiagnostics();

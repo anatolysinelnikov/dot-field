@@ -172,6 +172,12 @@ pipeline is migrated to the staged multi-LOD schema here.
 
 Non-motion `?tiledRain=1` loads the multi-LOD root manifest and maps the
 existing logical geographic zoom to a clamped tiled weather level L11–L14.
+Initial automatic selection uses the normal nearest-level mapping. Thereafter
+automatic tiled selection is stateful: it retains the currently desired level
+inside a 0.08-logical-zoom dead band around each exact Mercator rounded-level
+boundary, refining only above the boundary plus 0.08 and coarsening only below
+the boundary minus 0.08. Fixed `tiledRainLod=11..14` overrides and the CPU
+renderer retain their existing selection semantics.
 The initial load uses the known `WEATHER_REGION.initialZoom` through that same
 mapping, so automatic startup begins at the correct level without an artificial
 L13 preload transition.
@@ -214,9 +220,16 @@ dynamic protected-cache bounds, and payload format.
 
 Only adjacent levels transition: L11 ↔ L12 ↔ L13 ↔ L14. The complete target
 visible/overscan state and the current source-frame block pair are loaded before
-the fade starts. Dots preserve rain → strong rain → storm → hail pass order
-across the two endpoint representations; Squares crossfade the two complete
-representations. A direction reversal reuses resident endpoints, while a
+the fade starts. During a Dots transition, a dedicated GPU path renders only
+the fine tile grid. Its shader derives the coarse tile/local texel from the
+fine tile parity and instance identity; even/even fine texels retain the exact
+coarse center and interpolate radius by area, while fine-only texels interpolate
+from zero. It samples both resident endpoint payloads directly, preserving each
+level's aggregate or direct presentation mapping, with no CPU per-sample
+transition state, pair buffer, or reconstructed transition texture. The stable
+Dots program remains a separate path with no transition sampling or draw work.
+Dots preserve rain → strong rain → storm → hail ordering. Squares intentionally
+continue to crossfade two complete endpoint representations. A direction reversal reuses resident endpoints, while a
 continued jump chains adjacent transitions. Stale viewport/LOD completions
 cannot promote state. MotionField and motion-warp remain on their existing
 legacy L13 manifests, validation, residency, and shader path; `tiledRainLod`

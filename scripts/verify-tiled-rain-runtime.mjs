@@ -5,14 +5,19 @@ import {
   aggregateSquaresInputs,
   adjacentTiledRainLod,
   automaticTiledRainLod,
+  automaticTiledRainLodWithHysteresis,
   initialTiledRainLod,
   selectTiledRainLod,
+  tiledRainCoarseLocalForFineSample,
+  tiledRainCoarseTileForFineTile,
+  tiledRainDotsMorphRadius,
   sourceFrameForTime,
   tiledRainProgramCacheKey,
   TiledRainLayer,
   TiledRainTileStore,
   validateTiledRainLodManifest
 } from '../src/engine/tiled-rain.js';
+import { mercatorGridLevelBoundary } from '../src/engine/geographic-lod.js';
 import { dotsStrongRainMmhToRadiusFraction, rainMmhToRadiusFraction } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadiusForSeverity } from '../src/engine/hazard-renderer.js';
 
@@ -84,8 +89,8 @@ function fakeGl() {
     TEXTURE0: 14, ARRAY_BUFFER: 15, FLOAT: 16, TRIANGLES: 17, BLEND: 18, DEPTH_TEST: 19,
     SRC_ALPHA: 20, ONE_MINUS_SRC_ALPHA: 21, POLYGON_OFFSET_FILL: 22,
     createTexture: () => ({}), bindTexture: () => {}, texParameteri: () => {}, pixelStorei: () => {},
-    texImage3D: (...args) => uploads.push(args), useProgram: () => {}, uniform2f: () => {}, uniform1i: () => {},
-    uniform1f: (...args) => uniform1fCalls.push(args), uniform4fv: () => {}, activeTexture: () => {}, bindBuffer: () => {},
+    texImage3D: (...args) => uploads.push(args), useProgram: () => {}, uniform2f: () => {},
+    uniform1f: (...args) => uniform1fCalls.push(args), uniform1i: () => {}, uniform2i: () => {}, uniform4fv: () => {}, activeTexture: () => {}, bindBuffer: () => {},
     enableVertexAttribArray: () => {}, vertexAttribPointer: () => {},
     drawArraysInstanced: (...args) => draws.push(args), enable: () => {}, disable: () => {}, blendFunc: () => {},
     depthMask: () => {}, polygonOffset: () => {}
@@ -104,6 +109,20 @@ assert.equal(selectTiledRainLod(undefined), 13);
 assert.throws(() => selectTiledRainLod('10'));
 assert.throws(() => selectTiledRainLod('13.5'));
 assert.deepEqual([0, 5, 10, 20].map((zoom) => automaticTiledRainLod(zoom)), [11, 11, 14, 14]);
+for (const level of [11, 12, 13]) {
+  const boundary = mercatorGridLevelBoundary(level);
+  assert.equal(automaticTiledRainLodWithHysteresis(boundary, level), level, `L${level} holds at its normal boundary`);
+  assert.equal(automaticTiledRainLodWithHysteresis(boundary + 0.079, level), level, `L${level} holds inside refinement dead band`);
+  assert.equal(automaticTiledRainLodWithHysteresis(boundary + 0.08, level), level + 1, `L${level} refines at +0.08`);
+  assert.equal(automaticTiledRainLodWithHysteresis(boundary - 0.079, level + 1), level + 1, `L${level + 1} holds inside coarsening dead band`);
+  assert.equal(automaticTiledRainLodWithHysteresis(boundary - 0.08, level + 1), level, `L${level + 1} coarsens at -0.08`);
+}
+let hysteresisLevel = 12;
+const middleBoundary = mercatorGridLevelBoundary(12);
+for (const delta of [-0.04, 0.04, -0.06, 0.06, -0.07, 0.07]) hysteresisLevel = automaticTiledRainLodWithHysteresis(middleBoundary + delta, hysteresisLevel);
+assert.equal(hysteresisLevel, 12, 'tiny alternating zoom changes do not ping-pong');
+assert.equal(automaticTiledRainLodWithHysteresis(100, 11), 14, 'rapid refinement chains to the clamped maximum');
+assert.equal(automaticTiledRainLodWithHysteresis(-100, 14), 11, 'rapid coarsening chains to the clamped minimum');
 assert.equal(initialTiledRainLod(5.8), 12);
 assert.equal(initialTiledRainLod(5.8, 11), 11);
 assert.equal(initialTiledRainLod(5.8, 14), 14);
@@ -113,6 +132,19 @@ assert.equal(adjacentTiledRainLod(14, 11), 13);
 assert.throws(() => adjacentTiledRainLod(10, 11));
 assert.deepEqual(sourceFrameForTime(19, 0.5), { frame0: 9, frame1: 9, progress: 0 });
 assert.deepEqual(sourceFrameForTime(19, 0.525), { frame0: 9, frame1: 10, progress: 0.45000000000000107 });
+
+for (const tileX of [0, 1]) for (const tileY of [0, 1]) {
+  assert.deepEqual(tiledRainCoarseTileForFineTile(tileX, tileY), { x: 0, y: 0 }, `fine parity ${tileX},${tileY} maps to its deterministic coarse tile`);
+  const shared = tiledRainCoarseLocalForFineSample(tileX, tileY, 126, 0);
+  assert.deepEqual(shared, { shared: true, x: (tileX & 1) * 64 + 63, y: (tileY & 1) * 64 }, `fine tile parity ${tileX},${tileY} maps shared edge texels exactly`);
+  assert.equal(tiledRainCoarseLocalForFineSample(tileX, tileY, 127, 126).shared, false, `fine tile parity ${tileX},${tileY} classifies odd fine samples as fine-only`);
+}
+assert.equal(tiledRainDotsMorphRadius(2, 4, 0), 2, 'morph p=0 is exact coarse endpoint');
+assert.equal(tiledRainDotsMorphRadius(2, 4, 1), 4, 'morph p=1 is exact fine endpoint');
+assert.equal(tiledRainDotsMorphRadius(2, 4, 0.5), Math.sqrt(10), 'morph midpoint preserves area');
+assert.equal(tiledRainDotsMorphRadius(0, 4, 0.5), Math.sqrt(8), 'fine-only samples grow from zero');
+assert.equal(tiledRainDotsMorphRadius(4, 0, 0.5), Math.sqrt(8), 'fine-only samples shrink to zero');
+assert.equal(tiledRainDotsMorphRadius(2, 4, 0.37), tiledRainDotsMorphRadius(4, 2, 0.63), 'reversal radius is complementary');
 
 for (const level of validated.levels) {
   const dataset = { manifest: validated, level, manifestUrl: '/lod/manifest.json', tiles: new Map([['0:0', level.tiles[0]]]), isMultiLod: true };
@@ -303,5 +335,33 @@ sharedLayer.setPresentationMode('squares');
 sharedLayer.setPresentationMode('dots');
 assert.equal(sharedLayer.store.blocks, residencyBefore);
 assert.equal(sharedStore.blocks.size, 0);
+
+// The Dots transition submits only the fine grid.  Its coarse identity and
+// endpoint texture blocks are consumed procedurally by the transition program;
+// no endpoint instance/pair buffer is built on the CPU.
+const transitionStore = new TiledRainTileStore(lifecycleDataset);
+const transitionLayer = new TiledRainLayer(transitionStore);
+transitionLayer.viewportBounds = lifecycleBounds;
+transitionLayer.committedFrame = { frame0: 0, frame1: 0, progress: 0.25 };
+for (const level of [11, 12]) {
+  const descriptor = transitionStore.descriptor(level, '0:0', 0);
+  const state = {
+    key: `${level}:0:0:0`, level, tileKey: '0:0', blockIndex: 0, descriptor, status: 'ready', aggregateSummary: true,
+    payload: new ArrayBuffer(descriptor.summary_a.byte_length), payloads: { primary: null, secondary: new ArrayBuffer(descriptor.summary_b.byte_length) }, hazardPayloads: {}, hazardTextures: {}
+  };
+  state.payloads.primary = state.payload;
+  transitionStore.blocks.set(state.key, state);
+}
+transitionLayer.lodTransition = { fromLevel: 11, toLevel: 12, start: performance.now(), rawProgress: 0.5 };
+transitionLayer.transitionProgramsFor = () => ({
+  program: {},
+  locations: new Proxy({}, { get: (_, key) => ['matrix', 'fallbackMatrix', 'projectionMatrix', 'tileMercatorCoords', 'clippingPlane', 'projectionTransition'].includes(key) ? null : String(key) })
+});
+const transitionGl = fakeGl();
+transitionLayer.vertexBuffer = {}; transitionLayer.hazardVertexBuffers = { storm: {}, hail: {} };
+transitionLayer.render(transitionGl, { shaderData: { variantName: 'fixture', vertexShaderPrelude: '' }, defaultProjectionData: {} });
+assert.equal(transitionGl.draws.length, 4, 'Dots GPU transition keeps rain/strong/storm/hail pass order once on the fine grid, not both endpoint grids');
+assert.ok(transitionGl.draws.every((draw) => draw.at(-1) === TILE_SIZE ** 2), 'Dots GPU transition instances are exactly one fine tile');
+assert.equal(transitionLayer.presentationMode, 'dots', 'stable presentation selection remains Dots during GPU split/merge');
 
 console.log('tiled rain multi-LOD runtime verifier: PASS');
