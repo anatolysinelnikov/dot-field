@@ -19,7 +19,7 @@ import {
 } from '../src/engine/precipitation-mapping.js';
 import { geographicHazardRadiusForSeverity } from '../src/engine/hazard-renderer.js';
 
-const LEVELS = [10, 11, 12];
+const LEVELS = [11, 12];
 const REFERENCE_LEVEL = WEATHER_REFERENCE_LEVEL;
 const TILE_SIZE = 128;
 const TILE_SAMPLES = TILE_SIZE * TILE_SIZE;
@@ -404,7 +404,7 @@ async function validateManifest(manifest, metadata) {
   assert.deepEqual(manifest.timestamps, metadata.time.timestamps, 'timestamp list mismatch');
   const levels = new Map();
   for (const level of manifest.levels || []) {
-    requireValue([10, 11, 12, 13, 14].includes(level.level), `unexpected level L${level.level}`);
+    requireValue([11, 12, 13, 14].includes(level.level), `unexpected level L${level.level}`);
     requireValue(level.kind === (level.level < REFERENCE_LEVEL ? 'aggregate-summary' : 'direct'), `L${level.level} kind mismatch`);
     if (level.level >= REFERENCE_LEVEL) continue;
     requireValue(level.tile_size === TILE_SIZE, `L${level.level} tile size mismatch`);
@@ -568,7 +568,7 @@ async function main() {
   const { weather } = await loadRealWeatherFixture({ sourceFrameCacheLimit: 19, retainAllSourceFrames: true });
   setActiveWeatherField(weather);
   requireValue(weather.frameCount === manifest.frame_count, 'loaded weather frame count differs from manifest');
-  const topology = new GeographicLodTopology(undefined, { minLevel: 10, maxLevel: REFERENCE_LEVEL });
+  const topology = new GeographicLodTopology(undefined, { minLevel: 11, maxLevel: REFERENCE_LEVEL });
   const pyramid = new GeographicWeatherPyramid(Float32Array, topology);
   for (const level of LEVELS) {
     const data = pyramid.levelDataFor(level);
@@ -783,7 +783,7 @@ async function main() {
   }
   console.log(JSON.stringify(output, null, 2));
   console.log('\nInterpretation');
-  console.log(`Compared ${selectedCases.length} intermediate source-frame cases across L10-L12 using the existing physical interpolation and GeographicWeatherPyramid reference. Candidate A is compared in summary space; Candidate B interpolates endpoint presentation values. Mean error ranking: Dots ${JSON.stringify(output.ranking.dots.closer_candidate_by_mean_absolute_error)}, Squares ${JSON.stringify(output.ranking.squares.closer_candidate_by_mean_absolute_error)}. Dominant aggregate error source by mean summary-component error: ${output.ranking.error_source.dominant}.`);
+  console.log(`Compared ${selectedCases.length} intermediate source-frame cases across L11-L12 using the existing physical interpolation and GeographicWeatherPyramid reference. Candidate A is compared in summary space; Candidate B interpolates endpoint presentation values. Mean error ranking: Dots ${JSON.stringify(output.ranking.dots.closer_candidate_by_mean_absolute_error)}, Squares ${JSON.stringify(output.ranking.squares.closer_candidate_by_mean_absolute_error)}. Dominant aggregate error source by mean summary-component error: ${output.ranking.error_source.dominant}.`);
 }
 
 main().catch((error) => {

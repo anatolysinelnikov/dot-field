@@ -126,7 +126,7 @@ offline generator `tools/generate-tiled-rain-lod.py` produces the ignored
 not consumed by `src/app.js`, `src/engine/tiled-rain.js`, or any browser
 loader yet.
 
-The staged asset pyramid covers the complete active display range L10 through
+The staged asset pyramid covers the active tiled display range L11 through
 L14. L13 remains the physical reference level and stores direct UInt16 rain
 plus optional UInt8 storm/hail severity samples using the existing Phase 0A
 reconstruction, categorical severity mapping, and direct encoding semantics.
@@ -136,8 +136,8 @@ source generation matches. L14 independently reconstructs the normalized
 physical source at exact globally anchored L14 identities; it is not an
 upsample, subdivision, or interpolation of L13 transport values.
 
-L10, L11, and L12 are centered dyadic aggregate summaries of unquantized
-Float32 L13 physical samples. The complete selected support domain is
+L11 and L12 are centered dyadic aggregate summaries of unquantized Float32 L13
+physical samples. The complete selected support domain is
 aggregated recursively before output tiling, so a 128-sample tile boundary
 cannot change a weather value or become an aggregation edge. Their physical
 summary transport uses two frame-major, row-major, four-component little-endian
@@ -156,8 +156,17 @@ sample identities, four-source-frame temporal blocks, exact source timestamps,
 and deterministic gzip sidecars. The manifest records level-specific direct
 versus aggregate encoding, support/generated sample extents, tile extents,
 source generation identity, payload sizes, and Float16 fidelity diagnostics.
-L10–L14 asset generation is offline only; browser LOD selection, residency,
-overlap, transitions, and runtime Float16 decoding remain a later task.
+L11–L14 asset generation is offline only; browser LOD selection, residency,
+overlap, transitions, and runtime Float16 decoding remain a later task. The
+intended future tiled runtime will floor weather LOD selection at L11 while
+allowing the map itself to zoom out below that threshold. This staged contract
+does not remove L10 support from the existing general geographic LOD engine.
+Only the tiled multi-LOD asset set omits L10.
+
+Only the 19 normalized source timestamps/frames are materialized. No
+intermediate coarse temporal frames are generated; the existing temporal block
+size remains unchanged. MotionField integration is deferred and is not part of
+this asset-contract change.
 
 MotionField remains bound to the existing Phase 0A L13 manifest and source
 contract. The motion-warp assets likewise remain separately bound to the

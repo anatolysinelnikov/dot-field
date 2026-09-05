@@ -13,7 +13,7 @@ import {
 } from '../src/engine/geographic-lod.js';
 import { GeographicWeatherPyramid } from '../src/engine/geographic-weather-pyramid.js';
 
-const LEVELS = [10, 11, 12, 13, 14];
+const LEVELS = [11, 12, 13, 14];
 const REFERENCE_LEVEL = 13;
 const TILE_SIZE = 128;
 const TILE_SAMPLES = TILE_SIZE * TILE_SIZE;
@@ -104,7 +104,7 @@ async function validateStructure(manifest) {
   requireValue(manifest.schema === 'dot-field-tiled-rain-lod-v1', 'schema mismatch');
   requireValue(manifest.version === 1, 'version mismatch');
   requireValue(manifest.reference_level === REFERENCE_LEVEL, 'reference level mismatch');
-  requireValue(manifest.level_range?.min === 10 && manifest.level_range?.max === 14, 'level range mismatch');
+  requireValue(manifest.level_range?.min === 11 && manifest.level_range?.max === 14, 'level range mismatch');
   requireValue(manifest.tile_size === TILE_SIZE && manifest.temporal_block_size === BLOCK_SIZE, 'common tile/temporal contract mismatch');
   requireValue(manifest.frame_count === manifest.timestamps?.length && manifest.frame_count > 0, 'temporal timestamp contract mismatch');
   requireValue(manifest.aggregation?.thresholds_mmh?.rain_coverage === 0.05, 'rain threshold mismatch');
@@ -201,7 +201,7 @@ async function validateStructure(manifest) {
 }
 
 function validateNesting(levels) {
-  for (const level of [10, 11, 12]) {
+  for (const level of [11, 12]) {
     const fine = levels.get(level + 1).grid;
     const coarse = levels.get(level).grid;
     for (const axis of ['min_i', 'max_i', 'min_j', 'max_j']) {
@@ -232,7 +232,7 @@ function validateNesting(levels) {
       : l14.support_sample_bounds[axis] >= anchor;
     requireValue(containsAnchor, `L14 support ${axis} does not contain the refined L13 anchor extent`);
   }
-  for (const level of [10, 11, 12, 13]) {
+  for (const level of [11, 12, 13]) {
     const child = levels.get(level + 1).grid.support_sample_bounds;
     const parent = levels.get(level).grid.support_sample_bounds;
     for (const axis of ['min_i', 'max_i', 'min_j', 'max_j']) {
@@ -344,11 +344,11 @@ async function directL14Reference(manifest, levels, weather) {
 async function aggregateReference(manifest, levels, weather) {
   const topology = new GeographicLodTopology(undefined, { minLevel: 10, maxLevel: 14 });
   const pyramid = new GeographicWeatherPyramid(Float32Array, topology);
-  const summaries = pyramid.evaluate([10, 11, 12], weather.prepareFrame(0));
+  const summaries = pyramid.evaluate([11, 12], weather.prepareFrame(0));
   const names = ['rainWetMeanMmh', 'rainMaxMmh', 'rainCoverage', 'strongCoverage', 'stormCoverage', 'stormMaxSeverity', 'hailCoverage', 'hailMaxSeverity'];
-  const maximumErrors = Object.fromEntries(LEVELS.slice(0, 3).map((level) => [level, Object.fromEntries(names.map((name) => [name, 0]))]));
+  const maximumErrors = Object.fromEntries(LEVELS.slice(0, 2).map((level) => [level, Object.fromEntries(names.map((name) => [name, 0]))]));
   let checked = 0;
-  for (const levelNumber of [10, 11, 12]) {
+  for (const levelNumber of [11, 12]) {
     const level = levels.get(levelNumber);
     const support = level.grid.support_sample_bounds;
     const summary = summaries[levelNumber];
@@ -392,7 +392,7 @@ async function aggregateReference(manifest, levels, weather) {
       }
     }
   }
-  const noDataLevel = levels.get(10);
+  const noDataLevel = levels.get(11);
   const generated = noDataLevel.grid.generated_sample_bounds;
   const support = noDataLevel.grid.support_sample_bounds;
   if (generated.min_i < support.min_i) {

@@ -2,7 +2,7 @@
 """Generate the staged offline multi-LOD tiled weather asset set.
 
 This generator consumes only the normalized weather boundary.  L13 and L14
-are direct reconstructed physical samples; L10--L12 are recursively centered
+are direct reconstructed physical samples; L11--L12 are recursively centered
 aggregates of the unquantized Float32 L13 field.  Payloads are written a
 temporal block at a time so the dense L14 level is never materialized for all
 frames at once.
@@ -33,7 +33,7 @@ except ImportError as error:  # pragma: no cover - depends on the local machine
 SCHEMA = "dot-field-tiled-rain-lod-v1"
 VERSION = 1
 REFERENCE_LEVEL = 13
-MIN_LEVEL = 10
+MIN_LEVEL = 11
 MAX_LEVEL = 14
 GRID_SIZE = 2**REFERENCE_LEVEL
 TILE_SIZE = 128
