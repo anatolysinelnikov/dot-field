@@ -64,7 +64,7 @@ function fixtureManifest() {
           plane_a: { dtype: 'Float16', components: ['rainWetMeanMmh', 'rainMaxMmh', 'rainCoverage', 'strongCoverage'], nodata_sentinel: { component: 'rainCoverage', value: -1 } },
           plane_b: { dtype: 'Float16', components: ['stormCoverage', 'stormMaxSeverity', 'hailCoverage', 'hailMaxSeverity'], optional: true, absent_meaning: 'all hazard summary values are zero' }
         } : {
-          rain: { dtype: 'UInt16', nodata_code: 0, dry_code: 1, positive_code_min: 2, positive_code_max: 65535, positive_quantized_range: 65534, physical_max_mmh: 10 },
+          rain: { dtype: 'UInt16', nodata_code: 0, dry_code: 1, positive_code_min: 2, positive_code_max: 65535, positive_quantized_range: 65534, physical_max_mmh: level },
           hazards: { dtype: 'UInt8', decode: 'code / 255' }
         }
       };
@@ -75,8 +75,9 @@ function fixtureManifest() {
 function fakeGl() {
   const uploads = [];
   const draws = [];
+  const uniform1fCalls = [];
   return {
-    uploads, draws,
+    uploads, draws, uniform1fCalls,
     TEXTURE_2D_ARRAY: 1, TEXTURE_MIN_FILTER: 2, TEXTURE_MAG_FILTER: 3, NEAREST: 4,
     TEXTURE_WRAP_S: 5, TEXTURE_WRAP_T: 6, CLAMP_TO_EDGE: 7,
     R16UI: 8, RED_INTEGER: 9, UNSIGNED_SHORT: 10, RGBA16F: 11, RGBA: 12, HALF_FLOAT: 13,
@@ -84,7 +85,7 @@ function fakeGl() {
     SRC_ALPHA: 20, ONE_MINUS_SRC_ALPHA: 21, POLYGON_OFFSET_FILL: 22,
     createTexture: () => ({}), bindTexture: () => {}, texParameteri: () => {}, pixelStorei: () => {},
     texImage3D: (...args) => uploads.push(args), useProgram: () => {}, uniform2f: () => {}, uniform1i: () => {},
-    uniform1f: () => {}, uniform4fv: () => {}, activeTexture: () => {}, bindBuffer: () => {},
+    uniform1f: (...args) => uniform1fCalls.push(args), uniform4fv: () => {}, activeTexture: () => {}, bindBuffer: () => {},
     enableVertexAttribArray: () => {}, vertexAttribPointer: () => {},
     drawArraysInstanced: (...args) => draws.push(args), enable: () => {}, disable: () => {}, blendFunc: () => {},
     depthMask: () => {}, polygonOffset: () => {}
@@ -150,9 +151,9 @@ for (const level of validated.levels) {
 }
 
 // Rendering must resolve level-qualified ready states into the upload/draw path.
-// This specifically guards the fixed-L13 parity path that previously produced
+// This specifically guards the fixed direct-level paths that previously produced
 // ready CPU blocks but NaN render block indexes, preventing every upload.
-for (const level of [validated.levels[1], validated.levels[2]]) {
+for (const level of [validated.levels[1], validated.levels[2], validated.levels[3]]) {
   const dataset = { manifest: validated, level, manifestUrl: '/lod/manifest.json', tiles: new Map([['0:0', level.tiles[0]]]), isMultiLod: true };
   const store = new TiledRainTileStore(dataset);
   const layer = new TiledRainLayer(store);
@@ -171,14 +172,26 @@ for (const level of [validated.levels[1], validated.levels[2]]) {
   layer.viewportBounds = { minX: 64 / store.gridSize, maxX: 64 / store.gridSize, minY: 64 / store.gridSize, maxY: 64 / store.gridSize };
   layer.viewportTileKeys = ['0:0'];
   layer.committedFrame = { frame0: 0, frame1: 0, progress: 0 };
-  layer.programsFor = () => ({ program: {}, locations: {} });
+  layer.programsFor = () => ({ program: {}, locations: { physicalMaxMmh: 'physicalMaxMmh' } });
   layer.vertexBuffer = {}; layer.squareVertexBuffer = {}; layer.hazardVertexBuffers = { storm: {}, hail: {} };
   const gl = fakeGl();
   layer.render(gl, { shaderData: { variantName: 'fixture', vertexShaderPrelude: '' }, defaultProjectionData: {} });
   assert.ok(gl.uploads.length >= (aggregateSummary ? 2 : 1), `fixed L${level.level} ready blocks reach GPU texture upload`);
   assert.ok(gl.draws.length > 0, `fixed L${level.level} ready blocks reach a draw call`);
   assert.ok(store.diagnosticsState.tileUploadCount > 0, `fixed L${level.level} increments GPU upload diagnostics`);
+  if (!aggregateSummary) {
+    const physicalMaxCalls = gl.uniform1fCalls.filter(([location]) => location === 'physicalMaxMmh');
+    assert.ok(physicalMaxCalls.length > 0, `fixed L${level.level} supplies a direct rain physical maximum`);
+    assert.ok(physicalMaxCalls.every(([, value]) => value === level.encoding.rain.physical_max_mmh), `fixed L${level.level} uses its direct rain physical maximum`);
+    assert.ok(physicalMaxCalls.every(([, value]) => Number.isFinite(value)), `fixed L${level.level} supplies a finite direct rain physical maximum`);
+  }
 }
+
+const legacyStore = new TiledRainTileStore({
+  manifest: { frame_count: 1, temporal_block_size: 1, encoding: { physical_max_mmh: 37 }, tiles: [] },
+  tiles: new Map()
+});
+assert.equal(legacyStore.physicalMaxMmh, 37, 'legacy flat rain encoding remains normalized at the store boundary');
 
 const aggregateL11CacheKey = tiledRainProgramCacheKey({ aggregateSummary: true, lodLevel: 11, gridSize: 2 ** 11, variantName: 'dots', hazardsAvailable: true });
 const aggregateL12CacheKey = tiledRainProgramCacheKey({ aggregateSummary: true, lodLevel: 12, gridSize: 2 ** 12, variantName: 'dots', hazardsAvailable: true });

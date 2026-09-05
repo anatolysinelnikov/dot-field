@@ -633,6 +633,9 @@ export class TiledRainTileStore {
     this.aggregateSummary = this.level.kind === 'aggregate-summary';
     this.lodLevel = this.level.level ?? this.level.lod_level ?? TILED_RAIN_LOD_LEVEL;
     this.gridSize = this.level.grid?.grid_size ?? this.level.grid_size ?? TILED_RAIN_GRID_SIZE;
+    this.physicalMaxMmh = this.multiLod
+      ? (this.level.kind === 'direct' ? this.level.encoding.rain.physical_max_mmh : null)
+      : this.manifest.encoding?.physical_max_mmh ?? null;
     this.hazardsAvailable = !this.motionWarp && (this.multiLod
       ? this.level.hasHazardPayload === true
       : this.manifest.hazardsAvailable === true);
@@ -807,6 +810,7 @@ export class TiledRainTileStore {
     this.aggregateSummary = next.kind === 'aggregate-summary';
     this.lodLevel = level;
     this.gridSize = next.grid?.grid_size ?? next.grid_size ?? TILED_RAIN_GRID_SIZE;
+    this.physicalMaxMmh = next.kind === 'direct' ? next.encoding.rain.physical_max_mmh : null;
     this.hazardsAvailable = !this.motionWarp && (this.multiLod ? next.hasHazardPayload === true : this.manifest.hazardsAvailable === true);
     this.diagnosticsState.lodLevel = level;
     this.diagnosticsState.payloadKind = this.aggregateSummary ? 'aggregate-summary' : 'direct';
@@ -2264,7 +2268,7 @@ export class TiledRainLayer {
       gl.uniform1i(locations.motionWarpActive, 1);
     }
     gl.uniform1f(locations.temporalProgress, this.committedFrame.progress);
-    if (!this.store.aggregateSummary) gl.uniform1f(locations.physicalMaxMmh, this.store.manifest.encoding.physical_max_mmh);
+    if (!this.store.aggregateSummary) gl.uniform1f(locations.physicalMaxMmh, this.store.physicalMaxMmh);
     if (this.presentationMode === 'squares') {
       gl.uniform1f(locations.opacity, opacity);
       gl.uniform1f(locations.hazardsVisible, this.hazardsVisible ? 1 : 0);
