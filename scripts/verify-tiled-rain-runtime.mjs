@@ -177,7 +177,10 @@ const lifecycleDataset = {
   isMultiLod: true
 };
 const lifecycleStore = new TiledRainTileStore(lifecycleDataset);
-const lifecycleLayer = new TiledRainLayer(lifecycleStore);
+const lifecycleEvents = [];
+const lifecycleLayer = new TiledRainLayer(lifecycleStore, {
+  onDiagnosticEvent: (type, details) => lifecycleEvents.push({ type, details })
+});
 const readyStates = new Map();
 lifecycleStore.ensureBlock = (level, tileKey, blockIndex) => {
   const key = `${level}:${tileKey}:${blockIndex}`;
@@ -195,20 +198,31 @@ const lifecycleBounds = { minX: 64 / 2 ** 11, maxX: 64 / 2 ** 11, minY: 64 / 2 *
 lifecycleLayer.setViewportBounds(lifecycleBounds);
 assert.deepEqual(lifecycleLayer.viewportTileKeys, ['0:0']);
 lifecycleLayer.setDesiredLod(14);
-assert.deepEqual(lifecycleLayer.pendingLod, { fromLevel: 11, toLevel: 12, generation: lifecycleLayer.pendingLod.generation });
+assert.equal(lifecycleEvents[0].type, 'tiled-lod-desired-change');
+assert.equal(lifecycleEvents[1].type, 'tiled-lod-preload-start');
+assert.deepEqual(
+  { fromLevel: lifecycleLayer.pendingLod.fromLevel, toLevel: lifecycleLayer.pendingLod.toLevel },
+  { fromLevel: 11, toLevel: 12 }
+);
+assert.ok(Number.isFinite(lifecycleLayer.pendingLod.startedAt));
 await Promise.resolve();
 await Promise.resolve();
 await new Promise((resolve) => setTimeout(resolve, 0));
 await Promise.resolve();
 assert.deepEqual(lifecycleLayer.lodTransition && [lifecycleLayer.lodTransition.fromLevel, lifecycleLayer.lodTransition.toLevel], [11, 12]);
+assert.deepEqual(lifecycleEvents.slice(-2).map(({ type }) => type), ['tiled-lod-preload-ready', 'tiled-lod-transition-start']);
+assert.ok(lifecycleEvents.at(-1).details.endpointLevels.some(({ level, endpointRole }) => level === 11 && endpointRole === 'transition-from'));
+assert.ok(lifecycleEvents.at(-1).details.endpointLevels.some(({ level, endpointRole }) => level === 12 && endpointRole === 'transition-to'));
 assert.ok([...lifecycleStore.blocks.keys()].some((key) => key.startsWith('11:')));
 assert.ok([...lifecycleStore.blocks.keys()].some((key) => key.startsWith('12:')));
 lifecycleLayer.setDesiredLod(11);
 assert.deepEqual([lifecycleLayer.lodTransition.fromLevel, lifecycleLayer.lodTransition.toLevel], [12, 11]);
+assert.equal(lifecycleEvents.at(-1).type, 'tiled-lod-transition-reversal');
 lifecycleLayer.updateLodTransition(lifecycleLayer.lodTransition.start + 1000);
 await Promise.resolve();
 await Promise.resolve();
 assert.equal(lifecycleLayer.stableLevel, 11);
+assert.equal(lifecycleEvents.at(-1).type, 'tiled-lod-transition-complete');
 lifecycleLayer.setDesiredLod(14);
 assert.equal(lifecycleLayer.pendingLod?.toLevel, 12);
 lifecycleStore.setProtectedBlockKeys(new Set(Array.from({ length: 1000 }, (_, index) => `14:0:0:${index}`)));
@@ -225,6 +239,11 @@ const expectedMaxCombinedBytes = Math.max(...validated.levels.flatMap((level) =>
 }))));
 assert.equal(lifecycleStore.diagnosticsState.maxCombinedBlockBytes, expectedMaxCombinedBytes);
 assert.ok(lifecycleStore.diagnosticsState.readyCacheByteTarget >= 320 * expectedMaxCombinedBytes);
+const levelStats = new Map(lifecycleStore.levelDiagnostics().map((entry) => [entry.level, entry]));
+assert.equal(levelStats.get(11).kind, 'aggregate-summary');
+assert.equal(levelStats.get(13).kind, 'direct');
+assert.ok(levelStats.get(11).readyBlockCount >= 1);
+assert.equal(levelStats.get(12).endpointRole, null);
 
 const sharedStore = { hazardsAvailable: true, aggregateSummary: true, gridSize: 2 ** 11, lodLevel: 11, manifest: { frame_count: 2, temporal_block_size: 1 }, tiles: new Map(), blocks: new Map() };
 const sharedLayer = new TiledRainLayer(sharedStore);

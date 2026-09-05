@@ -249,6 +249,18 @@ function diagnosticsEnvironment() {
   const canvasRect = canvas?.getBoundingClientRect?.();
   const contextAttributes = gl?.getContextAttributes?.() || null;
   return {
+    browser: {
+      userAgent: navigator.userAgent || null,
+      platform: navigator.platform || null,
+      hardwareConcurrency: Number.isFinite(navigator.hardwareConcurrency) ? navigator.hardwareConcurrency : null,
+      deviceMemory: Number.isFinite(navigator.deviceMemory) ? navigator.deviceMemory : null,
+      screen: {
+        width: Number.isFinite(screen.width) ? screen.width : null,
+        height: Number.isFinite(screen.height) ? screen.height : null,
+        availWidth: Number.isFinite(screen.availWidth) ? screen.availWidth : null,
+        availHeight: Number.isFinite(screen.availHeight) ? screen.availHeight : null
+      }
+    },
     canvasElement: canvas,
     viewportCss: { width: window.innerWidth, height: window.innerHeight },
     devicePixelRatio: window.devicePixelRatio,
@@ -343,6 +355,7 @@ function diagnosticsSnapshot() {
         progress: state.lodTransition.rawProgress
       } : null,
       preload: tiledRainEnabled ? weatherLayer?.diagnostics()?.lodPreloadPending || null : null,
+      endpointLevels: tiledRainEnabled ? weatherLayer?.diagnostics()?.endpointLevels || [] : [],
       leafCount: tiledRainEnabled ? weatherLayer?.diagnostics()?.proceduralInstancesPerTile || 0 : state.levelData?.count || 0
     },
     canonicalWindow: {
@@ -953,7 +966,11 @@ function tryInitializeWeatherLayer() {
 function tryInitializeTiledRainLayer() {
   const initialBounds = visibleMercatorBounds();
   if (!initialBounds) throw new Error('Initial camera bounds are unavailable for tiled rain initialization.');
-  weatherLayer = new TiledRainLayer(activeWeatherField.tileStore, { onTiming: markStartup, onCommit: refreshMotionProbe });
+  weatherLayer = new TiledRainLayer(activeWeatherField.tileStore, {
+    onTiming: markStartup,
+    onCommit: refreshMotionProbe,
+    onDiagnosticEvent: (type, details) => runtimeDiagnostics?.recordEvent(type, details)
+  });
   geographicLayers = [weatherLayer];
   const styleLayers = map.getStyle().layers || [];
   const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');

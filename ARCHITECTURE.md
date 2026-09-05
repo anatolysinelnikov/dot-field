@@ -222,6 +222,14 @@ cannot promote state. MotionField and motion-warp remain on their existing
 legacy L13 manifests, validation, residency, and shader path; `tiledRainLod`
 does not alter them.
 
+When `?diagnostics=1` is enabled, the existing persistent session/export
+contains the stable, desired, preload, and transition endpoint levels plus
+per-level visible tiles, resident/protected/pending blocks, logical payload and
+estimated GPU bytes, request/fetch/upload/eviction counters, and compact LOD
+lifecycle events. These are Dot Field-owned estimates and browser-exposed
+measurements; page JavaScript cannot measure total Safari/WebContent process
+memory or total CPU/GPU utilization.
+
 ## Experimental tiled-rain Phase 0B1 — offline MotionField, non-default
 
 Phase 0B1 adds a separate physical motion channel without changing the
