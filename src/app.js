@@ -20,7 +20,7 @@ import { GeographicWeatherPyramid } from './engine/geographic-weather-pyramid.js
 import { RawWeatherLayer } from './engine/raw-weather-layer.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './engine/geographic-layer-utils.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
-import { beginTiledRainLoad, TiledRainLayer } from './engine/tiled-rain.js';
+import { beginTiledRainLoad, selectTiledRainLod, TiledRainLayer } from './engine/tiled-rain.js';
 import {
   buildMotionProbe,
   sampleIdentityFromMercator,
@@ -32,6 +32,7 @@ const queryParameters = new URLSearchParams(window.location.search);
 const tiledRainEnabled = queryParameters.get('tiledRain') === '1';
 const diagnosticsEnabled = queryParameters.get('diagnostics') === '1';
 const motionWarpEnabled = tiledRainEnabled && queryParameters.get('motionWarp') === '1';
+const tiledRainLod = motionWarpEnabled ? 13 : selectTiledRainLod(queryParameters.get('tiledRainLod'));
 const motionWarpDebugMode = motionWarpEnabled && queryParameters.get('motionWarpDebug') === 'full' ? 'full' : null;
 const motionProbeEnabled = tiledRainEnabled && diagnosticsEnabled && queryParameters.get('motionProbe') === '1';
 const startupTimings = Object.create(null);
@@ -102,8 +103,8 @@ const weatherLoad = tiledRainEnabled
   ? beginTiledRainLoad(
     motionWarpEnabled
       ? './data/generated/tiled-rain-warp/current/manifest.json'
-      : './data/generated/tiled-rain/current/manifest.json',
-    { onTiming: markStartup, motionWarp: motionWarpEnabled, motionWarpDebugMode }
+      : './data/generated/tiled-rain-lod/current/manifest.json',
+    { onTiming: markStartup, motionWarp: motionWarpEnabled, motionWarpDebugMode, lodLevel: tiledRainLod }
   )
   : beginActiveWeatherLoad({ onTiming: markStartup, onResidencyChange: updateTimelineResidency });
 
@@ -287,9 +288,9 @@ function diagnosticsSnapshot() {
       sourceFrameStackFetched: false,
       sourceResidencyPolicy: 'bounded-tiled-blocks'
     };
-    trackedCpuBytes = dots.logicalUInt16ResidentBytes || 0;
-    estimatedGpuBufferBytes = dots.estimatedGpuTextureBytes || 0;
-    sourceResidentBytes = dots.logicalUInt16ResidentBytes || 0;
+    trackedCpuBytes = dots.logicalResidentPayloadBytes || 0;
+    estimatedGpuBufferBytes = dots.estimatedGpuPayloadBytes || 0;
+    sourceResidentBytes = dots.logicalResidentPayloadBytes || 0;
   }
   if (source && raw) {
     const rawFrameIndex = raw.sourceFrameIndex;
@@ -330,7 +331,7 @@ function diagnosticsSnapshot() {
       bearing: map.getBearing?.() ?? null
     },
     lod: {
-      stableLevel: tiledRainEnabled ? 13 : state.lod.level,
+      stableLevel: tiledRainEnabled ? (weatherLayer?.diagnostics()?.lodLevel || tiledRainLod) : state.lod.level,
       transition: state.lodTransition ? {
         fromLevel: state.lodTransition.fromLevel,
         toLevel: state.lodTransition.toLevel,
@@ -731,7 +732,7 @@ function updateLodDiagnostics() {
   const zoom = state.logicalSamplingZoom.toFixed(2);
   if (tiledRainEnabled) {
     const tiled = weatherLayer?.diagnostics();
-    const value = `Zoom ${zoom} · L13 tiled · ${tiled?.visibleTileCount || 0} tiles`;
+    const value = `Zoom ${zoom} · L${tiled?.lodLevel || tiledRainLod} tiled · ${tiled?.visibleTileCount || 0} tiles`;
     if (diagnosticsHud) diagnosticsHud.setBaseText(value);
     else lodDiagnostics.textContent = value;
     return;

@@ -4,21 +4,30 @@ import {
   DOTS_STRONG_RAIN_FULL_MMH,
   DOTS_STRONG_RAIN_ONSET_MMH,
   DOTS_STRONG_RAIN_SHAPE_ANCHORS,
+  dotsStrongRainMmhToRadiusFraction,
+  rainMmhToRadiusFraction,
   RAIN_VISIBILITY_SHADER,
   STRONG_RAIN_SHADER
 } from './precipitation-mapping.js';
 import { RAIN_VISIBILITY_FLOOR_MMH } from './config.js';
 import { sha256ArrayBuffer } from './sha256.js';
+import { geographicHazardRadiusForSeverity } from './hazard-renderer.js';
 
 export const TILED_RAIN_SCHEMA = 'dot-field-tiled-rain-v0';
+export const TILED_RAIN_LOD_SCHEMA = 'dot-field-tiled-rain-lod-v1';
 export const TILED_RAIN_WARP_SCHEMA = 'dot-field-tiled-rain-warp-v1';
 export const TILED_RAIN_LOD_LEVEL = 13;
+export const TILED_RAIN_LOD_LEVELS = Object.freeze([11, 12, 13, 14]);
 export const TILED_RAIN_TILE_SIZE = 128;
 export const TILED_RAIN_GRID_SIZE = 2 ** TILED_RAIN_LOD_LEVEL;
 export const TILED_RAIN_WARP_HALO_SIZE = 13;
 export const TILED_RAIN_WARP_STORED_SIZE = TILED_RAIN_TILE_SIZE + 2 * TILED_RAIN_WARP_HALO_SIZE;
 // The LRU returns toward this target whenever the required target permits it.
 const READY_CACHE_BLOCK_LIMIT = 320;
+// This is intentionally independent of the global tile count. A protected
+// viewport target may temporarily exceed it, but ordinary residency returns
+// toward READY_CACHE_BLOCK_LIMIT after the target changes.
+const HARD_READY_CACHE_BLOCK_LIMIT = READY_CACHE_BLOCK_LIMIT * 2;
 export const TILED_RAIN_MAX_CONCURRENT_FETCHES = 8;
 const VIEWPORT_OVERSCAN_SAMPLES = 64;
 const QUAD = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
@@ -62,7 +71,7 @@ function resolveAssetUrl(manifestUrl, asset) {
   return new URL(asset, new URL(manifestUrl, globalThis.location?.href || manifestUrl)).href;
 }
 
-function sourceFrameForTime(frameCount, time) {
+export function sourceFrameForTime(frameCount, time) {
   const position = Math.max(0, Math.min(1, Number.isFinite(time) ? time : 0)) * (frameCount - 1);
   const frame0 = Math.floor(position);
   const progress = position - frame0;
@@ -71,6 +80,54 @@ function sourceFrameForTime(frameCount, time) {
     frame1: progress === 0 ? frame0 : Math.min(frameCount - 1, frame0 + 1),
     progress
   };
+}
+
+export function selectTiledRainLod(value, fallback = TILED_RAIN_LOD_LEVEL) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const level = Number(value);
+  if (!Number.isInteger(level) || !TILED_RAIN_LOD_LEVELS.includes(level)) {
+    throw new Error(`tiledRainLod must be one of ${TILED_RAIN_LOD_LEVELS.join(', ')}.`);
+  }
+  return level;
+}
+
+function aggregateSummaryValid(summary) {
+  return Number.isFinite(summary?.rainCoverage) && summary.rainCoverage >= 0;
+}
+
+export function aggregateDotsRadiusFractions(summary) {
+  if (!aggregateSummaryValid(summary)) return { rain: 0, strong: 0, storm: 0, hail: 0 };
+  return {
+    rain: Math.sqrt(Math.max(0, summary.rainCoverage))
+      * rainMmhToRadiusFraction(summary.rainWetMeanMmh),
+    strong: Math.sqrt(Math.max(0, summary.strongCoverage))
+      * dotsStrongRainMmhToRadiusFraction(summary.rainMaxMmh),
+    storm: Math.sqrt(Math.max(0, summary.stormCoverage || 0))
+      * geographicHazardRadiusForSeverity('storm', summary.stormMaxSeverity || 0, 1),
+    hail: Math.sqrt(Math.max(0, summary.hailCoverage || 0))
+      * geographicHazardRadiusForSeverity('hail', summary.hailMaxSeverity || 0, 1)
+  };
+}
+
+export function aggregateDotsTemporalRadius(first, second, progress, type) {
+  const firstValid = aggregateSummaryValid(first);
+  const secondValid = aggregateSummaryValid(second);
+  const firstRadius = aggregateDotsRadiusFractions(first)[type] || 0;
+  const secondRadius = aggregateDotsRadiusFractions(second)[type] || 0;
+  if (firstValid && secondValid) return Math.sqrt(firstRadius ** 2 + (secondRadius ** 2 - firstRadius ** 2) * Math.max(0, Math.min(1, progress)));
+  return firstValid ? firstRadius : secondValid ? secondRadius : 0;
+}
+
+export function aggregateSquaresInputs(first, second, progress) {
+  const firstValid = aggregateSummaryValid(first);
+  const secondValid = aggregateSummaryValid(second);
+  const keys = ['rainWetMeanMmh', 'rainCoverage', 'stormCoverage', 'stormMaxSeverity', 'hailCoverage', 'hailMaxSeverity'];
+  const value = (key) => {
+    const firstValue = firstValid ? Number(first?.[key]) || 0 : 0;
+    const secondValue = secondValid ? Number(second?.[key]) || 0 : 0;
+    return firstValid && secondValid ? firstValue * (1 - progress) + secondValue * progress : firstValid ? firstValue : secondValid ? secondValue : 0;
+  };
+  return Object.fromEntries(keys.map((key) => [key, value(key)]));
 }
 
 function validateManifest(manifest) {
@@ -140,6 +197,137 @@ function validateManifest(manifest) {
   return manifest;
 }
 
+function validateLodPayloadDescriptor(descriptor, name, frameCount, components, dtype) {
+  if (!descriptor || typeof descriptor !== 'object'
+    || typeof descriptor.asset !== 'string' || typeof descriptor.gzip_asset !== 'string'
+    || descriptor.dtype !== dtype || descriptor.component_count !== components
+    || descriptor.sample_count !== TILED_RAIN_TILE_SIZE ** 2
+    || descriptor.frame_count !== frameCount
+    || typeof descriptor.layout !== 'string' || !descriptor.layout.startsWith('frame-major;')
+    || !Number.isInteger(descriptor.byte_length) || descriptor.byte_length < 0
+    || !Number.isInteger(descriptor.gzip_byte_length) || descriptor.gzip_byte_length < 0) {
+    clearError(`${name} payload descriptor is invalid.`);
+  }
+  const bytesPerComponent = dtype === 'Float16' || dtype === 'UInt16' ? 2 : 1;
+  const expected = frameCount * descriptor.sample_count * components * bytesPerComponent;
+  if (descriptor.byte_length !== expected) clearError(`${name} payload byte length is invalid.`);
+  return descriptor;
+}
+
+function validateLodLevel(level, manifest) {
+  if (!level || !TILED_RAIN_LOD_LEVELS.includes(level.level)) clearError('multi-LOD level is invalid.');
+  const expectedKind = level.level < TILED_RAIN_LOD_LEVEL ? 'aggregate-summary' : 'direct';
+  if (level.kind !== expectedKind || level.tile_size !== TILED_RAIN_TILE_SIZE) {
+    clearError(`L${level.level} kind or tile size is invalid.`);
+  }
+  const grid = level.grid;
+  const generated = grid?.generated_sample_bounds;
+  const support = grid?.support_sample_bounds;
+  if (!grid || grid.grid_size !== 2 ** level.level || !generated || !support
+    || grid.width !== generated.max_i - generated.min_i + 1
+    || grid.height !== generated.max_j - generated.min_j + 1
+    || grid.count !== grid.width * grid.height) {
+    clearError(`L${level.level} grid contract is invalid.`);
+  }
+  const tileBounds = level.tile_index_bounds;
+  if (!tileBounds || tileBounds.min_x !== Math.floor(generated.min_i / TILED_RAIN_TILE_SIZE)
+    || tileBounds.max_x !== Math.floor(generated.max_i / TILED_RAIN_TILE_SIZE)
+    || tileBounds.min_y !== Math.floor(generated.min_j / TILED_RAIN_TILE_SIZE)
+    || tileBounds.max_y !== Math.floor(generated.max_j / TILED_RAIN_TILE_SIZE)) {
+    clearError(`L${level.level} tile bounds are invalid.`);
+  }
+  if (!Array.isArray(level.tiles) || level.tiles.length !== level.tile_count || level.tile_count < 1) {
+    clearError(`L${level.level} tile descriptors are missing.`);
+  }
+  if (level.kind === 'aggregate-summary') {
+    const planeA = level.encoding?.plane_a;
+    const planeB = level.encoding?.plane_b;
+    if (planeA?.dtype !== 'Float16'
+      || JSON.stringify(planeA.components) !== JSON.stringify(['rainWetMeanMmh', 'rainMaxMmh', 'rainCoverage', 'strongCoverage'])
+      || planeA.nodata_sentinel?.component !== 'rainCoverage'
+      || planeA.nodata_sentinel.value !== -1
+      || planeB?.dtype !== 'Float16'
+      || JSON.stringify(planeB.components) !== JSON.stringify(['stormCoverage', 'stormMaxSeverity', 'hailCoverage', 'hailMaxSeverity'])
+      || planeB.optional !== true || typeof planeB.absent_meaning !== 'string') {
+      clearError(`L${level.level} aggregate encoding contract is invalid.`);
+    }
+  } else if (level.encoding?.rain?.dtype !== 'UInt16'
+    || level.encoding.rain.nodata_code !== 0 || level.encoding.rain.dry_code !== 1
+    || level.encoding.rain.positive_code_min !== 2 || level.encoding.rain.positive_code_max !== 65535
+    || level.encoding.rain.positive_quantized_range !== 65534
+    || !Number.isFinite(level.encoding.rain.physical_max_mmh) || level.encoding.rain.physical_max_mmh <= 0
+    || level.encoding.hazards?.dtype !== 'UInt8' || level.encoding.hazards.decode !== 'code / 255') {
+    clearError(`L${level.level} direct encoding contract is invalid.`);
+  }
+  const seenTiles = new Set();
+  const expectedBlockCount = Math.ceil(manifest.frame_count / manifest.temporal_block_size);
+  let hasHazardPayload = false;
+  for (const tile of level.tiles) {
+    if (!Number.isInteger(tile.x) || !Number.isInteger(tile.y) || !Array.isArray(tile.blocks)) {
+      clearError(`L${level.level} tile descriptor is invalid.`);
+    }
+    const tileKey = `${tile.x}:${tile.y}`;
+    if (seenTiles.has(tileKey) || tile.x < tileBounds.min_x || tile.x > tileBounds.max_x
+      || tile.y < tileBounds.min_y || tile.y > tileBounds.max_y) clearError(`L${level.level} tile ${tileKey} is invalid.`);
+    seenTiles.add(tileKey);
+    if (tile.blocks.length !== expectedBlockCount) clearError(`L${level.level} tile ${tileKey} block count is invalid.`);
+    for (const block of tile.blocks) {
+      const expectedFrameCount = Math.min(manifest.temporal_block_size, manifest.frame_count - block.index * manifest.temporal_block_size);
+      if (!Number.isInteger(block.index) || block.index < 0 || block.frame_start !== block.index * manifest.temporal_block_size
+        || block.frame_count !== expectedFrameCount || block.frame_start + block.frame_count > manifest.frame_count) {
+        clearError(`L${level.level} block ${tileKey}:${block.index} frame contract is invalid.`);
+      }
+      if (level.kind === 'aggregate-summary') {
+        validateLodPayloadDescriptor(block.summary_a, `L${level.level} Summary A ${tileKey}:${block.index}`, block.frame_count, 4, 'Float16');
+        if (block.summary_b !== null && block.summary_b !== undefined) {
+          validateLodPayloadDescriptor(block.summary_b, `L${level.level} Summary B ${tileKey}:${block.index}`, block.frame_count, 4, 'Float16');
+          hasHazardPayload = true;
+        }
+      } else {
+        validateLodPayloadDescriptor(block.rain || block, `L${level.level} rain ${tileKey}:${block.index}`, block.frame_count, 1, 'UInt16');
+        for (const channel of ['storm', 'hail']) {
+          if (block[channel] !== null && block[channel] !== undefined) {
+            validateLodPayloadDescriptor(block[channel], `L${level.level} ${channel} ${tileKey}:${block.index}`, block.frame_count, 1, 'UInt8');
+            hasHazardPayload = true;
+          }
+        }
+      }
+    }
+  }
+  return Object.freeze({ ...level, hasHazardPayload });
+}
+
+export function validateTiledRainLodManifest(manifest) {
+  if (!manifest || manifest.schema !== TILED_RAIN_LOD_SCHEMA || manifest.version !== 1) {
+    clearError('multi-LOD schema/version is not supported.');
+  }
+  if (manifest.reference_level !== TILED_RAIN_LOD_LEVEL
+    || manifest.level_range?.min !== TILED_RAIN_LOD_LEVELS[0]
+    || manifest.level_range?.max !== TILED_RAIN_LOD_LEVELS.at(-1)
+    || manifest.tile_size !== TILED_RAIN_TILE_SIZE
+    || !Number.isInteger(manifest.temporal_block_size) || manifest.temporal_block_size <= 0
+    || !Number.isInteger(manifest.frame_count) || manifest.frame_count <= 0
+    || !Array.isArray(manifest.timestamps) || manifest.timestamps.length !== manifest.frame_count
+    || manifest.physical_units !== 'mm/h' || manifest.byte_order !== 'little-endian'
+    || typeof manifest.source_generation_id !== 'string' || !manifest.source_generation_id
+    || typeof manifest.source_metadata_asset !== 'string') {
+    clearError('multi-LOD common manifest contract is invalid.');
+  }
+  if (!Array.isArray(manifest.levels) || manifest.levels.length !== TILED_RAIN_LOD_LEVELS.length) {
+    clearError('multi-LOD level list is invalid.');
+  }
+  const levels = new Map();
+  for (const level of manifest.levels) {
+    if (levels.has(level.level)) clearError(`duplicate multi-LOD level L${level.level}.`);
+    const validated = validateLodLevel(level, manifest);
+    levels.set(level.level, validated);
+  }
+  if (levels.size !== TILED_RAIN_LOD_LEVELS.length || TILED_RAIN_LOD_LEVELS.some((level) => !levels.has(level))) {
+    clearError('multi-LOD levels are incomplete.');
+  }
+  return Object.freeze({ ...manifest, levels: Object.freeze([...levels.values()]) });
+}
+
 async function fetchJson(url) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Unable to load tiled rain manifest ${url} (${response.status}).`);
@@ -161,9 +349,36 @@ async function fetchJsonWithBytes(url, description) {
   }
 }
 
-async function loadAndValidateDataset(manifestUrl, timing) {
+async function loadAndValidateMultiLodDataset(manifestUrl, timing, lodLevel) {
+  const manifest = validateTiledRainLodManifest(await fetchJson(manifestUrl));
+  const selectedLevel = manifest.levels.find((level) => level.level === lodLevel);
+  if (!selectedLevel) clearError(`multi-LOD level L${lodLevel} is not present.`);
+  timing('tiled-rain-manifest-validation-complete');
+  timing('tiled-rain-source-metadata-fetch-start');
+  const sourceMetadata = await fetchJson(resolveAssetUrl(manifestUrl, manifest.source_metadata_asset));
+  if (sourceMetadata.generation_id !== manifest.source_generation_id) {
+    clearError(`source generation mismatch: manifest=${manifest.source_generation_id}, current=${sourceMetadata.generation_id || '<missing>'}.`);
+  }
+  timing('tiled-rain-source-generation-verified');
+  const tiles = new Map(selectedLevel.tiles.map((tile) => [`${tile.x}:${tile.y}`, tile]));
+  return Object.freeze({
+    manifest,
+    level: selectedLevel,
+    lodLevel,
+    manifestUrl,
+    tiles,
+    isMultiLod: true,
+    sourceMetadata
+  });
+}
+
+async function loadAndValidateDataset(manifestUrl, timing, lodLevel = TILED_RAIN_LOD_LEVEL) {
   timing('tiled-rain-manifest-fetch-start');
-  const manifest = validateManifest(await fetchJson(manifestUrl));
+  const rawManifest = await fetchJson(manifestUrl);
+  if (rawManifest?.schema === TILED_RAIN_LOD_SCHEMA) {
+    return loadAndValidateMultiLodDataset(manifestUrl, timing, lodLevel);
+  }
+  const manifest = validateManifest(rawManifest);
   timing('tiled-rain-manifest-validation-complete');
   if (typeof manifest.source_generation_id !== 'string' || !manifest.source_generation_id) clearError('source_generation_id is missing.');
   if (typeof manifest.source_metadata_asset !== 'string') clearError('source_metadata_asset is missing.');
@@ -175,7 +390,7 @@ async function loadAndValidateDataset(manifestUrl, timing) {
   timing('tiled-rain-source-generation-verified');
   const tiles = new Map();
   for (const tile of manifest.tiles) tiles.set(`${tile.x}:${tile.y}`, tile);
-  return Object.freeze({ manifest, manifestUrl, tiles });
+  return Object.freeze({ manifest, manifestUrl, tiles, isMultiLod: false });
 }
 
 function validateMotionManifest(manifest) {
@@ -344,10 +559,22 @@ async function loadAndValidateWarpDataset(manifestUrl, timing) {
 export class TiledRainTileStore {
   constructor(dataset, { onTiming = null } = {}) {
     this.dataset = dataset;
-    this.manifest = dataset.manifest;
+    this.rootManifest = dataset.manifest;
+    this.level = dataset.level || dataset.manifest;
+    // Keep the selected level's runtime fields at the historical manifest
+    // access path while retaining the multi-LOD root fields for diagnostics.
+    this.manifest = dataset.level
+      ? Object.freeze({ ...dataset.manifest, ...dataset.level })
+      : dataset.manifest;
     this.tiles = dataset.tiles;
     this.motionWarp = Boolean(dataset.isMotionWarp);
-    this.hazardsAvailable = !this.motionWarp && this.manifest.hazardsAvailable === true;
+    this.multiLod = dataset.isMultiLod === true;
+    this.aggregateSummary = this.level.kind === 'aggregate-summary';
+    this.lodLevel = this.level.level ?? this.level.lod_level ?? TILED_RAIN_LOD_LEVEL;
+    this.gridSize = this.level.grid?.grid_size ?? this.level.grid_size ?? TILED_RAIN_GRID_SIZE;
+    this.hazardsAvailable = !this.motionWarp && (this.multiLod
+      ? this.level.hasHazardPayload === true
+      : this.manifest.hazardsAvailable === true);
     this.motionWarpDebugMode = this.motionWarp && dataset.motionWarpDebugMode === 'full' ? 'full' : null;
     this.motionManifest = dataset.motionManifest || null;
     this.motionGrid = this.motionManifest ? deriveMotionGridContract(this.motionManifest) : null;
@@ -363,6 +590,11 @@ export class TiledRainTileStore {
       residentTileCount: 0,
       residentTileBlockCount: 0,
       pendingRequestCount: 0,
+      lodLevel: this.lodLevel,
+      payloadKind: this.aggregateSummary ? 'aggregate-summary' : 'direct',
+      payloadDtype: this.aggregateSummary ? 'Float16 RGBA summary textures' : 'UInt16 rain / UInt8 hazards',
+      logicalResidentPayloadBytes: 0,
+      estimatedGpuPayloadBytes: 0,
       logicalUInt16ResidentBytes: 0,
       estimatedGpuTextureBytes: 0,
       hazardsAvailable: this.hazardsAvailable,
@@ -448,26 +680,37 @@ export class TiledRainTileStore {
     this.latestUsefulBlockKeys = new Set();
     this.latestUsefulMotionTileKeys = new Set();
     this.protectedBlockKeys = new Set();
-    this.maxTargetBlocks = this.tiles.size * 2;
-    const blockByteLengths = [...this.tiles.values()].flatMap((tile) => tile.blocks.map((block) => block.byte_length));
+    this.maxTargetBlocks = 0;
+    const blockByteLengths = [...this.tiles.values()].flatMap((tile) => tile.blocks.map((block) => this.primaryDescriptor(block).byte_length));
     const hazardByteLengths = this.hazardsAvailable
-      ? [...this.tiles.values()].flatMap((tile) => tile.blocks.flatMap((block) => [block.storm?.byte_length || 0, block.hail?.byte_length || 0]))
+      ? [...this.tiles.values()].flatMap((tile) => tile.blocks.flatMap((block) => this.aggregateSummary
+        ? [block.summary_b?.byte_length || 0]
+        : [block.storm?.byte_length || 0, block.hail?.byte_length || 0]))
       : [];
     this.maxBlockBytes = Math.max(0, ...blockByteLengths);
     this.maxHazardBlockBytes = Math.max(0, ...hazardByteLengths);
     this.maxCombinedBlockBytes = this.maxBlockBytes + this.maxHazardBlockBytes;
-    this.hardReadyBlockLimit = Math.max(READY_CACHE_BLOCK_LIMIT, this.maxTargetBlocks);
-    this.maxTrackedBlocks = this.hardReadyBlockLimit + this.maxTargetBlocks + TILED_RAIN_MAX_CONCURRENT_FETCHES;
+    this.hardReadyBlockLimit = HARD_READY_CACHE_BLOCK_LIMIT;
+    this.maxTrackedBlocks = this.hardReadyBlockLimit + HARD_READY_CACHE_BLOCK_LIMIT + TILED_RAIN_MAX_CONCURRENT_FETCHES;
     this.diagnosticsState.readyCacheBlockLimit = READY_CACHE_BLOCK_LIMIT;
     this.diagnosticsState.hardReadyBlockLimit = this.hardReadyBlockLimit;
     this.diagnosticsState.maxTargetBlockCount = this.maxTargetBlocks;
     this.diagnosticsState.readyCacheByteTarget = READY_CACHE_BLOCK_LIMIT * this.maxCombinedBlockBytes;
     this.diagnosticsState.hardCpuResidentByteLimit = this.hardReadyBlockLimit * this.maxCombinedBlockBytes;
     this.diagnosticsState.hardGpuResidentByteLimit = this.diagnosticsState.hardCpuResidentByteLimit;
-    this.diagnosticsState.maxPendingBlocks = this.maxTargetBlocks + TILED_RAIN_MAX_CONCURRENT_FETCHES;
+    this.diagnosticsState.maxPendingBlocks = HARD_READY_CACHE_BLOCK_LIMIT + TILED_RAIN_MAX_CONCURRENT_FETCHES;
     this.diagnosticsState.maxTrackedBlocks = this.maxTrackedBlocks;
     this.diagnosticsState.trackedBlockCount = 0;
     this.diagnosticsState.peakTrackedBlockCount = 0;
+  }
+
+  primaryDescriptor(block) {
+    if (this.aggregateSummary) return block?.summary_a || null;
+    return block?.rain || block || null;
+  }
+
+  secondaryDescriptor(block) {
+    return this.aggregateSummary ? block?.summary_b || null : null;
   }
 
   descriptor(tileKey, blockIndex) {
@@ -490,7 +733,12 @@ export class TiledRainTileStore {
     const descriptor = this.descriptor(tileKey, blockIndex);
     if (!descriptor) throw new Error(`Tiled rain block ${key} is not present in the manifest.`);
     if (!state || state.obsolete || state.status === 'error' || state.status === 'aborted') {
-      state = { key, tileKey, blockIndex, descriptor, kind: 'rain', status: 'queued', lastUsed: ++this.lastUsed, payload: null, hazardPayloads: { storm: null, hail: null }, gpuTexture: null, hazardTextures: { storm: null, hail: null } };
+      state = {
+        key, tileKey, blockIndex, descriptor, kind: 'rain', status: 'queued', lastUsed: ++this.lastUsed,
+        payload: null, payloads: { primary: null, secondary: null },
+        hazardPayloads: { storm: null, hail: null }, gpuTexture: null, summaryTexture: null,
+        hazardTextures: { storm: null, hail: null }
+      };
     }
     state.status = 'queued';
     state.obsolete = false;
@@ -580,9 +828,8 @@ export class TiledRainTileStore {
     }
   }
 
-  fetchHazardPayload(state, channel) {
-    if (!this.hazardsAvailable || !state.descriptor[channel]) return Promise.resolve(null);
-    const descriptor = state.descriptor[channel];
+  fetchDescriptorPayload(state, descriptor, channel) {
+    if (!descriptor) return Promise.resolve(null);
     const url = resolveAssetUrl(this.dataset.manifestUrl, descriptor.asset);
     return fetch(url, { signal: state.controller.signal }).then((response) => {
       if (!response.ok) throw new Error(`Unable to load tiled rain ${channel} payload ${url} (${response.status}).`);
@@ -594,6 +841,7 @@ export class TiledRainTileStore {
       const contentLength = Number(response.headers?.get?.('Content-Length'));
       if (Number.isFinite(contentLength) && contentLength >= 0) {
         this.diagnosticsState.responseContentLengthBytes += contentLength;
+        if (!Number.isFinite(this.diagnosticsState[`${channel}ResponseContentLengthBytes`])) this.diagnosticsState[`${channel}ResponseContentLengthBytes`] = 0;
         this.diagnosticsState[`${channel}ResponseContentLengthBytes`] += contentLength;
       }
       return response.arrayBuffer();
@@ -602,10 +850,17 @@ export class TiledRainTileStore {
         throw new Error(`Tiled rain ${channel} payload ${state.key} byte length is ${payload.byteLength}, expected ${descriptor.byte_length}.`);
       }
       this.diagnosticsState.logicalFetchedBytes += payload.byteLength;
-      this.diagnosticsState.logicalHazardFetchedBytes += payload.byteLength;
-      this.diagnosticsState[`${channel}FetchCount`]++;
+      if (channel === 'storm' || channel === 'hail') {
+        this.diagnosticsState.logicalHazardFetchedBytes += payload.byteLength;
+        this.diagnosticsState[`${channel}FetchCount`]++;
+      }
       return payload;
     });
+  }
+
+  fetchHazardPayload(state, channel) {
+    if (!this.hazardsAvailable || !state.descriptor[channel]) return Promise.resolve(null);
+    return this.fetchDescriptorPayload(state, state.descriptor[channel], channel);
   }
 
   startFetch(state) {
@@ -620,7 +875,8 @@ export class TiledRainTileStore {
     if (state.kind === 'motion') this.diagnosticsState.motionRequestCount++;
     else this.diagnosticsState.rainBlockRequestCount = (this.diagnosticsState.rainBlockRequestCount || 0) + 1;
     const assetManifestUrl = state.kind === 'motion' ? this.motionManifestUrl : this.dataset.manifestUrl;
-    const url = resolveAssetUrl(assetManifestUrl, state.descriptor.asset);
+    const payloadDescriptor = state.kind === 'motion' ? state.descriptor : this.primaryDescriptor(state.descriptor);
+    const url = resolveAssetUrl(assetManifestUrl, payloadDescriptor.asset);
     this.onTiming(`${state.kind === 'motion' ? 'tiled-rain-motion' : 'tiled-rain-block'}-${state.tileKey}${state.kind === 'motion' ? '' : `-${state.blockIndex}`}-fetch-start`);
     void fetch(url, { signal: state.controller.signal })
       .then((response) => {
@@ -648,16 +904,21 @@ export class TiledRainTileStore {
           state.resolve(null);
           return null;
         }
-        if (payload.byteLength !== state.descriptor.byte_length) throw new Error(`${state.kind === 'motion' ? 'MotionField tile' : 'Tiled rain block'} ${state.key} byte length is ${payload.byteLength}, expected ${state.descriptor.byte_length}.`);
+        const expectedBytes = payloadDescriptor.byte_length;
+        if (payload.byteLength !== expectedBytes) throw new Error(`${state.kind === 'motion' ? 'MotionField tile' : 'Tiled rain block'} ${state.key} byte length is ${payload.byteLength}, expected ${expectedBytes}.`);
+        if (state.kind === 'rain' && this.aggregateSummary) {
+          return this.fetchDescriptorPayload(state, this.secondaryDescriptor(state.descriptor), 'summaryB')
+            .then((secondary) => ({ primary: payload, secondary, storm: null, hail: null }));
+        }
         if (state.kind === 'rain' && this.hazardsAvailable) {
           return Promise.all(['storm', 'hail'].map((channel) => this.fetchHazardPayload(state, channel)))
-            .then(([storm, hail]) => ({ rain: payload, storm, hail }));
+            .then(([storm, hail]) => ({ primary: payload, secondary: null, storm, hail }));
         }
-        return { rain: payload, storm: null, hail: null };
+        return { primary: payload, secondary: null, storm: null, hail: null };
       })
       .then((payloads) => {
         if (!payloads) return null;
-        const payload = payloads.rain;
+        const payload = payloads.primary;
         const useful = state.kind === 'motion'
           ? this.latestUsefulMotionTileKeys.has(state.key)
           : this.latestUsefulBlockKeys.has(state.key);
@@ -667,6 +928,7 @@ export class TiledRainTileStore {
           return null;
         }
         state.payload = payload;
+        state.payloads = { primary: payloads.primary, secondary: payloads.secondary };
         state.hazardPayloads = { storm: payloads.storm, hail: payloads.hail };
         state.status = 'ready';
         state.lastUsed = ++this.lastUsed;
@@ -720,6 +982,7 @@ export class TiledRainTileStore {
       const state = candidates.shift();
       if (this.gl) {
         if (state.gpuTexture) this.gl.deleteTexture(state.gpuTexture);
+        if (state.summaryTexture) this.gl.deleteTexture(state.summaryTexture);
         for (const texture of Object.values(state.hazardTextures || {})) if (texture) this.gl.deleteTexture(texture);
       }
       this.blocks.delete(state.key);
@@ -735,11 +998,19 @@ export class TiledRainTileStore {
 
   setProtectedBlockKeys(keys) {
     this.protectedBlockKeys = new Set(keys);
+    this.maxTargetBlocks = Math.max(this.maxTargetBlocks, this.protectedBlockKeys.size);
+    this.diagnosticsState.currentTargetBlockCount = this.protectedBlockKeys.size;
+    this.diagnosticsState.maxTargetBlockCount = this.maxTargetBlocks;
+    this.diagnosticsState.maxPendingBlocks = Math.max(
+      this.diagnosticsState.maxPendingBlocks,
+      this.protectedBlockKeys.size + TILED_RAIN_MAX_CONCURRENT_FETCHES
+    );
     this.evict(this.protectedBlockKeys);
   }
 
   updateMemoryDiagnostics() {
     let bytes = 0;
+    let secondaryBytes = 0;
     let gpuBytes = 0;
     let hazardBytes = 0;
     let hazardGpuBytes = 0;
@@ -747,9 +1018,18 @@ export class TiledRainTileStore {
     for (const state of this.blocks.values()) {
       if (state.status !== 'ready') continue;
       tileKeys.add(state.tileKey);
-      bytes += state.payload?.byteLength || 0;
+      const primaryPayload = state.payloads?.primary || state.payload;
+      const secondaryPayload = state.payloads?.secondary;
+      bytes += primaryPayload?.byteLength || 0;
+      secondaryBytes += secondaryPayload?.byteLength || 0;
       const storedSize = this.motionWarp ? TILED_RAIN_WARP_STORED_SIZE : TILED_RAIN_TILE_SIZE;
-      gpuBytes += state.gpuTexture ? storedSize * storedSize * state.descriptor.frame_count * 2 : 0;
+      const primaryBytesPerSample = this.aggregateSummary ? 8 : 2;
+      gpuBytes += state.gpuTexture ? storedSize * storedSize * state.descriptor.frame_count * primaryBytesPerSample : 0;
+      if (this.aggregateSummary) {
+        gpuBytes += state.summaryTexture
+          ? TILED_RAIN_TILE_SIZE * TILED_RAIN_TILE_SIZE * state.descriptor.frame_count * 8
+          : 0;
+      }
       if (!this.motionWarp) {
         hazardBytes += Object.values(state.hazardPayloads || {}).reduce((total, payload) => total + (payload?.byteLength || 0), 0);
         hazardGpuBytes += Object.values(state.hazardTextures || {}).reduce((total, texture) => total + (texture ? TILED_RAIN_TILE_SIZE * TILED_RAIN_TILE_SIZE * state.descriptor.frame_count : 0), 0);
@@ -757,7 +1037,9 @@ export class TiledRainTileStore {
     }
     this.diagnosticsState.residentTileCount = tileKeys.size;
     this.diagnosticsState.residentTileBlockCount = [...this.blocks.values()].filter((state) => state.status === 'ready').length;
-    this.diagnosticsState.logicalUInt16ResidentBytes = bytes;
+    this.diagnosticsState.logicalResidentPayloadBytes = bytes + secondaryBytes + hazardBytes;
+    this.diagnosticsState.estimatedGpuPayloadBytes = gpuBytes + hazardGpuBytes;
+    this.diagnosticsState.logicalUInt16ResidentBytes = this.aggregateSummary ? 0 : bytes;
     this.diagnosticsState.estimatedGpuTextureBytes = gpuBytes;
     this.diagnosticsState.logicalHazardResidentBytes = hazardBytes;
     this.diagnosticsState.estimatedHazardGpuBytes = hazardGpuBytes;
@@ -766,7 +1048,7 @@ export class TiledRainTileStore {
     this.diagnosticsState.haloRainLogicalResidentBytes = this.motionWarp ? bytes : 0;
     this.diagnosticsState.estimatedHaloRainGpuBytes = this.motionWarp ? gpuBytes : 0;
     this.diagnosticsState.peakResidentBlockCount = Math.max(this.diagnosticsState.peakResidentBlockCount, this.diagnosticsState.residentTileBlockCount);
-    this.diagnosticsState.peakLogicalUInt16ResidentBytes = Math.max(this.diagnosticsState.peakLogicalUInt16ResidentBytes, bytes);
+    this.diagnosticsState.peakLogicalUInt16ResidentBytes = Math.max(this.diagnosticsState.peakLogicalUInt16ResidentBytes, this.diagnosticsState.logicalUInt16ResidentBytes);
     this.diagnosticsState.peakEstimatedGpuTextureBytes = Math.max(this.diagnosticsState.peakEstimatedGpuTextureBytes, gpuBytes);
     let motionBytes = 0;
     let motionGpuBytes = 0;
@@ -800,13 +1082,21 @@ export class TiledRainTileStore {
     gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, this.motionWarp ? gl.REPEAT : gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, this.motionWarp ? gl.REPEAT : gl.CLAMP_TO_EDGE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage3D(
-      gl.TEXTURE_2D_ARRAY, 0, gl.R16UI,
-      this.motionWarp ? TILED_RAIN_WARP_STORED_SIZE : TILED_RAIN_TILE_SIZE,
-      this.motionWarp ? TILED_RAIN_WARP_STORED_SIZE : TILED_RAIN_TILE_SIZE,
-      state.descriptor.frame_count,
-      0, gl.RED_INTEGER, gl.UNSIGNED_SHORT, new Uint16Array(state.payload)
-    );
+    const payload = state.payloads?.primary || state.payload;
+    if (this.aggregateSummary) {
+      gl.texImage3D(
+        gl.TEXTURE_2D_ARRAY, 0, gl.RGBA16F, TILED_RAIN_TILE_SIZE, TILED_RAIN_TILE_SIZE,
+        state.descriptor.frame_count, 0, gl.RGBA, gl.HALF_FLOAT, new Uint16Array(payload)
+      );
+    } else {
+      gl.texImage3D(
+        gl.TEXTURE_2D_ARRAY, 0, gl.R16UI,
+        this.motionWarp ? TILED_RAIN_WARP_STORED_SIZE : TILED_RAIN_TILE_SIZE,
+        this.motionWarp ? TILED_RAIN_WARP_STORED_SIZE : TILED_RAIN_TILE_SIZE,
+        state.descriptor.frame_count,
+        0, gl.RED_INTEGER, gl.UNSIGNED_SHORT, new Uint16Array(payload)
+      );
+    }
     state.gpuTexture = texture;
     this.gl = gl;
     this.diagnosticsState.tileUploadCount++;
@@ -816,8 +1106,31 @@ export class TiledRainTileStore {
     return texture;
   }
 
+  uploadSummaryBlock(gl, state) {
+    if (!this.aggregateSummary || !state.payloads?.secondary || state.summaryTexture) return state.summaryTexture || null;
+    const started = now();
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(
+      gl.TEXTURE_2D_ARRAY, 0, gl.RGBA16F, TILED_RAIN_TILE_SIZE, TILED_RAIN_TILE_SIZE,
+      state.descriptor.frame_count, 0, gl.RGBA, gl.HALF_FLOAT, new Uint16Array(state.payloads.secondary)
+    );
+    state.summaryTexture = texture;
+    this.gl = gl;
+    this.diagnosticsState.tileUploadCount++;
+    this.diagnosticsState.latestGpuUploadMs = now() - started;
+    this.diagnosticsState.cumulativeGpuUploadMs += this.diagnosticsState.latestGpuUploadMs;
+    this.updateMemoryDiagnostics();
+    return texture;
+  }
+
   uploadHazardBlock(gl, state, channel) {
-    if (!this.hazardsAvailable || !state.hazardPayloads?.[channel]) return null;
+    if (this.aggregateSummary || !this.hazardsAvailable || !state.hazardPayloads?.[channel]) return null;
     if (state.hazardTextures?.[channel]) return state.hazardTextures[channel];
     const started = now();
     const texture = gl.createTexture();
@@ -984,8 +1297,13 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
-function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAvailable, presentation = 'dots') {
+function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAvailable, presentation = 'dots', aggregate = false, gridSize = TILED_RAIN_GRID_SIZE) {
   const squares = presentation === 'squares';
+  const aggregateUniforms = aggregate ? [
+    'uniform sampler2DArray u_summaryA; uniform sampler2DArray u_summaryB;',
+    'uniform sampler2DArray u_hazardA; uniform sampler2DArray u_hazardB;',
+    'uniform int u_hazardAvailableA; uniform int u_hazardAvailableB;'
+  ] : [];
   const motionUniforms = motionWarp ? [
     'uniform sampler2D u_motion;',
     'uniform int u_frameA; uniform int u_frameB; uniform int u_motionInterval; uniform int u_motionWarpActive; uniform int u_rainHalo;',
@@ -1063,11 +1381,32 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAva
     `  float rainCoverageB = validB && rainB >= ${RAIN_VISIBILITY_FLOOR_MMH.toFixed(6)} ? 1.0 : 0.0;`,
     '  float rainCoverage = mix(rainCoverageA, rainCoverageB, u_temporalProgress);'
   ];
+  const aggregateSummarySource = [
+    '  vec4 summaryA = texelFetch(u_summaryA, ivec3(localX, localY, u_frameLayerA), 0);',
+    '  vec4 summaryB = texelFetch(u_summaryB, ivec3(localX, localY, u_frameLayerB), 0);',
+    '  bool validA = summaryA.z >= -0.5; bool validB = summaryB.z >= -0.5;',
+    '  vec4 hazardSummaryA = u_hazardAvailableA == 1 ? texelFetch(u_hazardA, ivec3(localX, localY, u_frameLayerA), 0) : vec4(0.0);',
+    '  vec4 hazardSummaryB = u_hazardAvailableB == 1 ? texelFetch(u_hazardB, ivec3(localX, localY, u_frameLayerB), 0) : vec4(0.0);',
+    '  float rainWetA = validA ? summaryA.x : 0.0; float rainWetB = validB ? summaryB.x : 0.0;',
+    '  float rainMaxA = validA ? summaryA.y : 0.0; float rainMaxB = validB ? summaryB.y : 0.0;',
+    '  float rainCoverageA = validA ? summaryA.z : 0.0; float rainCoverageB = validB ? summaryB.z : 0.0;',
+    '  float strongCoverageA = validA ? summaryA.w : 0.0; float strongCoverageB = validB ? summaryB.w : 0.0;',
+    '  float stormCoverageA = validA ? hazardSummaryA.x : 0.0; float stormCoverageB = validB ? hazardSummaryB.x : 0.0;',
+    '  float stormMaxA = validA ? hazardSummaryA.y : 0.0; float stormMaxB = validB ? hazardSummaryB.y : 0.0;',
+    '  float hailCoverageA = validA ? hazardSummaryA.z : 0.0; float hailCoverageB = validB ? hazardSummaryB.z : 0.0;',
+    '  float hailMaxA = validA ? hazardSummaryA.w : 0.0; float hailMaxB = validB ? hazardSummaryB.w : 0.0;',
+    '  float rainWet = validA && validB ? mix(rainWetA, rainWetB, u_temporalProgress) : validA ? rainWetA : validB ? rainWetB : 0.0;',
+    '  float rainCoverage = validA && validB ? mix(rainCoverageA, rainCoverageB, u_temporalProgress) : validA ? rainCoverageA : validB ? rainCoverageB : 0.0;',
+    '  float stormCoverage = validA && validB ? mix(stormCoverageA, stormCoverageB, u_temporalProgress) : validA ? stormCoverageA : validB ? stormCoverageB : 0.0;',
+    '  float stormMax = validA && validB ? mix(stormMaxA, stormMaxB, u_temporalProgress) : validA ? stormMaxA : validB ? stormMaxB : 0.0;',
+    '  float hailCoverage = validA && validB ? mix(hailCoverageA, hailCoverageB, u_temporalProgress) : validA ? hailCoverageA : validB ? hailCoverageB : 0.0;',
+    '  float hailMax = validA && validB ? mix(hailMaxA, hailMaxB, u_temporalProgress) : validA ? hailMaxA : validB ? hailMaxB : 0.0;'
+  ];
   const hazardUniforms = hazardsAvailable ? [
     'uniform sampler2DArray u_stormA; uniform sampler2DArray u_stormB; uniform sampler2DArray u_hailA; uniform sampler2DArray u_hailB;',
     'uniform int u_stormAvailableA; uniform int u_stormAvailableB; uniform int u_hailAvailableA; uniform int u_hailAvailableB;'
   ] : [];
-  const hazardFunctions = hazardsAvailable ? [
+  const hazardFunctions = (hazardsAvailable || aggregate) ? [
     'float sampleHazard(sampler2DArray source, int frameLayer, ivec2 coordinate, int available) { return available == 1 ? texelFetch(source, ivec3(coordinate, frameLayer), 0).r : 0.0; }',
     'float temporalHazard(float first, float second) { return mix(first, second, u_temporalProgress); }',
     'float stormRadius(float severity) { return severity <= 0.033750 ? 0.0 : mix(0.30, 0.72, pow(smoothstep(0.033750, 0.930000, severity), 0.47)); }',
@@ -1095,50 +1434,70 @@ function makeProgram(gl, shaderData, motionWarp, motionWarpDebugMode, hazardsAva
   ] : [
     `  float radiusFraction = u_mode == 0 ? rainVisibility(rain) * ${DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6)} : strongRain(rain);`
   ];
+  const aggregateDotsSource = [
+    '  float rainRadiusA = validA ? sqrt(max(rainCoverageA, 0.0)) * rainVisibility(rainWetA) * ' + DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6) + ' : 0.0;',
+    '  float rainRadiusB = validB ? sqrt(max(rainCoverageB, 0.0)) * rainVisibility(rainWetB) * ' + DOTS_BASE_RAIN_MAX_RADIUS_FRACTION.toFixed(6) + ' : 0.0;',
+    '  float strongRadiusA = validA ? sqrt(max(strongCoverageA, 0.0)) * strongRain(rainMaxA) : 0.0;',
+    '  float strongRadiusB = validB ? sqrt(max(strongCoverageB, 0.0)) * strongRain(rainMaxB) : 0.0;',
+    '  float stormRadiusA = validA ? sqrt(max(stormCoverageA, 0.0)) * stormRadius(stormMaxA) : 0.0;',
+    '  float stormRadiusB = validB ? sqrt(max(stormCoverageB, 0.0)) * stormRadius(stormMaxB) : 0.0;',
+    '  float hailRadiusA = validA ? sqrt(max(hailCoverageA, 0.0)) * hailRadius(hailMaxA) : 0.0;',
+    '  float hailRadiusB = validB ? sqrt(max(hailCoverageB, 0.0)) * hailRadius(hailMaxB) : 0.0;',
+    '  float radiusA = u_mode == 0 ? rainRadiusA : u_mode == 1 ? strongRadiusA : u_mode == 2 ? (hailRadiusA > 0.0 ? 0.0 : stormRadiusA) : hailRadiusA;',
+    '  float radiusB = u_mode == 0 ? rainRadiusB : u_mode == 1 ? strongRadiusB : u_mode == 2 ? (hailRadiusB > 0.0 ? 0.0 : stormRadiusB) : hailRadiusB;',
+    '  float radiusFraction = validA && validB ? sqrt(mix(radiusA * radiusA, radiusB * radiusB, u_temporalProgress)) : validA ? radiusA : validB ? radiusB : 0.0;'
+  ];
   const vertexSource = squares ? [
     '#version 300 es', shaderData.vertexShaderPrelude,
     'precision highp float; precision highp int; precision highp sampler2DArray; precision highp usampler2DArray;',
     'in vec2 a_vertex;',
-    'uniform vec2 u_tileOrigin; uniform usampler2DArray u_rainA; uniform usampler2DArray u_rainB;',
+    'uniform vec2 u_tileOrigin;',
+    ...(aggregate ? aggregateUniforms : ['uniform usampler2DArray u_rainA; uniform usampler2DArray u_rainB;']),
     'uniform int u_frameLayerA; uniform int u_frameLayerB; uniform float u_temporalProgress;',
     ...motionUniforms,
     ...hazardUniforms,
     'out vec2 v_rain; out vec4 v_hazards;',
     'uniform float u_physicalMaxMmh;',
-    'float decodeRain(uint code) { if (code == 0u || code == 1u) return 0.0; return (float(code) - 1.0) / 65534.0 * u_physicalMaxMmh; }',
+    ...(aggregate ? [] : ['float decodeRain(uint code) { if (code == 0u || code == 1u) return 0.0; return (float(code) - 1.0) / 65534.0 * u_physicalMaxMmh; }']),
     ...motionFunctions,
     ...hazardFunctions,
     'void main() {',
     `  int localIndex = gl_InstanceID; int localX = localIndex % ${TILED_RAIN_TILE_SIZE}; int localY = localIndex / ${TILED_RAIN_TILE_SIZE};`,
-    ...squaresRainSource,
-    ...hazardSource,
-    '  v_rain = vec2(rain, rainCoverage);',
-    '  v_hazards = vec4(stormCoverage, storm, hailCoverage, hail);',
-    `  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / ${TILED_RAIN_GRID_SIZE}.0;`,
-    `  gl_Position = projectTile(center + a_vertex / ${TILED_RAIN_GRID_SIZE}.0);`,
+    ...(aggregate ? aggregateSummarySource : squaresRainSource),
+    ...(aggregate ? [] : hazardSource),
+    ...(aggregate ? [
+      '  v_rain = vec2(rainWet, rainCoverage);',
+      '  v_hazards = vec4(stormCoverage, stormMax, hailCoverage, hailMax);'
+    ] : [
+      '  v_rain = vec2(rain, rainCoverage);',
+      '  v_hazards = vec4(stormCoverage, storm, hailCoverage, hail);'
+    ]),
+    `  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / ${gridSize}.0;`,
+    `  gl_Position = projectTile(center + a_vertex / ${gridSize}.0);`,
     '}'
   ].join('\n') : [
     '#version 300 es', shaderData.vertexShaderPrelude,
     'precision highp float; precision highp int; precision highp sampler2DArray; precision highp usampler2DArray;',
     'in vec2 a_vertex;',
-    'uniform vec2 u_tileOrigin; uniform usampler2DArray u_rainA; uniform usampler2DArray u_rainB;',
+    'uniform vec2 u_tileOrigin;',
+    ...(aggregate ? aggregateUniforms : ['uniform usampler2DArray u_rainA; uniform usampler2DArray u_rainB;']),
     'uniform int u_frameLayerA; uniform int u_frameLayerB; uniform float u_temporalProgress; uniform int u_mode;',
     ...motionUniforms,
     ...hazardUniforms,
     'out vec2 v_local; out float v_radius;',
     'uniform float u_physicalMaxMmh;',
-    'float decodeRain(uint code) { if (code == 0u || code == 1u) return 0.0; return (float(code) - 1.0) / 65534.0 * u_physicalMaxMmh; }',
+    ...(aggregate ? [] : ['float decodeRain(uint code) { if (code == 0u || code == 1u) return 0.0; return (float(code) - 1.0) / 65534.0 * u_physicalMaxMmh; }']),
     ...motionFunctions,
     RAIN_VISIBILITY_SHADER,
     strongRainShader(),
     ...hazardFunctions,
     'void main() {',
     `  int localIndex = gl_InstanceID; int localX = localIndex % ${TILED_RAIN_TILE_SIZE}; int localY = localIndex / ${TILED_RAIN_TILE_SIZE};`,
-    ...motionRainSource,
-    ...hazardSource,
-    ...hazardRadiusSource,
-    `  v_radius = radiusFraction / ${TILED_RAIN_GRID_SIZE}.0; v_local = a_vertex;`,
-    `  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / ${TILED_RAIN_GRID_SIZE}.0;`,
+    ...(aggregate ? aggregateSummarySource : motionRainSource),
+    ...(aggregate ? [] : hazardSource),
+    ...(aggregate ? aggregateDotsSource : hazardRadiusSource),
+    `  v_radius = radiusFraction / ${gridSize}.0; v_local = a_vertex;`,
+    `  vec2 center = u_tileOrigin + vec2(float(localX), float(localY)) / ${gridSize}.0;`,
     '  gl_Position = projectTile(center + a_vertex * v_radius);',
     '}'
   ].join('\n');
@@ -1180,6 +1539,12 @@ void main() {
       tileOrigin: gl.getUniformLocation(program, 'u_tileOrigin'),
       rainA: gl.getUniformLocation(program, 'u_rainA'),
       rainB: gl.getUniformLocation(program, 'u_rainB'),
+      summaryA: gl.getUniformLocation(program, 'u_summaryA'),
+      summaryB: gl.getUniformLocation(program, 'u_summaryB'),
+      hazardA: gl.getUniformLocation(program, 'u_hazardA'),
+      hazardB: gl.getUniformLocation(program, 'u_hazardB'),
+      hazardAvailableA: gl.getUniformLocation(program, 'u_hazardAvailableA'),
+      hazardAvailableB: gl.getUniformLocation(program, 'u_hazardAvailableB'),
       frameLayerA: gl.getUniformLocation(program, 'u_frameLayerA'),
       frameLayerB: gl.getUniformLocation(program, 'u_frameLayerB'),
       temporalProgress: gl.getUniformLocation(program, 'u_temporalProgress'),
@@ -1262,6 +1627,7 @@ export class TiledRainLayer {
   onRemove(map, gl) {
     for (const entry of this.programs.values()) gl.deleteProgram(entry.program);
     for (const state of this.store.blocks.values()) if (state.gpuTexture) gl.deleteTexture(state.gpuTexture);
+    for (const state of this.store.blocks.values()) if (state.summaryTexture) gl.deleteTexture(state.summaryTexture);
     for (const state of this.store.blocks.values()) for (const texture of Object.values(state.hazardTextures || {})) if (texture) gl.deleteTexture(texture);
     for (const state of this.store.motionTilesState?.values() || []) if (state.gpuTexture) gl.deleteTexture(state.gpuTexture);
     if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);
@@ -1270,10 +1636,10 @@ export class TiledRainLayer {
   }
 
   tileKeysForBounds(bounds) {
-    const minX = Math.floor((bounds.minX * TILED_RAIN_GRID_SIZE - VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
-    const maxX = Math.floor((bounds.maxX * TILED_RAIN_GRID_SIZE + VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
-    const minY = Math.floor((bounds.minY * TILED_RAIN_GRID_SIZE - VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
-    const maxY = Math.floor((bounds.maxY * TILED_RAIN_GRID_SIZE + VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
+    const minX = Math.floor((bounds.minX * this.store.gridSize - VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
+    const maxX = Math.floor((bounds.maxX * this.store.gridSize + VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
+    const minY = Math.floor((bounds.minY * this.store.gridSize - VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
+    const maxY = Math.floor((bounds.maxY * this.store.gridSize + VIEWPORT_OVERSCAN_SAMPLES) / TILED_RAIN_TILE_SIZE);
     const indexBounds = this.store.manifest.tile_index_bounds;
     const keys = [];
     for (let y = Math.max(indexBounds.min_y, minY); y <= Math.min(indexBounds.max_y, maxY); y++) {
@@ -1417,10 +1783,10 @@ export class TiledRainLayer {
   }
 
   programsFor(gl, shaderData) {
-    const cacheKey = `${this.store.motionWarp ? 'motion' : 'direct'}:${shaderData.variantName}:${this.presentationMode}`;
+    const cacheKey = `${this.store.motionWarp ? 'motion' : this.store.aggregateSummary ? 'aggregate' : 'direct'}:${shaderData.variantName}:${this.presentationMode}`;
     let program = this.programs.get(cacheKey);
     if (!program) {
-      program = makeProgram(gl, shaderData, this.store.motionWarp, this.store.motionWarpDebugMode, this.hazardsAvailable, this.presentationMode);
+      program = makeProgram(gl, shaderData, this.store.motionWarp, this.store.motionWarpDebugMode, this.hazardsAvailable, this.presentationMode, this.store.aggregateSummary, this.store.gridSize);
       this.programs.set(cacheKey, program);
     }
     return program;
@@ -1432,11 +1798,20 @@ export class TiledRainLayer {
     setGeographicProjection(gl, locations, projection);
     gl.uniform2f(
       locations.tileOrigin,
-      (tile.x * TILED_RAIN_TILE_SIZE) / TILED_RAIN_GRID_SIZE,
-      (tile.y * TILED_RAIN_TILE_SIZE) / TILED_RAIN_GRID_SIZE
+      (tile.x * TILED_RAIN_TILE_SIZE) / this.store.gridSize,
+      (tile.y * TILED_RAIN_TILE_SIZE) / this.store.gridSize
     );
-    gl.uniform1i(locations.rainA, 0);
-    gl.uniform1i(locations.rainB, 1);
+    if (this.store.aggregateSummary) {
+      gl.uniform1i(locations.summaryA, 0);
+      gl.uniform1i(locations.summaryB, 1);
+      gl.uniform1i(locations.hazardA, 2);
+      gl.uniform1i(locations.hazardB, 3);
+      gl.uniform1i(locations.hazardAvailableA, blockA.payloads?.secondary ? 1 : 0);
+      gl.uniform1i(locations.hazardAvailableB, blockB.payloads?.secondary ? 1 : 0);
+    } else {
+      gl.uniform1i(locations.rainA, 0);
+      gl.uniform1i(locations.rainB, 1);
+    }
     gl.uniform1i(locations.frameLayerA, this.committedFrame.frame0 - blockA.descriptor.frame_start);
     gl.uniform1i(locations.frameLayerB, this.committedFrame.frame1 - blockB.descriptor.frame_start);
     if (this.store.motionWarp) {
@@ -1446,7 +1821,7 @@ export class TiledRainLayer {
       gl.uniform1i(locations.motionWarpActive, 1);
     }
     gl.uniform1f(locations.temporalProgress, this.committedFrame.progress);
-    gl.uniform1f(locations.physicalMaxMmh, this.store.manifest.encoding.physical_max_mmh);
+    if (!this.store.aggregateSummary) gl.uniform1f(locations.physicalMaxMmh, this.store.manifest.encoding.physical_max_mmh);
     if (this.presentationMode === 'squares') {
       gl.uniform1f(locations.opacity, 1);
       gl.uniform1f(locations.hazardsVisible, this.hazardsVisible ? 1 : 0);
@@ -1457,9 +1832,18 @@ export class TiledRainLayer {
     }
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockA.gpuTexture || this.store.uploadBlock(gl, blockA));
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockB.gpuTexture || this.store.uploadBlock(gl, blockB));
-    if (this.hazardsAvailable && (this.presentationMode === 'squares' || mode >= 2)) {
+    if (this.store.aggregateSummary) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockB.gpuTexture || this.store.uploadBlock(gl, blockB));
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockA.summaryTexture || this.store.uploadSummaryBlock(gl, blockA));
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockB.summaryTexture || this.store.uploadSummaryBlock(gl, blockB));
+    } else {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, blockB.gpuTexture || this.store.uploadBlock(gl, blockB));
+    }
+    if (!this.store.aggregateSummary && this.hazardsAvailable && (this.presentationMode === 'squares' || mode >= 2)) {
       const hazardBindings = [
         ['stormA', blockA, 'storm', 2, 'stormAvailableA'],
         ['stormB', blockB, 'storm', 3, 'stormAvailableB'],
@@ -1574,7 +1958,11 @@ export class TiledRainLayer {
         || this.requestedFrame.frame1 !== this.committedFrame.frame1
         || this.requestedFrame.progress !== this.committedFrame.progress,
       currentTemporalBlocks: [blockA, blockB],
-      lodLevel: TILED_RAIN_LOD_LEVEL,
+      lodLevel: this.store.lodLevel,
+      payloadKind: this.store.aggregateSummary ? 'aggregate-summary' : 'direct',
+      payloadDtype: this.store.aggregateSummary ? 'Float16 RGBA summary textures' : 'UInt16 rain / UInt8 hazards',
+      gridSize: this.store.gridSize,
+      spacing: 1 / this.store.gridSize,
       tileSize: TILED_RAIN_TILE_SIZE,
       proceduralInstancesPerTile: TILED_RAIN_TILE_SIZE * TILED_RAIN_TILE_SIZE
     };
@@ -1584,12 +1972,13 @@ export class TiledRainLayer {
 // Compatibility alias for existing tiled-rain probes and callers.
 export const TiledRainDotsLayer = TiledRainLayer;
 
-export function beginTiledRainLoad(manifestUrl, { onTiming = null, motionWarp = false, motionWarpDebugMode = null } = {}) {
+export function beginTiledRainLoad(manifestUrl, { onTiming = null, motionWarp = false, motionWarpDebugMode = null, lodLevel = TILED_RAIN_LOD_LEVEL } = {}) {
   const timing = typeof onTiming === 'function' ? onTiming : () => {};
   const debugMode = motionWarp && motionWarpDebugMode === 'full' ? 'full' : null;
+  const selectedLodLevel = motionWarp ? TILED_RAIN_LOD_LEVEL : selectTiledRainLod(lodLevel);
   const metadataReady = (motionWarp
     ? loadAndValidateWarpDataset(manifestUrl, timing)
-    : loadAndValidateDataset(manifestUrl, timing)).then((dataset) => {
+    : loadAndValidateDataset(manifestUrl, timing, selectedLodLevel)).then((dataset) => {
     const store = new TiledRainTileStore({ ...dataset, motionWarpDebugMode: debugMode }, { onTiming: timing });
     return Object.freeze({
       isTiledRain: true,

@@ -119,12 +119,12 @@ motion, single/double warp, and materialized subframes remain deferred to Phase
 
 ## Staged multi-LOD tiled-rain assets — offline contract
 
-The browser Phase 0A contract above remains unchanged. In parallel, the
-offline generator `tools/generate-tiled-rain-lod.py` produces the ignored
+The browser Phase 0A direct-rendering contract above remains the parity basis.
+The offline generator `tools/generate-tiled-rain-lod.py` produces the ignored
 `data/generated/tiled-rain-lod/current/` asset set with schema
-`dot-field-tiled-rain-lod-v1` and manifest version 1. This staged contract is
-not consumed by `src/app.js`, `src/engine/tiled-rain.js`, or any browser
-loader yet.
+`dot-field-tiled-rain-lod-v1` and manifest version 1. The fixed selected-level
+browser foundation below now consumes this contract without changing the
+legacy MotionField path.
 
 The staged asset pyramid covers the active tiled display range L11 through
 L14. L13 remains the physical reference level and stores direct UInt16 rain
@@ -156,12 +156,11 @@ sample identities, four-source-frame temporal blocks, exact source timestamps,
 and deterministic gzip sidecars. The manifest records level-specific direct
 versus aggregate encoding, support/generated sample extents, tile extents,
 source generation identity, payload sizes, and Float16 fidelity diagnostics.
-L11–L14 asset generation is offline only; browser LOD selection, residency,
-overlap, transitions, and runtime Float16 decoding remain a later task. The
-intended future tiled runtime will floor weather LOD selection at L11 while
-allowing the map itself to zoom out below that threshold. This staged contract
-does not remove L10 support from the existing general geographic LOD engine.
-Only the tiled multi-LOD asset set omits L10.
+The browser currently selects exactly one of L11–L14 for the lifetime of a
+tiled-rain load. Automatic zoom selection, overlap, and cross-level
+transitions remain deferred; the map itself still uses its existing zoom
+limits and the general geographic engine still supports L10. Only the tiled
+multi-LOD asset set omits L10.
 
 Only the 19 normalized source timestamps/frames are materialized. No
 intermediate coarse temporal frames are generated; the existing temporal block
@@ -172,6 +171,50 @@ MotionField remains bound to the existing Phase 0A L13 manifest and source
 contract. The motion-warp assets likewise remain separately bound to the
 existing Phase 0A L13 manifest and Phase 0B1 MotionField manifest; neither
 pipeline is migrated to the staged multi-LOD schema here.
+
+## Fixed selected-level multi-LOD tiled runtime — `src/engine/tiled-rain.js`
+
+Non-motion `?tiledRain=1` loads the multi-LOD root manifest and selects L13 by
+default. The diagnostic `tiledRainLod=11`, `12`, `13`, or `14` query selects a
+fixed level; it is intentionally independent of map zoom. The selected level
+supplies its own grid size, globally anchored sample identity, tile envelope,
+spacing (`1 / grid_size`), temporal block descriptors, and direct physical
+rain maximum. The loader requests only selected-level tiles intersecting the
+visible viewport (with deterministic overscan) and the current source-frame
+block pair.
+
+The tile store is the single residency owner for both Dots and Squares. A
+presentation switch changes only the procedural shader variant and does not
+refetch or duplicate block payloads. Source-frame endpoints retain the
+manifest's four-frame block semantics. Direct L13/L14 values preserve the
+Phase 0A endpoint handling and UInt16 decoding, while the selected direct
+level's grid size and physical maximum replace the former fixed L13 constants.
+
+Aggregate L11/L12 blocks remain compact raw payloads in browser memory. Summary
+A and optional Summary B are uploaded directly as WebGL2 `RGBA16F`
+`TEXTURE_2D_ARRAY` textures with `HALF_FLOAT` data and deterministic
+`texelFetch`; no CPU half-float decode or Float32 expansion is performed.
+Summary A's rain coverage sentinel is validity state, not zero meteorology.
+Dots derives each source-frame endpoint radius from the stored coverage and
+mean/max summary, then applies the existing temporal radius interpolation and
+hail-over-storm priority. Squares interpolates the stored renderer-facing
+summary inputs and applies its existing monotonic transfer using maximum
+hazard severity. Direct L13/L14 blocks continue to use compact `R16UI` rain
+texture arrays and optional `R8` hazard texture arrays.
+
+Residency retains the bounded request queue, stale cancellation, committed
+renderable fallback, and LRU behavior. The normal ready target is 320 blocks
+with a 640-block hard cache bound; a protected visible target may temporarily
+exceed the normal target, but the bound is independent of the global selected
+level tile count (including L14's 1,040 tiles), and eviction returns toward
+320 when the target shrinks. Diagnostics report the selected level and
+payload format, using generic payload byte totals for aggregate summaries
+instead of labeling them UInt16 rain bytes.
+
+Automatic zoom-driven weather LOD selection and cross-LOD transitions are the
+next task. MotionField and motion-warp remain on their existing legacy L13
+manifests, validation, residency, and shader path; `tiledRainLod` does not
+alter them.
 
 ## Experimental tiled-rain Phase 0B1 — offline MotionField, non-default
 
