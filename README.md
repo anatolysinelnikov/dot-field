@@ -1,19 +1,44 @@
 # Dot Field
 
-Dot Field is a browser-based prototype for visualizing a deterministic
-synthetic weather field on an interactive globe.
+Интерактивный прототип визуализации осадков и погодных явлений на географической карте.
 
-Repository: [github.com/anatolysinelnikov/dot-field](https://github.com/anatolysinelnikov/dot-field)  
-Prototype: [anatolysinelnikov.github.io/dot-field](https://anatolysinelnikov.github.io/dot-field/)
+Прототип служит референсом визуального и поведенческого представления явлений: их формы, цвета, размеры, приоритеты, пространственная стабильность и поведение во времени.
 
-The prototype offers two views of the same weather situation:
+🔗 **Прототип:**  
+https://anatolysinelnikov.github.io/dot-field/
 
-- **Dots** shows precipitation as stable, spatially anchored samples. Weather
-  phenomena are rendered as distinct symbols above the precipitation field.
-- **Areas** reconstructs precipitation as crisp nested regions while retaining
-  the same phenomenon channels and geographic sample positions.
+## Погодные явления
 
-The synthetic field includes rain, thunderstorms, hail, squalls, and
-hurricanes. Use the timeline to explore its deterministic animation.
+Каждое явление представлено отдельным data channel и преобразуется в символ только на этапе отображения:
+
+- 🟣 ✦ **Гроза** — пурпурная звезда
+- 🟡 ▲ **Град** — жёлтый треугольник
+- 🟠 ◆ **Шквал** — оранжевый ромб
+- 🔴 ■ **Ураган** — красный квадрат
+
+При пересечении явлений действует фиксированный приоритет:
+
+**🔴 ■ ураган → 🟠 ◆ шквал → 🟡 ▲ град → 🟣 ✦ гроза**
+
+В одной точке сетки одновременно отображается только один символ.
+
+Шквалы имеют три визуальных градации размера.  
+Ураган отображается квадратом фиксированного размера относительно шага активной сетки и не увеличивается вместе с интенсивностью.
+
+## Представления
+
+Прототип содержит два способа отображения одного и того же погодного поля:
+
+- **Dots** — осадки отображаются на стабильной географической сетке, а явления рисуются поверх неё в тех же sample positions.
+- **Areas** — осадки реконструируются в дискретные области, при этом явления сохраняют те же позиции, формы, размеры, цвета и правила приоритета.
+
+Анимация изменяет значения погодного поля во времени, но не перемещает и не пересоздаёт пространственные sample positions случайным образом.
+
+## Как это устроено
+
+Подробности визуального контракта и reference implementation описаны в:
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — data flow, sampling, temporal interpolation, LOD, glyph geometry, размеры, цвета и priority resolution;
+- [`AGENTS.md`](AGENTS.md) — repository-level инструкции для анализа и изменения визуализации.
 
 ![Dot Field](assets/dot-field.jpg)
