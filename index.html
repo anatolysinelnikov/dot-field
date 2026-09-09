@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Dot Field</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="playground">
+    <div id="map" aria-label="Interactive geographic weather map"></div>
+
+    <a class="maptiler-logo" href="https://www.maptiler.com/" target="_blank" rel="noopener noreferrer">
+      <img src="https://api.maptiler.com/resources/logo.svg" alt="MapTiler">
+    </a>
+
+    <div class="legend" aria-hidden="true">
+      <span class="rain"><i class="rain-base"></i><i class="rain-strong"></i>Rain</span>
+      <span class="storm"><i></i>Thunderstorm</span>
+      <span class="hail"><i></i>Hail</span>
+      <span class="squall"><i></i>Squall</span>
+      <span class="hurricane"><i></i>Hurricane</span>
+    </div>
+
+    <div class="render-mode-controls">
+      <div id="renderModeSelector" class="render-mode" role="radiogroup" aria-label="Weather rendering mode" data-mode="dots">
+        <button type="button" role="radio" aria-checked="true" data-render-mode="dots">Dots</button>
+        <button type="button" role="radio" aria-checked="false" data-render-mode="areas">Areas</button>
+      </div>
+    </div>
+
+    <div class="zoom-controls" role="group" aria-label="Map controls">
+      <button id="resetView" class="zoom-reset" type="button" aria-label="Reset view" hidden>↺</button>
+      <div class="zoom-stepper">
+        <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
+        <button id="zoomOut" type="button" aria-label="Zoom out">−</button>
+      </div>
+    </div>
+
+    <section class="controls" aria-label="Playback and timeline controls">
+      <button id="playPause" type="button" data-state="playing" aria-label="Pause"></button>
+      <label class="time-control">
+        <input id="timeSlider" type="range" min="0" max="1" step="any" value="0" aria-label="Animation time">
+      </label>
+    </section>
+
+  </main>
+
+  <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
