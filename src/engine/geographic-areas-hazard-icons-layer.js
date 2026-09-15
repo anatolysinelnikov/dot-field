@@ -5,10 +5,10 @@ import { GeographicSymbolPyramid } from './geographic-symbol-pyramid.js';
 import { hailGradeForIntensity, intensityToStrength } from './precipitation-mapping.js';
 
 export const AREAS_HAZARD_BLOCK_SIZE = 4;
-export const AREAS_HAZARD_SQUALL_ICON_SIZE = 26;
-export const AREAS_HAZARD_TORNADO_ICON_SIZE = 26;
+export const AREAS_HAZARD_SQUALL_ICON_SIZE = 28;
+export const AREAS_HAZARD_TORNADO_ICON_SIZE = 28;
 export const AREAS_HAZARD_STORM_ICON_SIZES = Object.freeze([18, 22, 26]);
-export const AREAS_HAZARD_HAIL_ICON_SIZES = Object.freeze([20, 24, 28]);
+export const AREAS_HAZARD_HAIL_ICON_SIZES = Object.freeze([16, 20, 24]);
 
 const MIN_ICON_PIXEL_RATIO = 1;
 const MAX_ICON_PIXEL_RATIO = 3;
