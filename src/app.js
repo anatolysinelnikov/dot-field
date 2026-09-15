@@ -350,7 +350,7 @@ function rebuildSamples(level, now = performance.now()) {
       rawProgress,
       weatherTime: transition.weatherTime
     };
-    areasHazardIconsLayer.setTransition(transition.toSamples, transition.fromSamples, transition.weatherTime);
+    areasHazardIconsLayer.setTransition(transition.toSamples, transition.fromSamples, transition.weatherTime, rawProgress);
     scalarLayer.updateWeather(transition.weatherTime);
     wakeApplicationFrame();
   }
@@ -361,6 +361,7 @@ function updateLODTransition(now) {
   if (!transition) return;
   const rawProgress = clamp((now - transition.start) / (LOD_MORPH_SECONDS * 1000), 0, 1);
   transition.rawProgress = rawProgress;
+  areasHazardIconsLayer.setTransitionProgress(rawProgress);
   if (rawProgress < 1) return;
   state.lodTransition = null;
   commitSamples(transition.toLevel, transition.toSamples);

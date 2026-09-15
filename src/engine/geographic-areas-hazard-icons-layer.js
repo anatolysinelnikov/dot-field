@@ -1,7 +1,8 @@
 import { prepareGeographicFieldFrame } from './geography.js';
-import { MAX_GRID_LEVEL } from './geographic-lod.js';
+import { lngLatToMercator, mercatorToLngLat, MAX_GRID_LEVEL } from './geographic-lod.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { GeographicSymbolPyramid } from './geographic-symbol-pyramid.js';
+import { clamp, smoothstep } from './math.js';
 import { hailGradeForIntensity, intensityToStrength } from './precipitation-mapping.js';
 
 export const AREAS_HAZARD_BLOCK_SIZE = 4;
@@ -9,6 +10,7 @@ export const AREAS_HAZARD_SQUALL_ICON_SIZE = 28;
 export const AREAS_HAZARD_TORNADO_ICON_SIZE = 28;
 export const AREAS_HAZARD_STORM_ICON_SIZES = Object.freeze([18, 22, 26]);
 export const AREAS_HAZARD_HAIL_ICON_SIZES = Object.freeze([16, 20, 24]);
+export const AREAS_HAZARD_LOD_HANDOFF_START = 0.65;
 
 const MIN_ICON_PIXEL_RATIO = 1;
 const MAX_ICON_PIXEL_RATIO = 3;
@@ -129,6 +131,44 @@ function blockLayoutFor(samples, level) {
   };
 }
 
+export function blockParentIdFor(block) {
+  return `${Math.floor(block.gridX / 2)}:${Math.floor(block.gridY / 2)}`;
+}
+
+export function hierarchyForLayouts(fineLayout, coarseLayout, activeChildIds = null) {
+  const coarseBlocksById = new Map(coarseLayout.blocks.map((block) => [block.id, block]));
+  const childrenByParentId = new Map();
+
+  for (const child of fineLayout.blocks) {
+    if (activeChildIds && !activeChildIds.has(child.id)) continue;
+    const parentId = blockParentIdFor(child);
+    const parent = coarseBlocksById.get(parentId);
+    if (!parent) throw new Error(`Fine hazard block ${child.id} has no coarse parent ${parentId}.`);
+    const children = childrenByParentId.get(parentId) || [];
+    children.push(child);
+    if (children.length > 4) throw new Error(`Coarse hazard block ${parentId} has more than four fine children.`);
+    childrenByParentId.set(parentId, children);
+  }
+
+  return { coarseBlocksById, childrenByParentId };
+}
+
+export function collapsePhaseForTransition(fromLevel, toLevel, progress) {
+  const transitionProgress = clamp(progress);
+  return fromLevel > toLevel ? transitionProgress : 1 - transitionProgress;
+}
+
+function interpolatedAnchor(from, to, progress) {
+  if (progress <= 0) return [from[0], from[1]];
+  if (progress >= 1) return [to[0], to[1]];
+  const fromMercator = lngLatToMercator(from[0], from[1]);
+  const toMercator = lngLatToMercator(to[0], to[1]);
+  return mercatorToLngLat(
+    fromMercator[0] + (toMercator[0] - fromMercator[0]) * progress,
+    fromMercator[1] + (toMercator[1] - fromMercator[1]) * progress
+  );
+}
+
 function aggregateBlock(block, state0, state1, progress) {
   let storm = 0;
   let hail = 0;
@@ -166,7 +206,7 @@ function resolveHazardIcon(values) {
   return icon;
 }
 
-function featuresForLayout(layout, state0, state1, progress) {
+function aggregateFeaturesForLayout(layout, state0, state1, progress) {
   const candidates = [];
   for (const block of layout.blocks) {
     const aggregate = aggregateBlock(block, state0, state1, progress);
@@ -174,17 +214,77 @@ function featuresForLayout(layout, state0, state1, progress) {
     candidates.push({ block, aggregate });
   }
 
+  return new Map(candidates.map(({ block, aggregate }) => [block.id, { block, aggregate }]));
+}
+
+function featureForAggregate(id, aggregate, coordinates, opacity = 1) {
+  return {
+    type: 'Feature',
+    id,
+    geometry: { type: 'Point', coordinates },
+    properties: {
+      icon: aggregate.icon,
+      scale: markerScaleForIcon(aggregate.icon, aggregate.values),
+      opacity
+    }
+  };
+}
+
+function featuresForLayout(layout, state0, state1, progress) {
+  const aggregates = aggregateFeaturesForLayout(layout, state0, state1, progress);
+  return [...aggregates.values()].map(({ block, aggregate }) => featureForAggregate(
+    `${layout.level}:${block.id}`,
+    aggregate,
+    [block.anchorX, block.anchorY]
+  ));
+}
+
+function featuresForTransition(fineLayout, coarseLayout, fineState0, fineState1, coarseState0, coarseState1, temporalProgress, collapsePhase) {
+  const fineAggregates = aggregateFeaturesForLayout(fineLayout, fineState0, fineState1, temporalProgress);
+  const coarseAggregates = aggregateFeaturesForLayout(coarseLayout, coarseState0, coarseState1, temporalProgress);
+  const { coarseBlocksById, childrenByParentId } = hierarchyForLayouts(
+    fineLayout,
+    coarseLayout,
+    new Set(fineAggregates.keys())
+  );
+  const movement = smoothstep(0, 1, collapsePhase);
+  const handoff = smoothstep(AREAS_HAZARD_LOD_HANDOFF_START, 1, collapsePhase);
   const features = [];
-  for (const candidate of candidates) {
-    const { block, aggregate } = candidate;
-    features.push({
-      type: 'Feature',
-      id: `${layout.level}:${block.id}`,
-      geometry: { type: 'Point', coordinates: [block.anchorX, block.anchorY] },
-      properties: { icon: aggregate.icon, scale: markerScaleForIcon(aggregate.icon, aggregate.values) }
-    });
+  let childCount = 0;
+  let parentCount = 0;
+
+  for (const parent of coarseLayout.blocks) {
+    const parentId = parent.id;
+    const children = childrenByParentId.get(parentId) || [];
+    const parentAggregate = coarseAggregates.get(parentId);
+    for (const child of children) {
+      const childAggregate = fineAggregates.get(child.id);
+      if (!childAggregate) continue;
+      if (!parentAggregate) throw new Error(`Active fine hazard block ${child.id} has no active coarse parent ${parentId}.`);
+      features.push(featureForAggregate(
+        `fine:${fineLayout.level}:${child.id}`,
+        childAggregate.aggregate,
+        interpolatedAnchor(
+          [child.anchorX, child.anchorY],
+          [parent.anchorX, parent.anchorY],
+          movement
+        ),
+        1 - handoff
+      ));
+      childCount++;
+    }
+    if (parentAggregate) {
+      features.push(featureForAggregate(
+        `coarse:${coarseLayout.level}:${parent.id}`,
+        parentAggregate.aggregate,
+        [parent.anchorX, parent.anchorY],
+        handoff
+      ));
+      parentCount++;
+    }
   }
-  return features;
+
+  return { features, childCount, parentCount };
 }
 
 export class GeographicAreasHazardIconsLayer {
@@ -204,6 +304,7 @@ export class GeographicAreasHazardIconsLayer {
     this.layouts = new Map();
     this.samples = [];
     this.transition = null;
+    this.transitionProgress = 0;
     this.temporal = null;
     this.temporalProgress = 0;
     this.lastTime = 0;
@@ -211,6 +312,7 @@ export class GeographicAreasHazardIconsLayer {
     this.data = { type: 'FeatureCollection', features: [] };
     this.layersReady = false;
     this.onLayersReady = null;
+    this.lastRebuildStats = null;
   }
 
   onAdd(map) {
@@ -246,7 +348,7 @@ export class GeographicAreasHazardIconsLayer {
             'icon-rotation-alignment': 'viewport',
             'icon-pitch-alignment': 'viewport'
           },
-          paint: { 'icon-opacity': 1 }
+          paint: { 'icon-opacity': ['coalesce', ['get', 'opacity'], 1] }
         }, beforeId);
       }
       this.layersReady = true;
@@ -288,7 +390,7 @@ export class GeographicAreasHazardIconsLayer {
   }
 
   activeLevels() {
-    if (this.transition) return [this.transition.fromLevel];
+    if (this.transition) return [this.transition.fromLevel, this.transition.toLevel];
     return this.samples.length ? [this.samples[0].level] : [];
   }
 
@@ -300,17 +402,44 @@ export class GeographicAreasHazardIconsLayer {
 
   rebuildData() {
     if (!this.temporal) return;
+    const startedAt = performance.now();
     const features = [];
-    for (const level of this.activeLevels()) {
-      features.push(...featuresForLayout(
-        this.layoutFor(level),
-        this.temporal.states0[level],
-        this.temporal.states1[level],
-        this.temporalProgress
-      ));
+    let animatedChildCount = 0;
+    let parentCount = 0;
+    if (this.transition) {
+      const fineLevel = Math.max(this.transition.fromLevel, this.transition.toLevel);
+      const coarseLevel = Math.min(this.transition.fromLevel, this.transition.toLevel);
+      const animated = featuresForTransition(
+        this.layoutFor(fineLevel),
+        this.layoutFor(coarseLevel),
+        this.temporal.states0[fineLevel],
+        this.temporal.states1[fineLevel],
+        this.temporal.states0[coarseLevel],
+        this.temporal.states1[coarseLevel],
+        this.temporalProgress,
+        collapsePhaseForTransition(this.transition.fromLevel, this.transition.toLevel, this.transitionProgress)
+      );
+      features.push(...animated.features);
+      animatedChildCount = animated.childCount;
+      parentCount = animated.parentCount;
+    } else {
+      for (const level of this.activeLevels()) {
+        features.push(...featuresForLayout(
+          this.layoutFor(level),
+          this.temporal.states0[level],
+          this.temporal.states1[level],
+          this.temporalProgress
+        ));
+      }
     }
     this.data = { type: 'FeatureCollection', features };
     this.refreshSource();
+    this.lastRebuildStats = {
+      durationMs: performance.now() - startedAt,
+      featureCount: features.length,
+      animatedChildCount,
+      parentCount
+    };
   }
 
   rebuildTemporal(time, options) {
@@ -330,20 +459,28 @@ export class GeographicAreasHazardIconsLayer {
   setSamples(samples, time) {
     this.samples = samples;
     this.transition = null;
+    this.transitionProgress = 0;
     this.lastTime = time;
     this.temporal = null;
     if (this.active) this.rebuildTemporal(time);
   }
 
-  setTransition(fromSamples, toSamples, time) {
+  setTransition(fromSamples, toSamples, time, progress = 0) {
     this.samples = toSamples;
     this.transition = {
       fromLevel: fromSamples[0].level,
       toLevel: toSamples[0].level
     };
+    this.transitionProgress = clamp(progress);
     this.lastTime = time;
     this.temporal = null;
     if (this.active) this.rebuildTemporal(time);
+  }
+
+  setTransitionProgress(progress) {
+    if (!this.transition) return;
+    this.transitionProgress = clamp(progress);
+    this.rebuildData();
   }
 
   setActive(active) {
