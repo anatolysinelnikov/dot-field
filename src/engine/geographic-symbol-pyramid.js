@@ -5,7 +5,6 @@ import { intensityToRadius, strongPrecipitationIntensity } from './precipitation
 export const REFERENCE_GRID_LEVEL = 13;
 export const STORM_INNER_RATIO = 0.38;
 const HAZARD_CHANNELS = ['storm', 'hail', 'squall', 'hurricane'];
-const HAZARD_LOD_MAX_BIAS = { storm: 0.58, hail: 0.72, squall: 0.70, hurricane: 0.82 };
 
 function parentIdFor(child, bounds, parentStep) {
   const x = Math.max(bounds.minX, Math.min(bounds.maxX, Math.floor(child.canonicalX / parentStep) * parentStep));
@@ -85,7 +84,6 @@ function reduceState(parent, children, childIndices, reusable) {
     let rainArea = 0;
     let strongArea = 0;
     const indices = childIndices[parentIndex];
-    const hazardSums = { storm: 0, hail: 0, squall: 0, hurricane: 0 };
     const hazardMaxima = { storm: 0, hail: 0, squall: 0, hurricane: 0 };
     for (let childPosition = 0; childPosition < indices.length; childPosition++) {
       const childIndex = indices[childPosition];
@@ -95,17 +93,12 @@ function reduceState(parent, children, childIndices, reusable) {
       strongArea += childStrongRadius * childStrongRadius;
       for (const channel of HAZARD_CHANNELS) {
         const value = childHazards[channel][childIndex];
-        hazardSums[channel] += value;
         hazardMaxima[channel] = Math.max(hazardMaxima[channel], value);
       }
     }
     rainRadius[parentIndex] = Math.sqrt(rainArea);
     strongRadius[parentIndex] = Math.sqrt(strongArea);
-    for (const channel of HAZARD_CHANNELS) {
-      const average = hazardSums[channel] / indices.length;
-      const maxBias = HAZARD_LOD_MAX_BIAS[channel];
-      hazardValues[channel][parentIndex] = average * (1 - maxBias) + hazardMaxima[channel] * maxBias;
-    }
+    for (const channel of HAZARD_CHANNELS) hazardValues[channel][parentIndex] = hazardMaxima[channel];
   }
   return state;
 }

@@ -15,12 +15,6 @@ const STORM_IMAGE_ID = 'areas-hazard-storm';
 const HAIL_IMAGE_ID = 'areas-hazard-hail';
 const SQUALL_IMAGE_ID = 'areas-hazard-squall';
 const TORNADO_IMAGE_ID = 'areas-hazard-tornado';
-const MARKER_PRIORITY = Object.freeze({
-  [STORM_IMAGE_ID]: 0,
-  [HAIL_IMAGE_ID]: 1,
-  [SQUALL_IMAGE_ID]: 2,
-  [TORNADO_IMAGE_ID]: 3
-});
 
 // SVG loading is deliberately kept here, at the presentation boundary. The
 // weather channels and aggregate marker model contain only scalar values.
@@ -167,38 +161,14 @@ function featuresForLayout(layout, state0, state1, progress) {
     candidates.push({ block, aggregate });
   }
 
-  // Keep every occupied cell, replacing only its displayed type when a
-  // higher-priority occupied neighbor dominates it.
-  const candidatesByCell = new Map(candidates.map((candidate) => [candidate.block.id, candidate]));
   const features = [];
   for (const candidate of candidates) {
-    const { block } = candidate;
-    const neighborhood = [];
-    for (let offsetY = -1; offsetY <= 1; offsetY++) {
-      for (let offsetX = -1; offsetX <= 1; offsetX++) {
-        const other = candidatesByCell.get(`${block.gridX + offsetX}:${block.gridY + offsetY}`);
-        if (other) neighborhood.push(other);
-      }
-    }
-    const dominantPriority = Math.max(...neighborhood.map((other) => MARKER_PRIORITY[other.aggregate.icon]));
-    const dominant = neighborhood.find((other) => MARKER_PRIORITY[other.aggregate.icon] === dominantPriority);
-    const sourceValues = neighborhood
-      .filter((other) => other.aggregate.icon === dominant.aggregate.icon)
-      .map((other) => other.aggregate.values);
-    const values = { ...dominant.aggregate.values };
-    const winningChannel = dominant.aggregate.icon === TORNADO_IMAGE_ID ? 'hurricane'
-      : dominant.aggregate.icon === SQUALL_IMAGE_ID ? 'squall'
-        : dominant.aggregate.icon === HAIL_IMAGE_ID ? 'hail' : 'storm';
-    values[winningChannel] = Math.max(...sourceValues.map((source) => source[winningChannel]));
-    const aggregate = {
-      icon: dominant.aggregate.icon,
-      scale: markerScaleForIcon(dominant.aggregate.icon, values)
-    };
+    const { block, aggregate } = candidate;
     features.push({
       type: 'Feature',
       id: `${layout.level}:${block.id}`,
       geometry: { type: 'Point', coordinates: [block.anchorX, block.anchorY] },
-      properties: { icon: aggregate.icon, scale: aggregate.scale }
+      properties: { icon: aggregate.icon, scale: markerScaleForIcon(aggregate.icon, aggregate.values) }
     });
   }
   return features;

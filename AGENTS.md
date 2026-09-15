@@ -26,8 +26,7 @@ For work involving weather phenomena, read:
 
 1. `ARCHITECTURE.md`
 2. `src/engine/precipitation-mapping.js`
-3. `src/engine/hazard-renderer.js`
-4. `src/engine/geographic-dots-layer.js`
+3. `src/engine/geographic-areas-hazard-icons-layer.js`
 
 For spatial or LOD behavior, also inspect:
 
@@ -66,23 +65,19 @@ Preserve these behaviors unless a task explicitly changes them:
 The current reference presentation is:
 
 - **Thunderstorm** — magenta four-point star.
-- **Hail** — yellow filled triangle.
-- **Squall** — orange filled diamond with three presentation grades.
-- **Hurricane** — red filled square.
+- **Hail** — yellow filled hexagon.
+- **Squall** — dark-map aggregate SVG icon at a fixed 32 CSS px size.
+- **Hurricane** — dark-map tornado SVG icon at a fixed 32 CSS px size.
 
-Squall severity changes the diamond size.
+Thunderstorm and Hail severity change their aggregate marker size smoothly across the current 20, 24, and 28 CSS px anchors.
 
-Hurricane intensity does not continuously scale the square. The hurricane square is tied to the active sample spacing.
+Squall and Hurricane intensity do not continuously scale their icons.
 
 Exact colors, thresholds, numerical sizing rules, interpolation behavior, and LOD handling are documented in `ARCHITECTURE.md` and implemented in the files listed above. Numerical values describe the current reference implementation; preserve the visual hierarchy and semantics when adapting the visualization to a different sampling or rendering system rather than treating every coefficient as universal.
 
-## Dots and Areas
+## Areas
 
-Dots and Areas use different precipitation representations but share the same phenomenon-symbol semantics.
-
-In Areas mode, precipitation is rendered by the scalar Areas layer while the same hazard-symbol layer is rendered above it in hazards-only mode.
-
-Do not create separate phenomenon mappings for Dots and Areas unless explicitly required.
+Areas is the sole active visualization mode. Precipitation is rendered by the scalar Areas layer, with the aggregate hazard-symbol layer above it. There is no active Dots runtime or alternate precipitation representation.
 
 ## Reference implementation vs. contract
 
@@ -119,6 +114,6 @@ When modifying phenomenon visualization:
 3. verify temporal transitions;
 4. verify LOD transitions;
 5. verify overlap cases where more than one phenomenon is present;
-6. verify both Dots and Areas.
+6. verify the Areas representation.
 
 If a change materially alters the visualization contract, update `ARCHITECTURE.md` in the same change.

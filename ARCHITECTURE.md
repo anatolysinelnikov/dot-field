@@ -222,28 +222,11 @@ L14 is evaluated directly.
 
 Coarse hazard values are not produced by selecting one child glyph.
 
-Each phenomenon channel is aggregated independently.
-
-The current coarse-level mapping combines the child average and maximum:
-
-```text
-coarse = average × (1 - bias) + maximum × bias
-```
-
-Current reference maximum biases are:
-
-```text
-storm      0.58
-hail       0.72
-squall     0.70
-hurricane  0.82
-```
-
-These values are implementation tuning. The portable intent is that coarse LOD preserves significant localized phenomena better than a simple average while keeping the channels independent.
+Each phenomenon channel is aggregated independently with the maximum child value. This preserves localized hazard channels instead of diluting them with surrounding zero-valued children.
 
 The presentation priority is applied only after these channel values have been produced. Storm and Hail marker sizes are then smoothly mapped through their `20`, `24`, and `28 CSS px` severity anchors; LOD does not alter those screen-space sizes.
 
-At each LOD, the resolved markers then receive a deterministic priority-aware geographic dominance pass. Every occupied aggregate cell remains occupied. If a strictly higher-priority marker occupies the same or an immediately neighboring aggregate grid cell (Chebyshev distance `≤ 1`), the current cell displays that higher-priority type at its own stable anchor. Same-priority markers never alter one another, and this rule is based on aggregate cell topology rather than screen-space collision.
+There is no post-resolution neighbor propagation or suppression pass. At each LOD, priority is resolved only within the aggregate block itself. Because the block hierarchy is nested, a higher-priority channel consumes a lower-priority channel only when their values merge into the same coarser parent block.
 
 ### LOD marker replacement
 
@@ -271,7 +254,7 @@ The overlay uses procedural Storm/Hail images plus the dark SVG assets in `asset
 - Each block uses the average geographic anchor of its underlying samples. Anchor identity is fixed for that LOD and does not depend on weather values.
 - Storm, Hail, Squall, and Hurricane values are aggregated independently with the maximum value in the block.
 - Presentation is resolved after aggregation with `hurricane > squall > hail > storm`, so at most one icon is shown per block.
-- After per-block resolution, a higher-priority marker propagates its type to occupied lower-priority cells in the same or immediately neighboring aggregate grid cell (Chebyshev distance `≤ 1`); no occupied cell is removed and same-priority markers remain independent.
+- Priority is resolved only within each aggregate block; coarser nested blocks naturally consume lower-priority channels when independent channel values merge into the same parent block. There is no neighbor propagation or suppression.
 - Existing presentation strength mappings and thresholds are reused.
 - Icons are MapLibre screen-space symbols: procedural Storm/Hail markers use a smoothly interpolated `20–28 CSS px` severity range, while SVG Squall/Tornado markers remain fixed at `32 CSS px`. They remain screen-upright and use overlap settings that prevent label/icon collision from randomly suppressing them. SVGs and procedural shapes are rasterized at the device pixel ratio before registration.
 - Increasing geographic LOD creates more, geographically smaller aggregate blocks. It does not change icon size.
@@ -307,7 +290,7 @@ Defines the spatial and LOD behavior of weather samples and phenomenon values:
 - deterministic sample hierarchy;
 - direct/reference evaluation;
 - independent channel aggregation;
-- average/max-biased coarse summaries.
+- max-preserving coarse hazard summaries and rain-area reduction.
 
 ### `src/engine/field.js`
 
