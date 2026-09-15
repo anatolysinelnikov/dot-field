@@ -46,24 +46,24 @@ export function prepareFieldFrame(t, travelX, hasInitialHurricane = false) {
       preparedGaussian(travelX + 0.02, 0.54, mix(0.05, 0.12, waveB), mix(0.04, 0.09, waveB), 0.15, mix(0.02, 0.26, waveB))
     ],
     storm: [
-      preparedGaussian(travelX - 0.02, 0.42, mix(0.13, 0.19, waveB), mix(0.10, 0.145, waveC), -0.25, mix(0.42, 0.92, waveB)),
-      preparedGaussian(travelX + 0.13, 0.35, mix(0.075, 0.125, waveC), mix(0.06, 0.10, waveA), 0.65, mix(0.18, 0.78, waveC)),
+      preparedGaussian(travelX - 0.02, 0.42, mix(0.13, 0.19, waveB), mix(0.035, 0.055, waveC), -0.25, mix(0.42, 0.92, waveB)),
+      preparedGaussian(travelX + 0.13, 0.37, mix(0.075, 0.125, waveC), mix(0.045, 0.075, waveA), 0.65, mix(0.18, 0.78, waveC)),
       preparedGaussian(travelX - 0.12, 0.55, mix(0.07, 0.115, waveA), mix(0.065, 0.115, waveB), -0.5, mix(0.10, 0.68, waveA))
     ],
     hail: [
-      preparedGaussian(travelX - 0.0522, 0.8141, mix(0.004, 0.006, waveC), mix(0.004, 0.006, waveA), -0.2, mix(0.24, 0.42, waveC)),
-      preparedGaussian(travelX + 0.0454, 0.8141, mix(0.004, 0.006, waveA), mix(0.004, 0.006, waveB), 0.7, mix(0.03, 0.26, waveA)),
-      preparedGaussian(travelX + 0.1431, 0.8141, mix(0.004, 0.006, waveB), mix(0.004, 0.006, waveC), -0.3, mix(0.02, 0.22, waveB))
+      preparedGaussian(travelX - 0.1100, 0.3000, mix(0.004, 0.006, waveC), mix(0.004, 0.006, waveA), -0.2, mix(0.24, 0.42, waveC)),
+      preparedGaussian(travelX - 0.0500, 0.3000, mix(0.004, 0.006, waveA), mix(0.004, 0.006, waveB), 0.7, mix(0.03, 0.26, waveA)),
+      preparedGaussian(travelX + 0.0000, 0.3000, mix(0.004, 0.006, waveB), mix(0.004, 0.006, waveC), -0.3, mix(0.02, 0.22, waveB))
     ],
     // Prototype hazard family. These remain independent scalar channels; the
     // Areas presentation resolves them only after sampling and aggregation.
     squall: [
-      preparedGaussian(travelX - 0.0034, 0.7770, mix(0.0035, 0.0055, waveA), mix(0.0035, 0.0055, waveB), 0.18, mix(0.42, 0.58, waveA)),
-      preparedGaussian(travelX + 0.0942, 0.7770, mix(0.0035, 0.0055, waveB), mix(0.0035, 0.0055, waveC), -0.25, mix(0.28, 0.52, waveB)),
-      preparedGaussian(travelX + 0.0942, 0.7770, mix(0.0035, 0.0055, waveC), mix(0.0035, 0.0055, waveA), 0.34, mix(0.18, 0.42, waveC))
+      preparedGaussian(travelX + 0.0700, 0.3000, mix(0.0035, 0.0055, waveA), mix(0.0035, 0.0055, waveB), 0.18, mix(0.42, 0.58, waveA)),
+      preparedGaussian(travelX + 0.1200, 0.3000, mix(0.0035, 0.0055, waveB), mix(0.0035, 0.0055, waveC), -0.25, mix(0.28, 0.52, waveB)),
+      preparedGaussian(travelX + 0.1600, 0.3000, mix(0.0035, 0.0055, waveC), mix(0.0035, 0.0055, waveA), 0.34, mix(0.18, 0.42, waveC))
     ],
     hurricane: [
-      preparedGaussian(travelX + 0.0454, 0.7770, mix(0.0035, 0.005, waveB), mix(0.0035, 0.005, waveA), -0.18, mix(0.80, 1.0, waveB))
+      preparedGaussian(travelX + 0.0400, 0.3000, mix(0.0035, 0.005, waveB), mix(0.0035, 0.005, waveA), -0.18, mix(0.80, 1.0, waveB))
     ]
   };
 }

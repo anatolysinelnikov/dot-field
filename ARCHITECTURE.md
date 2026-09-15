@@ -218,9 +218,15 @@ L12
 L11
  ↓
 L10
+ ↓
+L9
+ ↓
+L8
+ ↓
+L7
 ```
 
-L14 is the only level evaluated directly for the Areas hazard hierarchy. Each lower level is produced from its child level with independent per-channel maximum reduction. Areas rain-area reduction remains separate from this hazard hierarchy.
+L14 is the only level evaluated directly for the Areas hazard hierarchy. Each lower level is produced from its child level with independent per-channel maximum reduction through L7, covering the map's desktop and compact/mobile minimum zooms. Areas rain-area reduction remains separate from this hazard hierarchy.
 
 Coarse hazard values are not produced by selecting one child glyph.
 
@@ -266,6 +272,8 @@ During an LOD transition, the outgoing aggregate marker set remains fully opaque
 Temporal interpolation is applied to the underlying channel values before each block's maximum and winner selection are evaluated. Weather changes can alter icon visibility or the winning marker type, but never move the aggregate anchor. The final display interval uses frame 179 → an explicit terminal state evaluated at `t = 1`, rather than frame 179 → frame 0. Only automatic playback uses the periodic wrap to begin a new frame-0 cycle.
 
 Areas uses the aggregate Storm, Hail, Squall, and Tornado icon overlay for hazard presentation in this prototype. The internal Hurricane channel is presented as Tornado artwork.
+
+The synthetic demonstration keeps the severe channels as one compact, independently shaped cluster embedded near one edge of the broader Storm field. This spatial arrangement is demonstration data only; presentation still resolves each aggregate block with the normal hazard priority.
 
 ## Reference implementation
 
