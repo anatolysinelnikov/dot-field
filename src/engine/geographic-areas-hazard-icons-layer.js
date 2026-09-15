@@ -5,8 +5,8 @@ import { GeographicSymbolPyramid } from './geographic-symbol-pyramid.js';
 import { intensityToStrength } from './precipitation-mapping.js';
 
 export const AREAS_HAZARD_BLOCK_SIZE = 4;
-export const AREAS_HAZARD_SQUALL_ICON_SIZE = 30;
-export const AREAS_HAZARD_TORNADO_ICON_SIZE = 30;
+export const AREAS_HAZARD_SQUALL_ICON_SIZE = 26;
+export const AREAS_HAZARD_TORNADO_ICON_SIZE = 26;
 export const AREAS_HAZARD_STORM_ICON_SIZES = Object.freeze([18, 22, 26]);
 export const AREAS_HAZARD_HAIL_ICON_SIZES = Object.freeze([20, 24, 28]);
 
