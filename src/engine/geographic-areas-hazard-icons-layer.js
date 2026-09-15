@@ -89,7 +89,7 @@ function makeProceduralIconImage(logicalSize, pixelRatio, shape, color) {
   const vertexCount = shape === 'star' ? 8 : 6;
   for (let index = 0; index < vertexCount; index++) {
     const angle = -Math.PI / 2 + index * Math.PI * 2 / vertexCount;
-    const vertexRadius = shape === 'star' && index % 2 ? radius * 0.38 : radius;
+    const vertexRadius = shape === 'star' && index % 2 ? radius * 0.30 : radius;
     const x = center + Math.cos(angle) * vertexRadius;
     const y = center + Math.sin(angle) * vertexRadius;
     if (index === 0) context.moveTo(x, y);
