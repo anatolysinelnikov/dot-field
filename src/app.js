@@ -8,8 +8,7 @@ import {
   selectMercatorGridSamples,
   zoomToMercatorGridLevel
 } from './engine/geographic-lod.js';
-import { GeographicDotsLayer } from './engine/geographic-dots-layer.js';
-import { GeographicSquaresLayer } from './engine/geographic-squares-layer.js';
+import { GeographicAreasHazardIconsLayer } from './engine/geographic-areas-hazard-icons-layer.js';
 import { GeographicScalarLayer } from './engine/geographic-scalar-layer.js';
 
 const MAX_SAMPLING_LATITUDE = 85;
@@ -21,8 +20,6 @@ const timeSlider = document.querySelector('#timeSlider');
 const resetView = document.querySelector('#resetView');
 const zoomIn = document.querySelector('#zoomIn');
 const zoomOut = document.querySelector('#zoomOut');
-const renderModeSelector = document.querySelector('#renderModeSelector');
-const renderModeButtons = [...renderModeSelector.querySelectorAll('[data-render-mode]')];
 
 const mapContainer = document.querySelector('#map');
 const shortSide = Math.min(
@@ -112,13 +109,11 @@ const state = {
   rawMaxZoom: INITIAL_RAW_MAX_ZOOM,
   resettingView: false,
   mapReady: false,
-  weatherQueued: false,
-  renderMode: 'dots'
+  weatherQueued: false
 };
-const weatherLayer = new GeographicDotsLayer();
-const squaresLayer = new GeographicSquaresLayer();
+const areasHazardIconsLayer = new GeographicAreasHazardIconsLayer();
 const scalarLayer = new GeographicScalarLayer();
-const geographicLayers = [scalarLayer, squaresLayer, weatherLayer];
+const geographicLayers = [scalarLayer, areasHazardIconsLayer];
 let lastMapErrorSignature = '';
 
 function cameraState() {
@@ -168,8 +163,7 @@ function updateLogicalSamplingZoom() {
 function commitSamples(level, samples) {
   state.lod = { level };
   state.samples = samples;
-  weatherLayer.setSamples(samples, state.time / LOOP_SECONDS);
-  squaresLayer.setSamples(samples, state.time / LOOP_SECONDS);
+  areasHazardIconsLayer.setSamples(samples, state.time / LOOP_SECONDS);
 }
 
 function initializeWeatherLayer() {
@@ -203,7 +197,7 @@ function initializeWeatherLayer() {
           ...(waterLayer.paint?.['fill-translate'] === undefined ? {} : { 'fill-translate': waterLayer.paint['fill-translate'] }),
           ...(waterLayer.paint?.['fill-translate-anchor'] === undefined ? {} : { 'fill-translate-anchor': waterLayer.paint['fill-translate-anchor'] })
         }
-      }, weatherLayer.id);
+      }, areasHazardIconsLayer.id);
     } catch (error) {
       console.warn('MapTiler water-tint context is unavailable.', error instanceof Error ? error.message : error);
     }
@@ -228,7 +222,7 @@ function initializeWeatherLayer() {
           ...(waterLayer.paint?.['fill-translate'] === undefined ? {} : { 'line-translate': waterLayer.paint['fill-translate'] }),
           ...(waterLayer.paint?.['fill-translate-anchor'] === undefined ? {} : { 'line-translate-anchor': waterLayer.paint['fill-translate-anchor'] })
         }
-      }, weatherLayer.id);
+      }, areasHazardIconsLayer.id);
     } catch (error) {
       console.warn('MapTiler water-boundary context is unavailable.', error instanceof Error ? error.message : error);
     }
@@ -248,7 +242,7 @@ function initializeWeatherLayer() {
     .filter((layer) => layer.type === 'symbol' && !upperContextIds.has(layer.id))
     .map((layer) => layer.id);
   for (const id of symbolIds) {
-    if (map.getLayer(id) && map.getLayer(weatherLayer.id)) map.moveLayer(id, weatherLayer.id);
+    if (map.getLayer(id) && map.getLayer(areasHazardIconsLayer.id)) map.moveLayer(id, areasHazardIconsLayer.id);
   }
 
   const upperOrder = [
@@ -264,9 +258,21 @@ function initializeWeatherLayer() {
 
   if (state.mapReady) return;
   state.mapReady = true;
-  applyRenderMode();
   rebaseCamera();
   rebuildSamples(zoomToMercatorGridLevel(state.logicalSamplingZoom));
+  initializeAreasWeather();
+}
+
+function initializeAreasWeather() {
+  const time = state.time / LOOP_SECONDS;
+  scalarLayer.setPresentation('areas', true, time);
+  scalarLayer.updateWeather(time);
+  areasHazardIconsLayer.setActive(true);
+  areasHazardIconsLayer.updateWeather(time);
+  scalarLayer.setActive(true);
+  scalarLayer.updateWeather(time);
+  map.triggerRepaint();
+  if (state.playing) wakeApplicationFrame();
 }
 
 function startAdjacentTransition(level, now) {
@@ -281,8 +287,7 @@ function startAdjacentTransition(level, now) {
     start: now,
     rawProgress: 0
   };
-  weatherLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
-  squaresLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS, 0);
+  areasHazardIconsLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS);
   wakeApplicationFrame();
 }
 
@@ -311,8 +316,7 @@ function rebuildSamples(level, now = performance.now()) {
       start: now - rawProgress * LOD_MORPH_SECONDS * 1000,
       rawProgress
     };
-    weatherLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
-    squaresLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS, smoothstep(0, 1, rawProgress));
+    areasHazardIconsLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS);
     wakeApplicationFrame();
   }
 }
@@ -322,8 +326,6 @@ function updateLODTransition(now) {
   if (!transition) return;
   const rawProgress = clamp((now - transition.start) / (LOD_MORPH_SECONDS * 1000), 0, 1);
   transition.rawProgress = rawProgress;
-  weatherLayer.setTransitionProgress(smoothstep(0, 1, rawProgress));
-  squaresLayer.setTransitionProgress(smoothstep(0, 1, rawProgress));
   if (rawProgress < 1) return;
   state.lodTransition = null;
   commitSamples(transition.toLevel, transition.toSamples);
@@ -337,35 +339,9 @@ function queueWeatherUpdate() {
     state.weatherQueued = false;
     if (!state.mapReady) return;
     const time = state.time / LOOP_SECONDS;
-    if (state.renderMode === 'dots' || state.renderMode === 'areas') weatherLayer.updateWeather(time);
-    if (state.renderMode === 'squares') squaresLayer.updateWeather(time);
-    if (state.renderMode === 'blur' || state.renderMode === 'areas') scalarLayer.updateWeather(time);
-  });
-}
-
-function applyRenderMode() {
-  const mode = state.renderMode;
-  const time = state.time / LOOP_SECONDS;
-  const scalarActive = mode === 'areas';
-  weatherLayer.setActive(mode === 'dots' || mode === 'areas');
-  weatherLayer.setPresentation(mode === 'areas');
-  squaresLayer.setActive(false);
-  scalarLayer.setActive(scalarActive);
-  if (mode === 'dots') weatherLayer.updateWeather(time);
-  else if (mode === 'areas') {
-    scalarLayer.setPresentation('areas', true, time);
-    weatherLayer.updateWeather(time);
+    areasHazardIconsLayer.updateWeather(time);
     scalarLayer.updateWeather(time);
-  }
-}
-
-function setRenderMode(mode) {
-  state.renderMode = mode;
-  renderModeSelector.dataset.mode = mode;
-  for (const button of renderModeButtons) {
-    button.setAttribute('aria-checked', String(button.dataset.renderMode === mode));
-  }
-  applyRenderMode();
+  });
 }
 
 function setPlaying(playing) {
@@ -400,9 +376,6 @@ function resetMapView() {
   });
 }
 resetView.addEventListener('click', resetMapView);
-for (const button of renderModeButtons) {
-  button.addEventListener('click', () => setRenderMode(button.dataset.renderMode));
-}
 timeSlider.addEventListener('pointerdown', (event) => {
   if (state.playing) setPlaying(false);
   state.scrubbing = true;
@@ -486,7 +459,7 @@ function frame(now) {
   applicationFrameQueued = false;
   const delta = Math.min((now - state.lastFrame) / 1000, 0.1);
   state.lastFrame = now;
-  if (state.playing && !state.scrubbing) {
+  if (state.mapReady && state.playing && !state.scrubbing) {
     state.time = (state.time + delta) % LOOP_SECONDS;
   }
   // A paused static layer has no temporal uniform to advance. Leaving its
@@ -494,14 +467,12 @@ function frame(now) {
   // an otherwise idle map rendering continuously.
   if (state.mapReady && state.playing && !state.scrubbing) {
     const normalizedTime = state.time / LOOP_SECONDS;
-    if (state.renderMode === 'dots' || state.renderMode === 'areas') weatherLayer.updateWeather(normalizedTime);
-    else if (state.renderMode === 'squares') squaresLayer.updateWeather(normalizedTime);
-    if (state.renderMode === 'areas') scalarLayer.updateWeather(normalizedTime);
-    else if (state.renderMode !== 'dots' && state.renderMode !== 'squares') scalarLayer.updateWeather(normalizedTime);
+    areasHazardIconsLayer.updateWeather(normalizedTime, { periodic: true });
+    scalarLayer.updateWeather(normalizedTime, { periodic: true });
   }
   updateLODTransition(now);
   if (!state.scrubbing) timeSlider.value = String(state.time / LOOP_SECONDS);
-  if ((state.playing && !state.scrubbing) || state.lodTransition) wakeApplicationFrame();
+  if ((state.mapReady && state.playing && !state.scrubbing) || state.lodTransition) wakeApplicationFrame();
 }
 
 wakeApplicationFrame();

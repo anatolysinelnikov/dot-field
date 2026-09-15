@@ -3,13 +3,29 @@ import { LOOP_SECONDS } from './config.js';
 const TEMPORAL_FRAME_SECONDS = 0.1;
 export const TEMPORAL_FRAME_COUNT = Math.round(LOOP_SECONDS / TEMPORAL_FRAME_SECONDS);
 
-export function geographicTemporalFrameAt(time) {
-  const wrapped = ((time % 1) + 1) % 1;
-  const rawScaled = wrapped * TEMPORAL_FRAME_COUNT;
+export function geographicTemporalFrameAt(time, { periodic = false } = {}) {
+  const normalized = periodic
+    ? ((time % 1) + 1) % 1
+    : Math.max(0, Math.min(1, time));
+  const terminalFrameStart = (TEMPORAL_FRAME_COUNT - 1) / TEMPORAL_FRAME_COUNT;
+  if (normalized >= terminalFrameStart) {
+    return {
+      index: TEMPORAL_FRAME_COUNT - 1,
+      nextIndex: TEMPORAL_FRAME_COUNT,
+      progress: Math.min(1, (normalized - terminalFrameStart) / (1 - terminalFrameStart)),
+      terminal: true
+    };
+  }
+  const rawScaled = normalized * TEMPORAL_FRAME_COUNT;
   // Keep exact keyframe boundaries stable despite floating-point drift.
   const scaled = Math.abs(rawScaled - Math.round(rawScaled)) < 1e-9 ? Math.round(rawScaled) : rawScaled;
   const index = Math.floor(scaled) % TEMPORAL_FRAME_COUNT;
-  return { index, progress: scaled - Math.floor(scaled) };
+  return {
+    index,
+    nextIndex: (index + 1) % TEMPORAL_FRAME_COUNT,
+    progress: scaled - Math.floor(scaled),
+    terminal: false
+  };
 }
 
 function setMatrix(gl, location, value) {

@@ -28,15 +28,16 @@ function evaluateGaussian(component, x, y) {
 // Time-only values are prepared once per keyframe. The field continues to
 // travel beneath a fixed sampling lattice; component offsets stay locked
 // together while amplitude, width, and rotation evolve deterministically.
-export function prepareFieldFrame(t, travelX) {
+export function prepareFieldFrame(t, travelX, hasInitialHurricane = false) {
   const waveA = periodicPulse(t, 0.02);
   const waveB = periodicPulse(t, 0.36);
   const waveC = periodicPulse(t, 0.68);
-  const lifecycle = smoothstep(0, 0.12, t) * smoothstep(0, 0.12, 1 - t);
+  const lifecycle = smoothstep(0, 0.12, 1 - t);
 
   return {
     t,
     travelX,
+    hasInitialHurricane,
     lifecycle,
     rain: [
       preparedGaussian(travelX - 0.05, 0.47, mix(0.17, 0.25, waveA), mix(0.12, 0.18, waveB), mix(-0.35, 0.18, waveC), mix(0.72, 1.05, waveA)),
@@ -50,19 +51,19 @@ export function prepareFieldFrame(t, travelX) {
       preparedGaussian(travelX - 0.12, 0.55, mix(0.07, 0.115, waveA), mix(0.065, 0.115, waveB), -0.5, mix(0.10, 0.68, waveA))
     ],
     hail: [
-      preparedGaussian(travelX - 0.015, 0.46, mix(0.085, 0.135, waveC), mix(0.065, 0.105, waveA), -0.2, mix(0.16, 0.95, waveC)),
-      preparedGaussian(travelX + 0.08, 0.415, mix(0.055, 0.095, waveA), mix(0.045, 0.075, waveB), 0.7, mix(0.04, 0.73, waveA)),
-      preparedGaussian(travelX - 0.07, 0.54, mix(0.05, 0.085, waveB), mix(0.045, 0.075, waveC), -0.3, mix(0.02, 0.55, waveB))
+      preparedGaussian(travelX + 0.18, 0.70, mix(0.004, 0.006, waveC), mix(0.004, 0.006, waveA), -0.2, mix(0.24, 0.42, waveC)),
+      preparedGaussian(travelX + 0.32, 0.80, mix(0.004, 0.006, waveA), mix(0.004, 0.006, waveB), 0.7, mix(0.03, 0.26, waveA)),
+      preparedGaussian(travelX + 0.42, 0.70, mix(0.004, 0.006, waveB), mix(0.004, 0.006, waveC), -0.3, mix(0.02, 0.22, waveB))
     ],
     // Prototype hazard family. These remain independent scalar channels; the
-    // renderer assigns squall grades only after sampling the field.
+    // Areas presentation resolves them only after sampling and aggregation.
     squall: [
-      preparedGaussian(travelX - 0.015, 0.47, mix(0.060, 0.090, waveA), mix(0.050, 0.075, waveB), 0.18, mix(0.42, 0.58, waveA)),
-      preparedGaussian(travelX + 0.025, 0.47, mix(0.040, 0.065, waveB), mix(0.034, 0.055, waveC), -0.25, mix(0.58, 0.76, waveB)),
-      preparedGaussian(travelX + 0.045, 0.47, mix(0.026, 0.045, waveC), mix(0.024, 0.040, waveA), 0.34, mix(0.74, 0.98, waveC))
+      preparedGaussian(travelX - 0.0035, 0.851, mix(0.0035, 0.0055, waveA), mix(0.0035, 0.0055, waveB), 0.18, mix(0.42, 0.58, waveA)),
+      preparedGaussian(travelX + 0.0455, 0.851, mix(0.0035, 0.0055, waveB), mix(0.0035, 0.0055, waveC), -0.25, mix(0.28, 0.52, waveB)),
+      preparedGaussian(travelX + 0.0455, 0.851, mix(0.0035, 0.0055, waveC), mix(0.0035, 0.0055, waveA), 0.34, mix(0.18, 0.42, waveC))
     ],
     hurricane: [
-      preparedGaussian(travelX + 0.045, 0.47, mix(0.014, 0.024, waveB), mix(0.012, 0.021, waveA), -0.18, mix(0.80, 1.0, waveB))
+      preparedGaussian(travelX + 0.045, -0.10, mix(0.0035, 0.005, waveB), mix(0.0035, 0.005, waveA), -0.18, mix(0.80, 1.0, waveB))
     ]
   };
 }
@@ -98,7 +99,7 @@ export function evaluatePreparedField(frame, x, y, output = {}) {
   output.storm = clamp(sumComponents(frame.storm, x, y) * (0.96 + 0.045 * Math.sin(localX * 41 + y * 33)) * frame.lifecycle);
   output.hail = clamp(sumComponents(frame.hail, x, y) * (0.97 + 0.035 * Math.sin(localX * 53 - y * 47)) * frame.lifecycle);
   output.squall = clamp(sumComponents(frame.squall, x, y) * (0.97 + 0.035 * Math.sin(localX * 37 + y * 29)) * frame.lifecycle);
-  output.hurricane = clamp(sumComponents(frame.hurricane, x, y) * (0.98 + 0.02 * Math.sin(localX * 31 - y * 23)) * frame.lifecycle);
+  output.hurricane = clamp(sumComponents(frame.hurricane, x, y) * (0.98 + 0.02 * Math.sin(localX * 31 - y * 23)) * (frame.hasInitialHurricane ? 1 : 0));
   return output;
 }
 

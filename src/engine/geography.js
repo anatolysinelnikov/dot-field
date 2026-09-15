@@ -1,4 +1,4 @@
-import { evaluatePreparedField, intensityAt, prepareFieldFrame } from './field.js';
+import { evaluatePreparedField, prepareFieldFrame } from './field.js';
 import { mix, smoothstep } from './math.js';
 
 // Keep the geographic experiment anchor in one place. Changing this object is
@@ -40,14 +40,18 @@ export function geographicToSynthetic(longitude, latitude) {
 
 export function geographicIntensityAt(longitude, latitude, time) {
   const point = geographicToSynthetic(longitude, latitude);
-  // The trajectory belongs to field time, never to the map camera or viewport.
-  const travelX = mix(WEATHER_REGION.trajectory.startX, WEATHER_REGION.trajectory.endX, smoothstep(0, 1, time));
-  return intensityAt(point.x, point.y, time, travelX);
+  return evaluatePreparedField(prepareGeographicFieldFrame(time), point.x, point.y);
 }
 
 export function prepareGeographicFieldFrame(time) {
-  const travelX = mix(WEATHER_REGION.trajectory.startX, WEATHER_REGION.trajectory.endX, smoothstep(0, 1, time));
-  return prepareFieldFrame(time, travelX);
+  const internalTime = time;
+  const travelX = mix(
+    WEATHER_REGION.trajectory.startX,
+    WEATHER_REGION.trajectory.endX,
+    smoothstep(0, 1, internalTime)
+  );
+  const isInitialDisplayKeyframe = time === 0;
+  return prepareFieldFrame(internalTime, travelX, isInitialDisplayKeyframe);
 }
 
 export function geographicPreparedIntensityAt(frame, point, output) {

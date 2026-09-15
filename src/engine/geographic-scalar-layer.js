@@ -161,14 +161,15 @@ export class GeographicScalarLayer {
     this.map?.triggerRepaint();
   }
 
-  rebuildTemporal(time) {
-    const frame = geographicTemporalFrameAt(time);
-    const nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+  rebuildTemporal(time, options) {
+    const frame = geographicTemporalFrameAt(time, options);
+    const nextIndex = frame.nextIndex;
     this.temporal = {
       index: frame.index,
       nextIndex,
+      terminal: frame.terminal,
       state0: this.lattice.evaluate(frame.index / TEMPORAL_FRAME_COUNT),
-      state1: this.lattice.evaluate(nextIndex / TEMPORAL_FRAME_COUNT)
+      state1: this.lattice.evaluate(frame.terminal ? 1 : nextIndex / TEMPORAL_FRAME_COUNT)
     };
     this.temporalProgress = frame.progress;
     this.preparePresentation();
@@ -301,17 +302,18 @@ export class GeographicScalarLayer {
     }
   }
 
-  updateWeather(time) {
-    const frame = geographicTemporalFrameAt(time);
-    if (!this.temporal || frame.index !== this.temporal.index) {
-      if (this.temporal && frame.index === this.temporal.nextIndex) {
+  updateWeather(time, options) {
+    const frame = geographicTemporalFrameAt(time, options);
+    if (!this.temporal || frame.index !== this.temporal.index || frame.terminal !== this.temporal.terminal) {
+      if (!frame.terminal && this.temporal && frame.index === this.temporal.nextIndex) {
         const reusable = this.temporal.state0;
         this.temporal.index = frame.index;
-        this.temporal.nextIndex = (frame.index + 1) % TEMPORAL_FRAME_COUNT;
+        this.temporal.nextIndex = frame.nextIndex;
+        this.temporal.terminal = false;
         this.temporal.state0 = this.temporal.state1;
         this.temporal.state1 = this.lattice.evaluate(this.temporal.nextIndex / TEMPORAL_FRAME_COUNT, reusable);
         this.preparePresentation(this.mode === 'areas');
-      } else this.rebuildTemporal(time);
+      } else this.rebuildTemporal(time, options);
     }
     this.temporalProgress = frame.progress;
     if (this.active) this.map?.triggerRepaint();

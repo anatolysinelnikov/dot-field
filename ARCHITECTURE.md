@@ -7,7 +7,7 @@ Dot Field is a browser-based reference implementation of deterministic geographi
 The repository demonstrates two related things:
 
 1. a **visual and behavioral contract** for precipitation and weather phenomena;
-2. one concrete implementation of that contract using MapLibre GL JS, deterministic geographic sampling, and custom WebGL layers.
+2. one active implementation of that contract using MapLibre GL JS, deterministic geographic sampling, and custom WebGL layers.
 
 The visual contract is the important part.
 
@@ -57,6 +57,8 @@ They do not contain glyphs, colors, icons, or other presentation information.
 
 The synthetic generator is therefore not part of the phenomenon presentation contract.
 
+For this demonstration, geographic field preparation is the single time boundary: normalized display time `t` maps directly to internal synthetic phase `t`. Rain, Storm, Hail, and Squall all use that prepared phase. Only the Hurricane channel additionally receives the display-keyframe-0 identity so later discrete keyframes remain zero for Hurricane. The synthetic lifecycle is `smoothstep(0, 0.12, 1 - t)`: fully active at frame 0 and fading only during the final 12% of the loop (about 2.16 seconds).
+
 A different data source can reproduce the same visualization as long as it provides equivalent normalized phenomenon values at stable geographic sample positions.
 
 ## Spatial identity
@@ -67,7 +69,7 @@ Camera movement changes their projection on screen but does not reseed or random
 
 Zoom changes the active level of detail without changing the conceptual spatial identity of the weather field.
 
-This matters particularly for phenomenon glyphs: a storm, hail, squall, or hurricane symbol represents weather data at a geographic sample, not a decorative screen-space particle.
+This matters particularly for phenomenon icons: an aggregate marker represents weather data in a deterministic geographic block, not a decorative screen-space particle.
 
 ## Reference values and portable intent
 
@@ -77,8 +79,7 @@ When adapting the visualization, preserve the portable intent:
 
 - the relative visual hierarchy between phenomena;
 - the glyph identity and color semantics;
-- the three-grade squall progression;
-- the strong, cell-scale hurricane presence that does not keep growing with intensity;
+- stable aggregate hazard placement and screen-space marker sizing;
 - stable spatial placement and temporal continuity;
 - the fixed overlap priority.
 
@@ -88,22 +89,23 @@ Exact numerical coefficients may change when sample spacing, renderer scale, or 
 
 Each sample can contain values for several phenomenon channels simultaneously.
 
-The renderer first evaluates/interpolates the channel values and then resolves them into a single visible glyph.
+The renderer first evaluates/interpolates the channel values, aggregates the active grid into geographic blocks, and then resolves each block into a single visible icon.
 
-### Visual legend
+### Active Areas visual legend
 
-| Phenomenon | Glyph | Color | Current reference size behavior |
+| Phenomenon | Areas presentation | Color/artwork | Current reference size behavior |
 | --- | --- | --- | --- |
-| Thunderstorm | four-point star | magenta `#FF00FF` | severity-dependent |
-| Hail | filled triangle | yellow `#FFD400` | severity-dependent |
-| Squall | filled diamond | orange `#FF8500` | three severity grades |
-| Hurricane | filled square | red `#DB0414` | fixed relative to sample spacing |
+| Rain | reconstructed scalar field | blue precipitation bands | field-dependent |
+| Thunderstorm | aggregate procedural four-point star | magenta `#FF00FF` | smoothly interpolated `20–28 CSS px` severity range, with `24 CSS px` midpoint |
+| Hail | aggregate procedural filled hexagon | yellow `#FFD400` | smoothly interpolated `20–28 CSS px` severity range, with `24 CSS px` midpoint |
+| Squall | aggregate `squall-dark.svg` icon | supplied dark artwork | fixed `32 CSS px` |
+| Hurricane | aggregate `tornado-dark.svg` icon | supplied dark artwork | fixed `32 CSS px` |
 
-The corresponding reference geometry and colors are defined in `src/engine/geographic-dots-layer.js`.
+The Areas rendering paths are defined in `src/engine/geographic-scalar-layer.js` and `src/engine/geographic-areas-hazard-icons-layer.js`.
 
 ## Winner priority
 
-Only one phenomenon glyph is displayed at a sample position.
+Only one hazard icon is displayed at an aggregate block anchor.
 
 When multiple channels are active, the fixed priority is:
 
@@ -123,7 +125,7 @@ In code:
 hurricane > squall > hail > storm
 ```
 
-This is presentation priority, not data destruction.
+This is the Areas marker priority, not data destruction.
 
 The underlying scalar channels remain independent even when one glyph visually wins.
 
@@ -152,103 +154,25 @@ This means the nominal threshold is part of a smooth presentation mapping, not a
 
 These values operate on the prototype's normalized scalar channels. They are presentation-space values, not physical meteorological thresholds.
 
+## Squall
+
+In Areas, Squall is represented by the supplied `assets/squall-dark.svg` artwork at a deterministic aggregate block anchor. Existing Squall thresholds are used only to decide whether the binary, fully opaque icon is visible; severity does not change its screen size or opacity.
+
 ## Thunderstorm
 
-Thunderstorm is represented by a magenta four-point star.
-
-The star geometry is generated from eight alternating outer/inner vertices, producing four primary points.
-
-The current reference inner radius ratio is:
-
-```text
-0.38
-```
-
-Thunderstorm radius is relative to active sample spacing.
-
-Current reference range:
-
-```text
-0.30 × spacing → 0.50 × spacing
-```
-
-The portable intent is a clearly visible but lower-priority symbol whose size communicates severity without dominating hail, squall, or hurricane.
+In Areas, Thunderstorm is represented by a procedural magenta four-point star at a deterministic aggregate block anchor. Its screen-space size interpolates smoothly across `20`, `24`, and `28 CSS px` severity anchors using the existing normalized presentation strength.
 
 ## Hail
 
-Hail is represented by a yellow filled triangle.
-
-Its current reference radius range is:
-
-```text
-0.30 × spacing → 0.60 × spacing
-```
-
-Hail size changes continuously with normalized hail strength.
-
-The triangle is intentionally less visually massive than the previous larger polygonal form so it does not compete with higher-priority phenomena.
-
-The portable intent is a compact, clearly distinct yellow symbol with continuous severity sizing.
-
-## Squall
-
-Squall is represented by an orange filled diamond.
-
-The diamond is the same geometric family across all squall severities. Severity changes its size rather than changing the phenomenon type.
-
-### Squall grades
-
-The current reference presentation has three grades:
-
-```text
-grade 1: 0.08 → 0.38
-grade 2: 0.38 → 0.72
-grade 3: 0.72 → 1.00
-```
-
-The corresponding thresholds are:
-
-```text
-[0.08, 0.38, 0.72]
-```
-
-The renderer determines the grade from the interpolated squall value.
-
-Within each grade, size continues to evolve smoothly rather than jumping between three fixed sizes.
-
-The grade-local progression uses nonlinear easing before being mapped into the overall squall size range.
-
-Current reference squall radius range:
-
-```text
-0.40 × spacing → 0.50 × spacing
-```
-
-The portable intent is more important than the exact coefficients: squall remains one orange diamond symbol with three readable severity grades, significant visual weight, and smooth progression between sizes.
+In Areas, Hail is represented by a procedural filled yellow hexagon at a deterministic aggregate block anchor. Its screen-space size interpolates smoothly across `20`, `24`, and `28 CSS px` severity anchors using the existing normalized presentation strength.
 
 ## Hurricane
 
-Hurricane is represented by a red filled square.
-
-Unlike the other phenomenon symbols, hurricane size does not continuously encode intensity.
-
-In the current reference implementation, its radius is:
-
-```text
-0.50 × sampleSpacing
-```
-
-Therefore the full square side is:
-
-```text
-1.00 × sampleSpacing
-```
-
-These numbers describe the current grid-relative implementation. The portable intent is a strong, cell-scale red square whose size remains effectively fixed for the active sampling scale rather than continuing to grow with scalar intensity.
+In Areas, Hurricane is represented by the supplied `assets/tornado-dark.svg` artwork at a deterministic aggregate block anchor. Existing Hurricane thresholds are used only to decide whether the binary, fully opaque icon is visible; intensity does not change its screen size or opacity.
 
 Hurricane is the highest-priority phenomenon.
 
-If hurricane is active at a sample, lower-priority squall, hail, and thunderstorm glyphs are not drawn at that sample.
+If hurricane is active in an aggregate block, no lower-priority hazard icon is drawn in that block.
 
 ## Temporal behavior
 
@@ -267,20 +191,20 @@ state B phenomenon values
             ↓
       resolve winner
             ↓
-      render glyph
+      render icon
 ```
 
 This is intentionally different from crossfading already-rendered symbols.
 
-For example, when a sample evolves from hail-dominant values toward squall-dominant values, the scalar channels interpolate first and the winner is evaluated from the intermediate values.
+For example, when interpolated Storm, Hail, Squall, and Hurricane values compete inside an aggregate block, the scalar channels interpolate first and the winner is evaluated from the intermediate maximum values.
 
-The system does not simply fade a yellow triangle out while fading an orange diamond in.
+The system does not simply fade one already-rendered icon out while fading another in.
 
 This keeps the presentation tied to the weather data throughout the animation.
 
 ## Spatial and LOD transitions
 
-The Dots representation uses a deterministic geographic symbol pyramid.
+The Areas hazard overlay uses a deterministic geographic symbol pyramid.
 
 Reference evaluation is performed at L13 for the coarser hierarchy:
 
@@ -317,61 +241,46 @@ hurricane  0.82
 
 These values are implementation tuning. The portable intent is that coarse LOD preserves significant localized phenomena better than a simple average while keeping the channels independent.
 
-The presentation priority is applied only after these channel values have been produced.
+The presentation priority is applied only after these channel values have been produced. Storm and Hail marker sizes are then smoothly mapped through their `20`, `24`, and `28 CSS px` severity anchors; LOD does not alter those screen-space sizes.
 
-### LOD interpolation
+At each LOD, the resolved markers then receive a deterministic priority-aware geographic dominance pass. Every occupied aggregate cell remains occupied. If a strictly higher-priority marker occupies the same or an immediately neighboring aggregate grid cell (Chebyshev distance `≤ 1`), the current cell displays that higher-priority type at its own stable anchor. Same-priority markers never alter one another, and this rule is based on aggregate cell topology rather than screen-space collision.
 
-During an LOD transition, the renderer interpolates the phenomenon values associated with the start and end spatial states.
+### LOD marker replacement
 
-Winner selection is then performed from the interpolated values.
+During an LOD transition, only the outgoing aggregate marker set is rendered. Its icons remain fully opaque and fixed-size until the transition commits, then the incoming set replaces it discretely at the same screen-space size.
 
-When the same phenomenon wins at both LOD endpoints, radius interpolation preserves glyph area using squared-radius interpolation.
-
-This reduces perceptual popping during refinement or coarsening.
-
-## Dots
-
-Dots combines precipitation samples and phenomenon glyphs on the deterministic geographic grid.
-
-Precipitation intensity is primarily communicated by circle radius and overlap.
-
-Phenomenon symbols are rendered from the same spatial sampling system but remain independent channels until presentation.
-
-Dots therefore shows:
-
-```text
-precipitation samples
-+
-phenomenon glyph layer
-```
+Marker sets are not opacity-crossfaded, scaled, or moved toward one another. Reversing a transition keeps the currently displayed set until the reversed replacement commits.
 
 ## Areas
 
-Areas uses a reconstructed scalar precipitation surface instead of visible precipitation dots.
+Areas is the sole active precipitation representation. It uses a reconstructed scalar precipitation surface rather than visible precipitation dots.
 
-Phenomena do not receive a separate Areas-specific representation.
-
-The same phenomenon glyph layer used by Dots is reused in hazards-only mode above the Areas precipitation layer.
-
-Conceptually:
+Areas renders a separate sparse icon overlay for the `storm`, `hail`, `squall`, and `hurricane` channels:
 
 ```text
 Areas precipitation reconstruction
 +
-same phenomenon glyph layer
+aggregate Areas hazard icons
 ```
 
-As a result, switching between Dots and Areas does not change the phenomenon contract:
+The overlay uses procedural Storm/Hail images plus the dark SVG assets in `assets/squall-dark.svg` and `assets/tornado-dark.svg`. The internal `hurricane` channel remains unchanged; `tornado-dark.svg` is only its Areas presentation.
 
-- same sample identity;
-- same channel values;
-- same temporal behavior;
-- same winner priority;
-- same glyphs;
-- same colors;
-- same sizing semantics.
+### Areas aggregate marker contract
 
-Only the precipitation representation changes.
+- The active sampling grid is grouped into deterministic `4 × 4` sample blocks.
+- Each block uses the average geographic anchor of its underlying samples. Anchor identity is fixed for that LOD and does not depend on weather values.
+- Storm, Hail, Squall, and Hurricane values are aggregated independently with the maximum value in the block.
+- Presentation is resolved after aggregation with `hurricane > squall > hail > storm`, so at most one icon is shown per block.
+- After per-block resolution, a higher-priority marker propagates its type to occupied lower-priority cells in the same or immediately neighboring aggregate grid cell (Chebyshev distance `≤ 1`); no occupied cell is removed and same-priority markers remain independent.
+- Existing presentation strength mappings and thresholds are reused.
+- Icons are MapLibre screen-space symbols: procedural Storm/Hail markers use a smoothly interpolated `20–28 CSS px` severity range, while SVG Squall/Tornado markers remain fixed at `32 CSS px`. They remain screen-upright and use overlap settings that prevent label/icon collision from randomly suppressing them. SVGs and procedural shapes are rasterized at the device pixel ratio before registration.
+- Increasing geographic LOD creates more, geographically smaller aggregate blocks. It does not change icon size.
+
+During an LOD transition, the outgoing aggregate marker set remains fully opaque until the transition commits. It is then replaced by the incoming set at the same fixed icon size; marker sets are not crossfaded, scaled, or moved toward one another. Reversing a transition keeps the currently displayed set until the replacement commits.
+
+Temporal interpolation is applied to the underlying channel values before each block's maximum and winner selection are evaluated. Weather changes can alter icon visibility or the winning marker type, but never move the aggregate anchor. The final display interval uses frame 179 → an explicit terminal state evaluated at `t = 1`, rather than frame 179 → frame 0. Only automatic playback uses the periodic wrap to begin a new frame-0 cycle.
+
+Areas uses the aggregate Storm, Hail, Squall, and Tornado icon overlay for hazard presentation in this prototype. The internal Hurricane channel is presented as Tornado artwork.
 
 ## Reference implementation
 
@@ -383,27 +292,13 @@ Defines normalized presentation thresholds and common strength mappings.
 
 Also defines the three squall grade thresholds.
 
-### `src/engine/hazard-renderer.js`
+### `src/engine/geographic-scalar-layer.js`
 
-Contains the readable CPU reference for:
+Contains the reconstructed scalar precipitation Areas renderer and its temporal texture preparation.
 
-- phenomenon priority;
-- size mapping;
-- squall grade progression;
-- fixed hurricane sizing.
+### `src/engine/geographic-areas-hazard-icons-layer.js`
 
-This is a useful compact description of the intended presentation semantics.
-
-### `src/engine/geographic-dots-layer.js`
-
-Contains the actual WebGL presentation implementation:
-
-- glyph geometry;
-- colors;
-- temporal interpolation;
-- winner selection;
-- LOD interpolation;
-- instanced rendering.
+Contains the deterministic aggregate Storm/Hail/Squall/Tornado icon overlay, procedural/SVG image registration, winner selection, and discrete LOD marker replacement.
 
 ### `src/engine/geographic-symbol-pyramid.js`
 
@@ -430,13 +325,17 @@ The following are core behaviors:
 - deterministic geographic placement;
 - continuous temporal evolution;
 - data interpolation before winner selection;
-- one visible phenomenon per sample;
+- one visible phenomenon marker per aggregate block;
 - fixed phenomenon priority;
 - stable glyph identities;
 - defined shape and color for each phenomenon;
-- squall severity expressed through three size grades;
-- hurricane represented by a fixed cell-scale square;
-- phenomenon semantics remain the same across Dots and Areas.
+- Areas markers for Thunderstorm, Hail, Squall, and Hurricane/Tornado;
+- Areas is the sole active precipitation representation;
+- Areas uses sparse deterministic aggregate hazard icons;
+- Areas marker density changes with LOD while fixed screen-space marker size does not;
+- aggregate anchors remain spatially stable;
+- Areas marker priority is `hurricane > squall > hail > storm`;
+- icon artwork is kept at the presentation boundary and does not enter the weather data model.
 
 The following are implementation choices rather than universal requirements:
 
