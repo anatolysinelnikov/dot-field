@@ -51,9 +51,9 @@ export function prepareFieldFrame(t, travelX, hasInitialHurricane = false) {
       preparedGaussian(travelX - 0.12, 0.55, mix(0.07, 0.115, waveA), mix(0.065, 0.115, waveB), -0.5, mix(0.10, 0.68, waveA))
     ],
     hail: [
-      preparedGaussian(travelX - 0.0950, 0.3050, mix(0.004, 0.006, waveC), mix(0.004, 0.006, waveA), -0.2, mix(0.24, 0.42, waveC)),
-      preparedGaussian(travelX - 0.0450, 0.3350, mix(0.004, 0.006, waveA), mix(0.004, 0.006, waveB), 0.7, mix(0.03, 0.26, waveA)),
-      preparedGaussian(travelX + 0.0050, 0.3150, mix(0.004, 0.006, waveB), mix(0.004, 0.006, waveC), -0.3, mix(0.02, 0.22, waveB))
+      preparedGaussian(travelX - 0.0950, 0.3050, 0.005, 0.005, -0.2, 0.38),
+      preparedGaussian(travelX - 0.0450, 0.3350, 0.005, 0.005, 0.7, 0.24),
+      preparedGaussian(travelX + 0.0050, 0.3150, 0.005, 0.005, -0.3, 0.18)
     ],
     // Prototype hazard family. These remain independent scalar channels; the
     // Areas presentation resolves them only after sampling and aggregation.
