@@ -2,7 +2,7 @@ import { prepareGeographicFieldFrame } from './geography.js';
 import { MAX_GRID_LEVEL } from './geographic-lod.js';
 import { geographicTemporalFrameAt, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
 import { GeographicSymbolPyramid } from './geographic-symbol-pyramid.js';
-import { intensityToStrength } from './precipitation-mapping.js';
+import { hailGradeForIntensity, intensityToStrength } from './precipitation-mapping.js';
 
 export const AREAS_HAZARD_BLOCK_SIZE = 4;
 export const AREAS_HAZARD_SQUALL_ICON_SIZE = 26;
@@ -65,7 +65,7 @@ function gradedIconSize(strength, anchors) {
 
 function markerScaleForIcon(icon, values) {
   if (icon === HAIL_IMAGE_ID) {
-    const size = gradedIconSize(intensityToStrength(values.hail, 'hail'), AREAS_HAZARD_HAIL_ICON_SIZES);
+    const size = AREAS_HAZARD_HAIL_ICON_SIZES[hailGradeForIntensity(values.hail)];
     return size / AREAS_HAZARD_HAIL_ICON_SIZES[2];
   }
   if (icon === STORM_IMAGE_ID) {

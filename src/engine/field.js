@@ -51,9 +51,12 @@ export function prepareFieldFrame(t, travelX, hasInitialHurricane = false) {
       preparedGaussian(travelX - 0.12, 0.55, mix(0.07, 0.115, waveA), mix(0.065, 0.115, waveB), -0.5, mix(0.10, 0.68, waveA))
     ],
     hail: [
-      preparedGaussian(travelX - 0.0950, 0.3050, 0.005, 0.005, -0.2, 0.38),
-      preparedGaussian(travelX - 0.0450, 0.3350, 0.005, 0.005, 0.7, 0.24),
-      preparedGaussian(travelX + 0.0050, 0.3150, 0.005, 0.005, -0.3, 0.18)
+      // The fine L14 lattice is about 0.012 synthetic units apart near this
+      // cluster. A one-spacing support keeps each pocket represented by
+      // neighboring stable samples as it translates through the grid.
+      preparedGaussian(travelX - 0.0950, 0.3050, 0.012, 0.012, -0.2, 0.38),
+      preparedGaussian(travelX - 0.0450, 0.3350, 0.012, 0.012, 0.7, 0.24),
+      preparedGaussian(travelX + 0.0050, 0.3150, 0.012, 0.012, -0.3, 0.18)
     ],
     // Prototype hazard family. These remain independent scalar channels; the
     // Areas presentation resolves them only after sampling and aggregation.
@@ -96,7 +99,7 @@ export function evaluatePreparedField(frame, x, y, output = {}) {
 
   output.rain = clamp((sumFirstComponents(frame.rain, 3, x, y) - evaluateGaussian(frame.rain[3], x, y)) * detail * frame.lifecycle);
   output.storm = clamp(sumComponents(frame.storm, x, y) * (0.96 + 0.045 * Math.sin(localX * 41 + y * 33)) * frame.lifecycle);
-  output.hail = clamp(sumComponents(frame.hail, x, y) * (0.97 + 0.035 * Math.sin(localX * 53 - y * 47)) * frame.lifecycle);
+  output.hail = clamp(sumComponents(frame.hail, x, y) * frame.lifecycle);
   output.squall = clamp(sumComponents(frame.squall, x, y) * (0.97 + 0.035 * Math.sin(localX * 37 + y * 29)) * frame.lifecycle);
   output.hurricane = clamp(sumComponents(frame.hurricane, x, y) * (0.98 + 0.02 * Math.sin(localX * 31 - y * 23)) * (frame.hasInitialHurricane ? 1 : 0));
   return output;

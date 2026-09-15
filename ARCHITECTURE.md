@@ -97,7 +97,7 @@ The renderer first evaluates/interpolates the channel values, aggregates the act
 | --- | --- | --- | --- |
 | Rain | reconstructed scalar field | blue precipitation bands | field-dependent |
 | Thunderstorm | aggregate procedural four-point star | magenta `#FF00FF` | smoothly interpolated `18–26 CSS px` severity range, with `22 CSS px` midpoint |
-| Hail | aggregate procedural filled hexagon | yellow `#FFD400` | smoothly interpolated `20–28 CSS px` severity range, with `24 CSS px` midpoint |
+| Hail | aggregate procedural filled hexagon | yellow `#FFD400` | three discrete severity sizes: `20`, `24`, or `28 CSS px` |
 | Squall | aggregate `squall-dark.svg` icon | supplied dark artwork | fixed `30 CSS px` |
 | Hurricane | aggregate `tornado-dark.svg` icon | supplied dark artwork | fixed `30 CSS px` |
 
@@ -164,7 +164,7 @@ In Areas, Thunderstorm is represented by a procedural magenta four-point star at
 
 ## Hail
 
-In Areas, Hail is represented by a procedural filled yellow hexagon at a deterministic aggregate block anchor. Its screen-space size interpolates smoothly across `20`, `24`, and `28 CSS px` severity anchors using the existing normalized presentation strength.
+In Areas, Hail is represented by a procedural filled yellow hexagon at a deterministic aggregate block anchor. Its screen-space size is selected from exactly `20`, `24`, or `28 CSS px` using fixed severity bands in the normalized Hail intensity domain. The size does not interpolate continuously with instantaneous sampled intensity.
 
 ## Hurricane
 
@@ -232,7 +232,7 @@ Coarse hazard values are not produced by selecting one child glyph.
 
 Each phenomenon channel is aggregated independently with the maximum child value. This preserves localized hazard channels instead of diluting them with surrounding zero-valued children.
 
-The presentation priority is applied only after these channel values have been produced. Storm and Hail marker sizes are then smoothly mapped through their `20`, `24`, and `28 CSS px` severity anchors; LOD does not alter those screen-space sizes.
+The presentation priority is applied only after these channel values have been produced. Storm marker sizes are smoothly mapped through their `20`, `24`, and `28 CSS px` severity anchors, while Hail selects one of those same three sizes discretely from fixed intensity bands. LOD does not alter those screen-space sizes.
 
 There is no post-resolution neighbor propagation or suppression pass. At each LOD, priority is resolved only within the aggregate block itself. Because the block hierarchy is nested, a higher-priority channel consumes a lower-priority channel only when their values merge into the same coarser parent block.
 
@@ -264,7 +264,7 @@ The overlay uses procedural Storm/Hail images plus the dark SVG assets in `asset
 - Presentation is resolved after aggregation with `hurricane > squall > hail > storm`, so at most one icon is shown per block.
 - Priority is resolved only within each aggregate block; coarser nested blocks naturally consume lower-priority channels when independent channel values merge into the same parent block. There is no neighbor propagation or suppression.
 - Existing presentation strength mappings and thresholds are reused.
-- Icons are MapLibre screen-space symbols: procedural Storm markers use a smoothly interpolated `18–26 CSS px` severity range, Hail markers use `20–28 CSS px`, and SVG Squall/Tornado markers remain fixed at `30 CSS px`. They remain screen-upright and use overlap settings that prevent label/icon collision from randomly suppressing them. SVGs and procedural shapes are rasterized at the device pixel ratio before registration.
+- Icons are MapLibre screen-space symbols: procedural Storm markers use a smoothly interpolated `18–26 CSS px` severity range, Hail markers use one of the discrete `20`, `24`, or `28 CSS px` sizes, and SVG Squall/Tornado markers remain fixed at `30 CSS px`. They remain screen-upright and use overlap settings that prevent label/icon collision from randomly suppressing them. SVGs and procedural shapes are rasterized at the device pixel ratio before registration.
 - Increasing geographic LOD creates more, geographically smaller aggregate blocks. It does not change icon size.
 
 During an LOD transition, the outgoing aggregate marker set remains fully opaque until the transition commits. It is then replaced by the incoming set at the same fixed icon size; marker sets are not crossfaded, scaled, or moved toward one another. Reversing a transition keeps the currently displayed set until the replacement commits.
