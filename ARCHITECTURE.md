@@ -96,10 +96,10 @@ The renderer first evaluates/interpolates the channel values, aggregates the act
 | Phenomenon | Areas presentation | Color/artwork | Current reference size behavior |
 | --- | --- | --- | --- |
 | Rain | reconstructed scalar field | blue precipitation bands | field-dependent |
-| Thunderstorm | aggregate procedural four-point star | magenta `#FF00FF` | smoothly interpolated `20–28 CSS px` severity range, with `24 CSS px` midpoint |
+| Thunderstorm | aggregate procedural four-point star | magenta `#FF00FF` | smoothly interpolated `18–26 CSS px` severity range, with `22 CSS px` midpoint |
 | Hail | aggregate procedural filled hexagon | yellow `#FFD400` | smoothly interpolated `20–28 CSS px` severity range, with `24 CSS px` midpoint |
-| Squall | aggregate `squall-dark.svg` icon | supplied dark artwork | fixed `32 CSS px` |
-| Hurricane | aggregate `tornado-dark.svg` icon | supplied dark artwork | fixed `32 CSS px` |
+| Squall | aggregate `squall-dark.svg` icon | supplied dark artwork | fixed `30 CSS px` |
+| Hurricane | aggregate `tornado-dark.svg` icon | supplied dark artwork | fixed `36 CSS px` |
 
 The Areas rendering paths are defined in `src/engine/geographic-scalar-layer.js` and `src/engine/geographic-areas-hazard-icons-layer.js`.
 
@@ -160,7 +160,7 @@ In Areas, Squall is represented by the supplied `assets/squall-dark.svg` artwork
 
 ## Thunderstorm
 
-In Areas, Thunderstorm is represented by a procedural magenta four-point star at a deterministic aggregate block anchor. Its screen-space size interpolates smoothly across `20`, `24`, and `28 CSS px` severity anchors using the existing normalized presentation strength.
+In Areas, Thunderstorm is represented by a procedural magenta four-point star at a deterministic aggregate block anchor. Its screen-space size interpolates smoothly across `18`, `22`, and `26 CSS px` severity anchors using the existing normalized presentation strength.
 
 ## Hail
 
@@ -264,10 +264,12 @@ The overlay uses procedural Storm/Hail images plus the dark SVG assets in `asset
 - Presentation is resolved after aggregation with `hurricane > squall > hail > storm`, so at most one icon is shown per block.
 - Priority is resolved only within each aggregate block; coarser nested blocks naturally consume lower-priority channels when independent channel values merge into the same parent block. There is no neighbor propagation or suppression.
 - Existing presentation strength mappings and thresholds are reused.
-- Icons are MapLibre screen-space symbols: procedural Storm/Hail markers use a smoothly interpolated `20–28 CSS px` severity range, while SVG Squall/Tornado markers remain fixed at `32 CSS px`. They remain screen-upright and use overlap settings that prevent label/icon collision from randomly suppressing them. SVGs and procedural shapes are rasterized at the device pixel ratio before registration.
+- Icons are MapLibre screen-space symbols: procedural Storm markers use a smoothly interpolated `18–26 CSS px` severity range, Hail markers use `20–28 CSS px`, and SVG Squall/Tornado markers remain fixed at `30`/`36 CSS px`. They remain screen-upright and use overlap settings that prevent label/icon collision from randomly suppressing them. SVGs and procedural shapes are rasterized at the device pixel ratio before registration.
 - Increasing geographic LOD creates more, geographically smaller aggregate blocks. It does not change icon size.
 
 During an LOD transition, the outgoing aggregate marker set remains fully opaque until the transition commits. It is then replaced by the incoming set at the same fixed icon size; marker sets are not crossfaded, scaled, or moved toward one another. Reversing a transition keeps the currently displayed set until the replacement commits.
+
+The scalar Areas field and hazard overlay use one captured normalized weather time for the duration of an active LOD transition, keeping a spatial transition from changing the displayed phenomenon classification. Explicit timeline scrubbing can update that shared snapshot; normal playback resumes from the current timeline time after the transition commits.
 
 Temporal interpolation is applied to the underlying channel values before each block's maximum and winner selection are evaluated. Weather changes can alter icon visibility or the winning marker type, but never move the aggregate anchor. The final display interval uses frame 179 → an explicit terminal state evaluated at `t = 1`, rather than frame 179 → frame 0. Only automatic playback uses the periodic wrap to begin a new frame-0 cycle.
 

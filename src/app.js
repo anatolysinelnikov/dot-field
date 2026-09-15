@@ -166,6 +166,22 @@ function commitSamples(level, samples) {
   areasHazardIconsLayer.setSamples(samples, state.time / LOOP_SECONDS);
 }
 
+function weatherTimeForUpdate() {
+  const currentTime = state.time / LOOP_SECONDS;
+  if (!state.lodTransition || state.scrubbing) {
+    if (state.lodTransition && state.scrubbing) state.lodTransition.weatherTime = currentTime;
+    return currentTime;
+  }
+  return state.lodTransition.weatherTime;
+}
+
+function updateWeatherAtCurrentTime() {
+  const time = state.time / LOOP_SECONDS;
+  const options = state.playing && !state.scrubbing ? { periodic: true } : undefined;
+  areasHazardIconsLayer.updateWeather(time, options);
+  scalarLayer.updateWeather(time, options);
+}
+
 function initializeWeatherLayer() {
   const styleLayers = map.getStyle().layers || [];
   const firstSymbol = styleLayers.find((layer) => layer.type === 'symbol');
@@ -279,15 +295,18 @@ function startAdjacentTransition(level, now) {
   const direction = Math.sign(level - state.lod.level);
   const toLevel = state.lod.level + direction;
   const toSamples = selectMercatorGridSamples(toLevel).samples;
+  const weatherTime = state.time / LOOP_SECONDS;
   state.lodTransition = {
     fromLevel: state.lod.level,
     toLevel,
     fromSamples: state.samples,
     toSamples,
     start: now,
-    rawProgress: 0
+    rawProgress: 0,
+    weatherTime
   };
-  areasHazardIconsLayer.setTransition(state.samples, toSamples, state.time / LOOP_SECONDS);
+  areasHazardIconsLayer.setTransition(state.samples, toSamples, weatherTime);
+  scalarLayer.updateWeather(weatherTime);
   wakeApplicationFrame();
 }
 
@@ -314,9 +333,11 @@ function rebuildSamples(level, now = performance.now()) {
       fromSamples: transition.toSamples,
       toSamples: transition.fromSamples,
       start: now - rawProgress * LOD_MORPH_SECONDS * 1000,
-      rawProgress
+      rawProgress,
+      weatherTime: transition.weatherTime
     };
-    areasHazardIconsLayer.setTransition(transition.toSamples, transition.fromSamples, state.time / LOOP_SECONDS);
+    areasHazardIconsLayer.setTransition(transition.toSamples, transition.fromSamples, transition.weatherTime);
+    scalarLayer.updateWeather(transition.weatherTime);
     wakeApplicationFrame();
   }
 }
@@ -330,6 +351,7 @@ function updateLODTransition(now) {
   state.lodTransition = null;
   commitSamples(transition.toLevel, transition.toSamples);
   if (state.desiredLevel !== state.lod.level) startAdjacentTransition(state.desiredLevel, now);
+  else updateWeatherAtCurrentTime();
 }
 
 function queueWeatherUpdate() {
@@ -338,7 +360,7 @@ function queueWeatherUpdate() {
   requestAnimationFrame(() => {
     state.weatherQueued = false;
     if (!state.mapReady) return;
-    const time = state.time / LOOP_SECONDS;
+    const time = weatherTimeForUpdate();
     areasHazardIconsLayer.updateWeather(time);
     scalarLayer.updateWeather(time);
   });
@@ -466,9 +488,10 @@ function frame(now) {
   // repaint scheduling to MapLibre prevents the application RAF from keeping
   // an otherwise idle map rendering continuously.
   if (state.mapReady && state.playing && !state.scrubbing) {
-    const normalizedTime = state.time / LOOP_SECONDS;
-    areasHazardIconsLayer.updateWeather(normalizedTime, { periodic: true });
-    scalarLayer.updateWeather(normalizedTime, { periodic: true });
+    const normalizedTime = weatherTimeForUpdate();
+    const options = state.lodTransition ? undefined : { periodic: true };
+    areasHazardIconsLayer.updateWeather(normalizedTime, options);
+    scalarLayer.updateWeather(normalizedTime, options);
   }
   updateLODTransition(now);
   if (!state.scrubbing) timeSlider.value = String(state.time / LOOP_SECONDS);

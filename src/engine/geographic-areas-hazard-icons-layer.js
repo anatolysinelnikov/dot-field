@@ -5,8 +5,9 @@ import { GeographicSymbolPyramid } from './geographic-symbol-pyramid.js';
 import { intensityToStrength } from './precipitation-mapping.js';
 
 export const AREAS_HAZARD_BLOCK_SIZE = 4;
-export const AREAS_HAZARD_ICON_SIZE = 32;
-export const AREAS_HAZARD_STORM_ICON_SIZES = Object.freeze([20, 24, 28]);
+export const AREAS_HAZARD_SQUALL_ICON_SIZE = 30;
+export const AREAS_HAZARD_TORNADO_ICON_SIZE = 36;
+export const AREAS_HAZARD_STORM_ICON_SIZES = Object.freeze([18, 22, 26]);
 export const AREAS_HAZARD_HAIL_ICON_SIZES = Object.freeze([20, 24, 28]);
 
 const MIN_ICON_PIXEL_RATIO = 1;
@@ -141,16 +142,28 @@ function aggregateBlock(block, state0, state1, progress) {
   }
 
   const values = { storm, hail, squall, hurricane };
+  const icon = resolveHazardIcon(values);
+  return icon ? { icon, values } : null;
+}
+
+function resolveHazardIcon(values) {
   const priority = [
-    [TORNADO_IMAGE_ID, hurricane, 'hurricane'],
-    [SQUALL_IMAGE_ID, squall, 'squall'],
-    [HAIL_IMAGE_ID, hail, 'hail'],
-    [STORM_IMAGE_ID, storm, 'storm']
+    [TORNADO_IMAGE_ID, 'hurricane'],
+    [SQUALL_IMAGE_ID, 'squall'],
+    [HAIL_IMAGE_ID, 'hail'],
+    [STORM_IMAGE_ID, 'storm']
   ];
-  for (const [icon, value, channel] of priority) {
-    if (intensityToStrength(value, channel) > 0) return { icon, values };
+  const winnerIndex = priority.findIndex(([, channel]) => intensityToStrength(values[channel], channel) > 0);
+  if (winnerIndex < 0) return null;
+
+  const [icon] = priority[winnerIndex];
+  for (let index = 0; index < winnerIndex; index++) {
+    const [, higherChannel] = priority[index];
+    if (intensityToStrength(values[higherChannel], higherChannel) > 0) {
+      throw new Error(`Hazard priority invariant violated: ${higherChannel} did not win aggregate block.`);
+    }
   }
-  return null;
+  return icon;
 }
 
 function featuresForLayout(layout, state0, state1, progress) {
@@ -210,8 +223,8 @@ export class GeographicAreasHazardIconsLayer {
       [HAIL_IMAGE_ID, makeProceduralIconImage(AREAS_HAZARD_HAIL_ICON_SIZES[2], pixelRatio, 'hexagon', '#FFD400')]
     ];
     Promise.all([
-      loadSvgImage(squallUrl, AREAS_HAZARD_ICON_SIZE, pixelRatio),
-      loadSvgImage(tornadoUrl, AREAS_HAZARD_ICON_SIZE, pixelRatio)
+      loadSvgImage(squallUrl, AREAS_HAZARD_SQUALL_ICON_SIZE, pixelRatio),
+      loadSvgImage(tornadoUrl, AREAS_HAZARD_TORNADO_ICON_SIZE, pixelRatio)
     ]).then(([squall, tornado]) => {
       for (const [id, image] of proceduralImages) addImageIfMissing(map, id, image, pixelRatio);
       addImageIfMissing(map, SQUALL_IMAGE_ID, squall, pixelRatio);
