@@ -238,13 +238,15 @@ There is no post-resolution neighbor propagation or suppression pass. At each LO
 
 ### Deterministic hierarchical LOD morph
 
-Adjacent Areas hazard levels are related through the canonical block grid. A coarse block with span `2S` contains a deterministic 2×2 group of up to four fine aggregate blocks with span `S`; parent coordinates are derived as `floor(fineGridX / 2)` and `floor(fineGridY / 2)`. Relationships are based on geographic block identity, never on screen positions or nearest-marker matching.
+Areas hazard levels are related through the canonical block grid. For an adjacent transition, a coarse block with span `2S` contains a deterministic 2×2 group of up to four fine aggregate blocks with span `S`. For a skipped-level transition with `D = fineLevel - coarseLevel`, one coarse block spans `2^D × 2^D` fine block slots, up to `4^D` children; parent coordinates are derived as `floor(fineGridX / 2^D)` and `floor(fineGridY / 2^D)`. Relationships are based on geographic block identity, never on screen positions or nearest-marker matching.
 
-On zoom out, every visible fine child moves from its existing geographic anchor toward its exact coarse parent anchor using smoothstep easing. The single parent marker is resolved normally from the coarse level's independently max-reduced channels and fixed `hurricane > squall > hail > storm` priority. Children do not create markers for empty fine blocks, and this motion changes presentation coordinates only: weather values, sample coordinates, aggregate membership, and winner semantics remain unchanged.
+On zoom out, every visible fine child moves directly from its existing geographic anchor toward its exact target coarse parent anchor using smoothstep easing. Intermediate LODs are not rendered as presentation stages. The single parent marker is resolved normally from the target level's independently max-reduced channels and fixed `hurricane > squall > hail > storm` priority. Children do not create markers for empty fine blocks, and this motion changes presentation coordinates only: weather values, sample coordinates, aggregate membership, and winner semantics remain unchanged.
 
 The final handoff uses a short `smoothstep(0.65, 1.0, collapsePhase)` opacity curve. Children stay fully visible through most of the travel, then fade out while the one resolved parent fades in near convergence. Icon sizes do not change during the morph. At collapse phases `0` and `1`, the result is exactly the normal fine and coarse marker set respectively.
 
-Zoom in uses the exact inverse of the same model: the coarse parent begins at full opacity at its anchor, fine children emerge from that point, and then travel outward to their stable fine anchors. Reversing an active transition uses the existing transformed raw progress, so `collapsePhase` and every child coordinate/opacity state continue without an anchor jump or duplicate-marker flash.
+Zoom in uses the exact inverse of the same model: the coarse parent begins at full opacity at its anchor, fine children emerge from that point, and then travel outward to their stable fine anchors. A direct split skips intermediate presentation levels just like a direct merge. Reversing an active transition uses the existing transformed raw progress, so `collapsePhase` and every child coordinate/opacity state continue without an anchor jump or duplicate-marker flash.
+
+Every direct LOD morph uses the same `LOD_MORPH_SECONDS` duration regardless of the number of skipped levels. The current active transition may finish before starting one direct transition from its committed target to a newer requested target; intermediate LODs are never queued individually.
 
 ## Areas
 
@@ -271,7 +273,7 @@ The overlay uses procedural Storm/Hail images plus the dark SVG assets in `asset
 - Icons are MapLibre screen-space symbols: procedural Storm markers use a smoothly interpolated `18–26 CSS px` severity range, Hail markers use one of the discrete `16`, `20`, or `24 CSS px` sizes, and SVG Squall/Tornado markers remain fixed at `28 CSS px`. They remain screen-upright and use overlap settings that prevent label/icon collision from randomly suppressing them. SVGs and procedural shapes are rasterized at the device pixel ratio before registration.
 - Increasing geographic LOD creates more, geographically smaller aggregate blocks. It does not change icon size.
 
-During an LOD transition, the overlay evaluates both adjacent aggregate levels at one captured weather time and applies the deterministic hierarchical merge/split morph described above. The shared weather snapshot remains frozen for the spatial transition; normal playback resumes from the current timeline time after the transition commits.
+During an LOD transition, the overlay evaluates the source and target aggregate levels at one captured weather time and applies the deterministic hierarchical merge/split morph described above. The shared weather snapshot remains frozen for the spatial transition; normal playback resumes from the current timeline time after the transition commits.
 
 The scalar Areas field and hazard overlay use one captured normalized weather time for the duration of an active LOD transition, keeping a spatial transition from changing the displayed phenomenon classification. Explicit timeline scrubbing can update that shared snapshot; normal playback resumes from the current timeline time after the transition commits.
 
@@ -297,7 +299,7 @@ Contains the reconstructed scalar precipitation Areas renderer and its temporal 
 
 ### `src/engine/geographic-areas-hazard-icons-layer.js`
 
-Contains the deterministic aggregate Storm/Hail/Squall/Tornado icon overlay, procedural/SVG image registration, winner selection, canonical 2×2 parent/child topology, and reversible LOD merge/split presentation.
+Contains the deterministic aggregate Storm/Hail/Squall/Tornado icon overlay, procedural/SVG image registration, winner selection, canonical multi-level parent/child topology, and reversible direct LOD merge/split presentation.
 
 ### `src/engine/geographic-symbol-pyramid.js`
 

@@ -131,22 +131,28 @@ function blockLayoutFor(samples, level) {
   };
 }
 
-export function blockParentIdFor(block) {
-  return `${Math.floor(block.gridX / 2)}:${Math.floor(block.gridY / 2)}`;
+export function blockParentIdFor(block, delta = 1) {
+  const factor = 2 ** delta;
+  return `${Math.floor(block.gridX / factor)}:${Math.floor(block.gridY / factor)}`;
 }
 
 export function hierarchyForLayouts(fineLayout, coarseLayout, activeChildIds = null) {
+  const delta = fineLayout.level - coarseLayout.level;
+  if (delta < 1) throw new Error('Hazard hierarchy requires a finer source level than its target level.');
+  const maximumChildren = 4 ** delta;
   const coarseBlocksById = new Map(coarseLayout.blocks.map((block) => [block.id, block]));
   const childrenByParentId = new Map();
 
   for (const child of fineLayout.blocks) {
     if (activeChildIds && !activeChildIds.has(child.id)) continue;
-    const parentId = blockParentIdFor(child);
+    const parentId = blockParentIdFor(child, delta);
     const parent = coarseBlocksById.get(parentId);
     if (!parent) throw new Error(`Fine hazard block ${child.id} has no coarse parent ${parentId}.`);
     const children = childrenByParentId.get(parentId) || [];
     children.push(child);
-    if (children.length > 4) throw new Error(`Coarse hazard block ${parentId} has more than four fine children.`);
+    if (children.length > maximumChildren) {
+      throw new Error(`Coarse hazard block ${parentId} has more than ${maximumChildren} fine children.`);
+    }
     childrenByParentId.set(parentId, children);
   }
 

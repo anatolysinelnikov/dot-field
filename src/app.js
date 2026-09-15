@@ -305,9 +305,8 @@ function initializeAreasWeather() {
   if (state.playing) wakeApplicationFrame();
 }
 
-function startAdjacentTransition(level, now) {
-  const direction = Math.sign(level - state.lod.level);
-  const toLevel = state.lod.level + direction;
+function startLODTransition(level, now) {
+  const toLevel = level;
   const toSamples = selectMercatorGridSamples(toLevel).samples;
   const weatherTime = state.time / LOOP_SECONDS;
   state.lodTransition = {
@@ -334,7 +333,7 @@ function rebuildSamples(level, now = performance.now()) {
   }
   const transition = state.lodTransition;
   if (!transition) {
-    if (state.lod.level !== level) startAdjacentTransition(level, now);
+    if (state.lod.level !== level) startLODTransition(level, now);
     return;
   }
   const direction = Math.sign(transition.toLevel - transition.fromLevel);
@@ -365,7 +364,7 @@ function updateLODTransition(now) {
   if (rawProgress < 1) return;
   state.lodTransition = null;
   commitSamples(transition.toLevel, transition.toSamples);
-  if (state.desiredLevel !== state.lod.level) startAdjacentTransition(state.desiredLevel, now);
+  if (state.desiredLevel !== state.lod.level) startLODTransition(state.desiredLevel, now);
   else updateWeatherAtCurrentTime();
 }
 
