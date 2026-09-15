@@ -1,8 +1,7 @@
 import { geographicPreparedIntensityAt, geographicToSynthetic } from './geography.js';
 import { MAX_DISPLAY_GRID_LEVEL, MAX_GRID_LEVEL, MIN_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
-import { intensityToRadius, strongPrecipitationIntensity } from './precipitation-mapping.js';
 
-export const REFERENCE_GRID_LEVEL = 13;
+export const REFERENCE_GRID_LEVEL = MAX_DISPLAY_GRID_LEVEL;
 export const STORM_INNER_RATIO = 0.38;
 const HAZARD_CHANNELS = ['storm', 'hail', 'squall', 'hurricane'];
 
@@ -35,39 +34,24 @@ function buildParentTopology(fine, coarse) {
   return { childIndices, parentIndexByChild };
 }
 
-function buildDirectPairs(lower, higher) {
-  const higherIndices = new Map(higher.samples.map((sample, index) => [sample.id, index]));
-  const lowerIndices = new Map(lower.samples.map((sample, index) => [sample.id, index]));
-  const pairs = [];
-  for (let index = 0; index < lower.samples.length; index++) pairs.push(index, higherIndices.get(lower.samples[index].id) ?? -1);
-  for (let index = 0; index < higher.samples.length; index++) {
-    if (!lowerIndices.has(higher.samples[index].id)) pairs.push(-1, index);
-  }
-  return new Int32Array(pairs);
-}
-
 function makeState(length, reusable) {
-  if (reusable?.rainRadius.length === length && reusable.hazardValues) return reusable;
+  if (reusable?.hazardValues?.storm.length === length) return reusable;
   return {
-    rainRadius: new Float64Array(length),
-    strongRadius: new Float64Array(length),
     hazardValues: Object.fromEntries(HAZARD_CHANNELS.map((channel) => [channel, new Float32Array(length)]))
   };
 }
 
 function evaluateDirect(level, frame, reusable) {
   const state = makeState(level.samples.length, reusable);
-  const { rainRadius, strongRadius, hazardValues } = state;
-  const value = { rain: 0, storm: 0, hail: 0, squall: 0, hurricane: 0 };
+  const { hazardValues } = state;
+  const value = { storm: 0, hail: 0, squall: 0, hurricane: 0 };
   const point = { x: 0, y: 0 };
-  const { fieldPoints, samples } = level;
+  const { fieldPoints } = level;
 
-  for (let index = 0; index < samples.length; index++) {
+  for (let index = 0; index < level.samples.length; index++) {
     point.x = fieldPoints[index * 2];
     point.y = fieldPoints[index * 2 + 1];
     geographicPreparedIntensityAt(frame, point, value);
-    rainRadius[index] = intensityToRadius(value.rain, samples[index].spacing, 'rain');
-    strongRadius[index] = intensityToRadius(strongPrecipitationIntensity(value.rain), samples[index].spacing, 'rain');
     for (const channel of HAZARD_CHANNELS) hazardValues[channel][index] = value[channel];
   }
   return state;
@@ -75,29 +59,19 @@ function evaluateDirect(level, frame, reusable) {
 
 function reduceState(parent, children, childIndices, reusable) {
   const state = makeState(parent.samples.length, reusable);
-  const { rainRadius, strongRadius, hazardValues } = state;
-  const childRain = children.rainRadius;
-  const childStrong = children.strongRadius;
+  const { hazardValues } = state;
   const childHazards = children.hazardValues;
 
   for (let parentIndex = 0; parentIndex < parent.samples.length; parentIndex++) {
-    let rainArea = 0;
-    let strongArea = 0;
     const indices = childIndices[parentIndex];
     const hazardMaxima = { storm: 0, hail: 0, squall: 0, hurricane: 0 };
     for (let childPosition = 0; childPosition < indices.length; childPosition++) {
       const childIndex = indices[childPosition];
-      const childRainRadius = childRain[childIndex];
-      const childStrongRadius = childStrong[childIndex];
-      rainArea += childRainRadius * childRainRadius;
-      strongArea += childStrongRadius * childStrongRadius;
       for (const channel of HAZARD_CHANNELS) {
         const value = childHazards[channel][childIndex];
         hazardMaxima[channel] = Math.max(hazardMaxima[channel], value);
       }
     }
-    rainRadius[parentIndex] = Math.sqrt(rainArea);
-    strongRadius[parentIndex] = Math.sqrt(strongArea);
     for (const channel of HAZARD_CHANNELS) hazardValues[channel][parentIndex] = hazardMaxima[channel];
   }
   return state;
@@ -153,11 +127,6 @@ export class GeographicSymbolPyramid {
       this.parents.set(level + 1, topology);
     }
 
-    this.directPairs = new Map();
-    for (let level = REFERENCE_GRID_LEVEL; level < MAX_DISPLAY_GRID_LEVEL; level++) {
-      this.directPairs.set(level + 1, buildDirectPairs(this.levels.get(level), this.levels.get(level + 1)));
-    }
-
     this.lastEvaluationCounts = new Uint32Array(MAX_DISPLAY_GRID_LEVEL + 1);
   }
 
@@ -171,11 +140,6 @@ export class GeographicSymbolPyramid {
     const childIndex = this.levels.get(level).samplesById.get(childId);
     if (childIndex === undefined) return null;
     return this.levels.get(level - 1).samples[topology.parentIndexByChild[childIndex]].id;
-  }
-
-  directPairsFor(lowerLevel, higherLevel) {
-    if (higherLevel !== lowerLevel + 1) throw new Error('Direct grid pairs require adjacent levels.');
-    return this.directPairs.get(higherLevel);
   }
 
   evaluate(requestedLevels, frame, reusableStates = null) {

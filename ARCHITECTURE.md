@@ -206,9 +206,11 @@ This keeps the presentation tied to the weather data throughout the animation.
 
 The Areas hazard overlay uses a deterministic geographic symbol pyramid.
 
-Reference evaluation is performed at L13 for the coarser hierarchy:
+Hazard reference evaluation is performed at L14, then reduced through the nested hierarchy:
 
 ```text
+L14
+ ↓
 L13
  ↓
 L12
@@ -218,7 +220,7 @@ L11
 L10
 ```
 
-L14 is evaluated directly.
+L14 is the only level evaluated directly for the Areas hazard hierarchy. Each lower level is produced from its child level with independent per-channel maximum reduction. Areas rain-area reduction remains separate from this hazard hierarchy.
 
 Coarse hazard values are not produced by selecting one child glyph.
 
