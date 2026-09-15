@@ -75,6 +75,10 @@ const MAPTILER_WATER_LABEL_IDS = [
 const MAPTILER_WATER_WASH_ID = 'geographic-water-wash';
 const MAPTILER_WATER_BOUNDARY_ID = 'geographic-water-boundaries';
 const MAPTILER_WATER_TINT_ID = 'geographic-water-tint';
+const UPPER_CONTEXT_IDS = new Set([
+  ...MAPTILER_WATER_LABEL_IDS,
+  ...MAPTILER_GEOGRAPHIC_LABEL_IDS
+]);
 const REFERENCE_LATITUDE = WEATHER_REGION.center[1];
 const INITIAL_RAW_MAX_ZOOM = rawZoomForLogicalSamplingZoom(
   MAX_LOGICAL_SAMPLING_ZOOM,
@@ -96,7 +100,7 @@ const map = new window.maplibregl.Map({
 map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'top-right');
 
 const state = {
-  playing: true,
+  playing: false,
   time: 0,
   lastFrame: performance.now(),
   scrubbing: false,
@@ -115,6 +119,15 @@ const areasHazardIconsLayer = new GeographicAreasHazardIconsLayer();
 const scalarLayer = new GeographicScalarLayer();
 const geographicLayers = [scalarLayer, areasHazardIconsLayer];
 let lastMapErrorSignature = '';
+
+function reorderAreasHazardLayers() {
+  const firstUpperContextLayer = (map.getStyle().layers || []).find((layer) => UPPER_CONTEXT_IDS.has(layer.id));
+  for (const layerId of areasHazardIconsLayer.symbolLayerIds) {
+    if (map.getLayer(layerId)) map.moveLayer(layerId, firstUpperContextLayer?.id);
+  }
+}
+
+areasHazardIconsLayer.onLayersReady = reorderAreasHazardLayers;
 
 function cameraState() {
   return {
@@ -249,22 +262,23 @@ function initializeWeatherLayer() {
     map.setLayerZoomRange(regionalBoundaryLayer.id, regionalBoundaryLayer.minzoom ?? 0, 24);
   }
 
-  const upperContextIds = new Set([
-    ...MAPTILER_WATER_LABEL_IDS,
-    ...MAPTILER_ADMIN_BOUNDARY_IDS,
-    ...MAPTILER_GEOGRAPHIC_LABEL_IDS
-  ]);
   const symbolIds = (map.getStyle().layers || [])
-    .filter((layer) => layer.type === 'symbol' && !upperContextIds.has(layer.id))
+    .filter((layer) => layer.type === 'symbol' && !UPPER_CONTEXT_IDS.has(layer.id))
     .map((layer) => layer.id);
   for (const id of symbolIds) {
     if (map.getLayer(id) && map.getLayer(areasHazardIconsLayer.id)) map.moveLayer(id, areasHazardIconsLayer.id);
   }
 
-  const upperOrder = [
+  const lowerContextOrder = [
     MAPTILER_WATER_TINT_ID,
     MAPTILER_WATER_BOUNDARY_ID,
-    ...MAPTILER_ADMIN_BOUNDARY_IDS,
+    ...MAPTILER_ADMIN_BOUNDARY_IDS
+  ];
+  for (const id of lowerContextOrder) {
+    if (map.getLayer(id) && map.getLayer(areasHazardIconsLayer.id)) map.moveLayer(id, areasHazardIconsLayer.id);
+  }
+
+  const upperOrder = [
     ...MAPTILER_WATER_LABEL_IDS,
     ...MAPTILER_GEOGRAPHIC_LABEL_IDS
   ];

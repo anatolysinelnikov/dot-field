@@ -6,7 +6,7 @@ import { intensityToStrength } from './precipitation-mapping.js';
 
 export const AREAS_HAZARD_BLOCK_SIZE = 4;
 export const AREAS_HAZARD_SQUALL_ICON_SIZE = 30;
-export const AREAS_HAZARD_TORNADO_ICON_SIZE = 36;
+export const AREAS_HAZARD_TORNADO_ICON_SIZE = 30;
 export const AREAS_HAZARD_STORM_ICON_SIZES = Object.freeze([18, 22, 26]);
 export const AREAS_HAZARD_HAIL_ICON_SIZES = Object.freeze([20, 24, 28]);
 
@@ -210,6 +210,7 @@ export class GeographicAreasHazardIconsLayer {
     this.active = false;
     this.data = { type: 'FeatureCollection', features: [] };
     this.layersReady = false;
+    this.onLayersReady = null;
   }
 
   onAdd(map) {
@@ -250,6 +251,7 @@ export class GeographicAreasHazardIconsLayer {
       }
       this.layersReady = true;
       this.setLayerVisibility();
+      this.onLayersReady?.();
       this.refreshSource();
     }).catch((error) => {
       console.error('Areas hazard icon assets failed to load.', error instanceof Error ? error.message : error);
