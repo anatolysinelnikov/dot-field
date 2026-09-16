@@ -392,6 +392,14 @@ function updateTimelineFromPointer(clientX) {
 }
 
 let scrubbingPointerId = null;
+function finishTimelineScrub(pointerId) {
+  if (pointerId !== scrubbingPointerId) return;
+  const activePointerId = scrubbingPointerId;
+  scrubbingPointerId = null;
+  state.scrubbing = false;
+  if (timeSlider.hasPointerCapture(activePointerId)) timeSlider.releasePointerCapture(activePointerId);
+}
+
 playPause.addEventListener('click', () => setPlaying(!state.playing));
 zoomIn.addEventListener('click', () => map.zoomIn());
 zoomOut.addEventListener('click', () => map.zoomOut());
@@ -407,6 +415,8 @@ function resetMapView() {
 }
 resetView.addEventListener('click', resetMapView);
 timeSlider.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  timeSlider.focus({ preventScroll: true });
   if (state.playing) setPlaying(false);
   state.scrubbing = true;
   scrubbingPointerId = event.pointerId;
@@ -420,12 +430,9 @@ timeSlider.addEventListener('input', () => {
   state.time = Number(timeSlider.value) * LOOP_SECONDS;
   queueWeatherUpdate();
 });
-for (const eventName of ['pointerup', 'pointercancel']) {
+for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
   timeSlider.addEventListener(eventName, (event) => {
-    if (event.pointerId !== scrubbingPointerId) return;
-    state.scrubbing = false;
-    if (timeSlider.hasPointerCapture(event.pointerId)) timeSlider.releasePointerCapture(event.pointerId);
-    scrubbingPointerId = null;
+    finishTimelineScrub(event.pointerId);
   });
 }
 map.on('style.load', () => {
