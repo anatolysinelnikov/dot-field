@@ -62,9 +62,9 @@ export function createAreasReconstructionWorkspace(sourceWidth, sourceHeight, su
   };
 }
 
-// Writes one scalar channel into an interleaved texture buffer. Original L14
-// nodes are copied exactly; only between-node values are cubic reconstructed.
-export function reconstructAreasChannel(source, workspace, target, targetChannel, targetStride) {
+// Writes reconstructed rain into a scalar buffer. Original L14 nodes are
+// copied exactly; only between-node values are cubic reconstructed.
+export function reconstructAreasChannel(source, workspace, target) {
   const { sourceWidth, sourceHeight, subdivisions, width, height, horizontal, horizontalSlopes, verticalSlopes, denseSourceColumns } = workspace;
 
   for (let row = 0; row < sourceHeight; row++) {
@@ -88,7 +88,7 @@ export function reconstructAreasChannel(source, workspace, target, targetChannel
     for (let column = 0; column < width; column++) verticalSlopes[row * width + column] = horizontalColumnSlope(horizontal, width, sourceHeight, row, column);
   }
   for (let column = 0; column < width; column++) {
-    for (let row = 0; row < sourceHeight; row++) target[(row * subdivisions * width + column) * targetStride + targetChannel] = horizontal[row * width + column];
+    for (let row = 0; row < sourceHeight; row++) target[row * subdivisions * width + column] = horizontal[row * width + column];
     for (let row = 0; row < sourceHeight - 1; row++) {
       const first = horizontal[row * width + column];
       const second = horizontal[(row + 1) * width + column];
@@ -99,7 +99,7 @@ export function reconstructAreasChannel(source, workspace, target, targetChannel
       const bottomOffset = topOffset + sourceWidth;
       for (let step = 1; step < subdivisions; step++) {
         const value = hermite(first, second, firstSlope, secondSlope, step / subdivisions);
-        target[((row * subdivisions + step) * width + column) * targetStride + targetChannel] = clampCell(
+        target[(row * subdivisions + step) * width + column] = clampCell(
           value,
           source[topOffset], source[topOffset + 1], source[bottomOffset], source[bottomOffset + 1]
         );

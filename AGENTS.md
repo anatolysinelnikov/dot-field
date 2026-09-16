@@ -12,7 +12,7 @@ Dot Field is a visual and behavioral reference prototype. Prefer the simplest ac
 ## Core invariants
 
 - Areas is the sole active precipitation representation. Rain is its scalar field; hazards are separate aggregate symbols.
-- Weather channels remain independent until presentation. Interpolate values before aggregation and winner resolution.
+- Hazard LOD states are independently max-reduced from L14 for each discrete temporal keyframe. At the selected level, interpolate values before final block aggregation and visible winner resolution; winner resolution is presentation-time and does not destroy the independent channels.
 - Geographic samples and aggregate anchors are deterministic and spatially stable. Camera movement, time, and LOD must not randomly relocate them.
 - Only one hazard symbol is shown per aggregate block, with priority `hurricane > squall > hail > storm`.
 - Preserve temporal continuity and the current direct LOD merge/split behavior unless a task explicitly changes them.
@@ -26,6 +26,7 @@ Dot Field is a visual and behavioral reference prototype. Prefer the simplest ac
 
 ## Change discipline
 
+- Verify files, functions, constants, and APIs in the selected code; do not invent them.
 - Prefer small, focused changes. Do not add unrelated dependencies, tooling, or rendering architecture.
 - Preserve observable behavior when simplifying implementation details.
 - If a change materially alters the visualization contract, update `ARCHITECTURE.md` in the same change.

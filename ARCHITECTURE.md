@@ -11,9 +11,9 @@ independent weather channels
         ↓
 deterministic geographic samples
         ↓
-temporal interpolation
+Areas rain reconstruction  +  per-keyframe hazard LOD reduction
         ↓
-Areas rain reconstruction  +  hazard aggregation and winner selection
+selected-level temporal interpolation, block aggregation, and winner resolution
         ↓
 scalar rain surface        +  aggregate hazard symbols
 ```
@@ -22,7 +22,7 @@ Areas is the only active precipitation representation. Rain is rendered by the s
 
 ## 3. Weather data model
 
-The input channels are independent scalar values: rain, storm, hail, squall, and hurricane. They contain no colors, glyphs, or other presentation data. Interpolation happens before hazards are aggregated and a visible winner is resolved.
+The input channels are independent scalar values: rain, storm, hail, squall, and hurricane. They contain no colors, glyphs, or other presentation data. Hazard LOD states are evaluated from L14 and independently max-reduced per discrete temporal keyframe. At the selected level, temporal values are interpolated before final block aggregation and visible winner resolution. Winner resolution happens at presentation time and does not destroy the independent channels.
 
 `src/engine/field.js` generates deterministic synthetic values for the demo. Its shapes, trajectories, and lifecycle are demonstration data, not requirements for another data source.
 
@@ -44,13 +44,13 @@ For a settled aggregate block, priority is `hurricane > squall > hail > storm`; 
 - Weather values vary over time; sample identity does not.
 - The prototype starts paused at frame 0.
 - The final timeline segment interpolates frame 179 to an explicit terminal state at `t = 1`. Automatic playback wraps to frame 0 only after reaching the endpoint.
-- Hazard icons have fixed screen-space sizing across LOD. LOD changes their geographic density, not their icon size.
+- Icon sizing is defined in screen space; LOD applies no additional icon scale. Resolved Storm/Hail size can still vary with severity or aggregated value.
 
 ## 6. Hazard aggregation and priority
 
-Hazard values are evaluated directly at the L14 reference grid. Each channel is independently max-reduced through the nested hierarchy to L7. At a requested LOD, the aggregate layer groups samples into geographic blocks and uses a deterministic average geographic anchor for each block.
+Hazard values are evaluated directly at the L14 reference grid. For each discrete temporal keyframe, each channel is independently max-reduced through the nested hierarchy to L7. At a requested LOD, the aggregate layer groups samples into geographic blocks and uses a deterministic average geographic anchor for each block.
 
-For each block, the interpolated channel values are aggregated independently. The winner is then selected in the fixed priority order. A higher-priority channel suppresses a lower-priority symbol only when both resolve within the same block; there is no neighbor propagation. Areas rain reconstruction is separate from the hazard hierarchy.
+At the selected level, temporal values are interpolated before final block aggregation. The visible winner is resolved at presentation time in the fixed priority order, without destroying the independent channel values. A higher-priority channel suppresses a lower-priority symbol only when both resolve within the same block; there is no neighbor propagation. Areas rain reconstruction is separate from the hazard hierarchy.
 
 ## 7. LOD behavior and merge/split presentation
 

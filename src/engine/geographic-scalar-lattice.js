@@ -1,4 +1,4 @@
-import { AREA_PRECIPITATION_BANDS } from './config.js';
+import { AREA_RAIN_THRESHOLDS } from './config.js';
 import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographicToSynthetic } from './geography.js';
 import { MAX_DISPLAY_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
 
@@ -9,8 +9,6 @@ const SCALAR_SMOOTH_RADIUS = 3;
 const SCALAR_SMOOTH_PASSES = 2;
 
 const HISTOGRAM_BINS = 1024;
-export const AREA_RAIN_THRESHOLDS = Object.freeze(AREA_PRECIPITATION_BANDS.map(({ threshold }) => threshold));
-
 function makeState(length) {
   return {
     raw: { rain: new Float32Array(length) },

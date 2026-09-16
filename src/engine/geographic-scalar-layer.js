@@ -1,6 +1,7 @@
 import { createAreasReconstructionWorkspace, reconstructAreasChannel } from './areas-reconstruction.js';
+import { AREA_RAIN_THRESHOLDS } from './config.js';
 import { geographicTemporalFrameAt, setGeographicProjection, TEMPORAL_FRAME_COUNT } from './geographic-layer-utils.js';
-import { AREA_RAIN_THRESHOLDS, GeographicScalarLattice } from './geographic-scalar-lattice.js';
+import { GeographicScalarLattice } from './geographic-scalar-lattice.js';
 
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -145,8 +146,8 @@ export class GeographicScalarLayer {
   }
 
   rebuildRainTextureValues(state0, state1) {
-    reconstructAreasChannel(state0.smooth.rain, this.areaReconstruction, this.textureValues0, 0, 1);
-    reconstructAreasChannel(state1.smooth.rain, this.areaReconstruction, this.textureValues1, 0, 1);
+    reconstructAreasChannel(state0.smooth.rain, this.areaReconstruction, this.textureValues0);
+    reconstructAreasChannel(state1.smooth.rain, this.areaReconstruction, this.textureValues1);
     this.texturesDirty[0] = true;
     this.texturesDirty[1] = true;
   }
@@ -155,7 +156,7 @@ export class GeographicScalarLayer {
     [this.textureValues0, this.textureValues1] = [this.textureValues1, this.textureValues0];
     if (this.valueTextures) [this.valueTextures[0], this.valueTextures[1]] = [this.valueTextures[1], this.valueTextures[0]];
     this.texturesDirty[0] = this.texturesDirty[1];
-    reconstructAreasChannel(state1.smooth.rain, this.areaReconstruction, this.textureValues1, 0, 1);
+    reconstructAreasChannel(state1.smooth.rain, this.areaReconstruction, this.textureValues1);
     this.texturesDirty[1] = true;
   }
 
