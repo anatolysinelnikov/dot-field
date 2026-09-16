@@ -1,5 +1,5 @@
 import { LOD_MORPH_SECONDS, LOOP_SECONDS } from './engine/config.js';
-import { clamp, smoothstep } from './engine/math.js';
+import { clamp } from './engine/math.js';
 import { WEATHER_REGION } from './engine/geography.js';
 import {
   MAX_LOGICAL_SAMPLING_ZOOM,
@@ -72,7 +72,6 @@ const MAPTILER_WATER_LABEL_IDS = [
   'Pond labels',
   'Lake labels'
 ];
-const MAPTILER_WATER_WASH_ID = 'geographic-water-wash';
 const MAPTILER_WATER_BOUNDARY_ID = 'geographic-water-boundaries';
 const MAPTILER_WATER_TINT_ID = 'geographic-water-tint';
 const UPPER_CONTEXT_IDS = new Set([
@@ -105,7 +104,7 @@ const state = {
   lastFrame: performance.now(),
   scrubbing: false,
   samples: [],
-  lod: { level: null, leafCount: 0 },
+  lod: { level: null },
   desiredLevel: null,
   lodTransition: null,
   logicalSamplingZoom: WEATHER_REGION.initialZoom,
@@ -203,8 +202,6 @@ function initializeWeatherLayer() {
   }
 
   const waterLayer = styleLayers.find((layer) => layer.id === 'Water' && layer.type === 'fill');
-  if (map.getLayer(MAPTILER_WATER_WASH_ID)) map.removeLayer(MAPTILER_WATER_WASH_ID);
-
   const nativeWaterShadow = styleLayers.find((layer) => layer.id === 'Water shadow');
   if (nativeWaterShadow && map.getLayer(nativeWaterShadow.id)) {
     map.setLayoutProperty(nativeWaterShadow.id, 'visibility', 'none');
@@ -295,10 +292,7 @@ function initializeWeatherLayer() {
 
 function initializeAreasWeather() {
   const time = state.time / LOOP_SECONDS;
-  scalarLayer.setPresentation('areas', true, time);
-  scalarLayer.updateWeather(time);
   areasHazardIconsLayer.setActive(true);
-  areasHazardIconsLayer.updateWeather(time);
   scalarLayer.setActive(true);
   scalarLayer.updateWeather(time);
   map.triggerRepaint();

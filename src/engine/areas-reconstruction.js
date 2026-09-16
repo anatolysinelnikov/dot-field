@@ -2,7 +2,7 @@
 // it must retain the source samples exactly and cannot introduce B-spline-like
 // ringing around small hazards. This uses separable monotone cubic Hermite
 // interpolation (PCHIP-style harmonic slopes) on one fixed dense lattice.
-export const AREA_RECONSTRUCTION_SUBDIVISIONS = 2;
+const AREA_RECONSTRUCTION_SUBDIVISIONS = 2;
 
 function endpointSlope(first, second, third) {
   const firstDelta = second - first;
@@ -108,12 +108,4 @@ export function reconstructAreasChannel(source, workspace, target, targetChannel
   }
 
   return { width, height };
-}
-
-export function reconstructAreasChannels(channels, workspace, target, targetStride = 4) {
-  reconstructAreasChannel(channels.rain, workspace, target, 0, targetStride);
-  reconstructAreasChannel(channels.storm, workspace, target, 1, targetStride);
-  reconstructAreasChannel(channels.hail, workspace, target, 2, targetStride);
-  reconstructAreasChannel(channels.squall, workspace, target, 3, targetStride);
-  return workspace;
 }

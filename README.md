@@ -1,40 +1,22 @@
 # Dot Field
 
-Интерактивный прототип визуализации осадков и погодных явлений на географической карте.
+Dot Field is a visual and behavioral reference prototype for deterministic geographic weather visualization. It demonstrates one active precipitation view: **Areas**.
 
-Прототип служит референсом визуального и поведенческого представления явлений: их формы, цвета, размеры, приоритеты, пространственная стабильность и поведение во времени.
+[Open the prototype](https://anatolysinelnikov.github.io/dot-field/)
 
-🔗 **Прототип:**  
-https://anatolysinelnikov.github.io/dot-field/
+Rain is rendered as the scalar Areas field. Storm, Hail, Squall, and Hurricane are separate aggregate symbols; weather channels stay independent until presentation. Geographic samples and block anchors are deterministic. LOD changes symbol density while keeping icon screen size fixed.
 
-## Погодные явления
+The winner priority is `hurricane > squall > hail > storm`, with this current presentation:
 
-Каждое явление представлено отдельным data channel и преобразуется в символ только на этапе отображения:
+| Channel | Symbol | Size |
+| --- | --- | --- |
+| Storm | Magenta narrow four-point star | Smooth 18–26 CSS px, with 22 px midpoint |
+| Hail | Yellow filled hexagon | Discrete 16 / 20 / 24 CSS px |
+| Squall | `squall-dark.svg` | Fixed 28 CSS px |
+| Hurricane | `tornado-dark.svg` | Fixed 28 CSS px |
 
-- 🟣 **Гроза** — агрегированная процедурная четырёхконечная звезда
-- 🟡 **Град** — агрегированный процедурный заполненный шестиугольник
-- 🟠 **Шквал** — агрегированная иконка `squall-dark.svg`
-- 🔴 **Ураган** — агрегированная иконка `tornado-dark.svg`
-
-Для Areas-иконок действует фиксированный приоритет:
-
-**🔴 ураган → 🟠 шквал → 🟡 град → 🟣 гроза**
-
-В одном агрегированном блоке одновременно отображается только одна hazard-иконка.
-
-Размер иконок: для грозы/града используется плавный диапазон 20–28 CSS px (средняя опорная точка 24 px), а для шквала/урагана — фиксированные 32 CSS px. При изменении LOD меняется плотность маркеров, но не их экранный размер.
-
-## Представления
-
-Прототип использует только представление **Areas**: осадки реконструируются в дискретное scalar-поле, а все четыре явления отображаются как разреженные агрегированные screen-space иконки со стабильными географическими anchor-позициями.
-
-Анимация изменяет значения погодного поля во времени, но не перемещает и не пересоздаёт пространственные sample positions случайным образом.
-
-## Как это устроено
-
-Подробности визуального контракта и reference implementation описаны в:
-
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — data flow, sampling, temporal interpolation, LOD, glyph geometry, размеры, цвета и priority resolution;
-- [`AGENTS.md`](AGENTS.md) — repository-level инструкции для анализа и изменения визуализации.
+The internal channel is named `hurricane`; its current prototype artwork is Tornado artwork.
 
 ![Dot Field](assets/dot-field.jpg)
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the observable behavior and [AGENTS.md](AGENTS.md) for repository guidance.

@@ -1,42 +1,22 @@
 import { AREA_PRECIPITATION_BANDS } from './config.js';
 import { prepareGeographicFieldFrame, geographicPreparedIntensityAtXY, geographicToSynthetic } from './geography.js';
 import { MAX_DISPLAY_GRID_LEVEL, selectMercatorGridSamples } from './geographic-lod.js';
-import { INTENSITY_THRESHOLDS, SQUALL_GRADE_THRESHOLDS } from './precipitation-mapping.js';
 
-// Blur and Areas share one L14 lattice.  Unlike the display LOD, this grid is
-// never selected from the camera: its vertices, cells, and identities persist
-// for the life of the map layer.
-export const SCALAR_GRID_LEVEL = MAX_DISPLAY_GRID_LEVEL;
-export const SCALAR_SMOOTH_RADIUS = 3;
-export const SCALAR_SMOOTH_PASSES = 2;
-export const AREA_STORM_THRESHOLD = 0.075 * 0.45;
-export const AREA_HAIL_THRESHOLD = 0.11 * 0.45;
-export const AREA_SQUALL_THRESHOLDS = SQUALL_GRADE_THRESHOLDS;
-export const AREA_HURRICANE_THRESHOLD = INTENSITY_THRESHOLDS.hurricane;
+// Areas rain uses one fixed L14 lattice. Its vertices, cells, and identities
+// persist for the life of the map layer.
+const SCALAR_GRID_LEVEL = MAX_DISPLAY_GRID_LEVEL;
+const SCALAR_SMOOTH_RADIUS = 3;
+const SCALAR_SMOOTH_PASSES = 2;
 
 const HISTOGRAM_BINS = 1024;
 export const AREA_RAIN_THRESHOLDS = Object.freeze(AREA_PRECIPITATION_BANDS.map(({ threshold }) => threshold));
 
-function makeChannels(length) {
-  return {
-    rain: new Float32Array(length),
-    storm: new Float32Array(length),
-    hail: new Float32Array(length),
-    squall: new Float32Array(length),
-    hurricane: new Float32Array(length)
-  };
-}
-
 function makeState(length) {
   return {
-    raw: makeChannels(length),
+    raw: { rain: new Float32Array(length) },
     smooth: null,
     smoothReady: false,
-    rainThresholds: new Float32Array(AREA_RAIN_THRESHOLDS),
-    stormThreshold: AREA_STORM_THRESHOLD,
-    hailThreshold: AREA_HAIL_THRESHOLD,
-    squallThresholds: new Float32Array(AREA_SQUALL_THRESHOLDS),
-    hurricaneThreshold: AREA_HURRICANE_THRESHOLD
+    rainThresholds: new Float32Array(AREA_RAIN_THRESHOLDS)
   };
 }
 
@@ -65,7 +45,7 @@ function blurVertical(source, target, width, height, radius) {
   }
 }
 
-function smoothChannel(source, output, scratchA, scratchB, width, height) {
+function smoothRain(source, output, scratchA, scratchB, width, height) {
   let current = source;
   for (let pass = 0; pass < SCALAR_SMOOTH_PASSES; pass++) {
     blurHorizontal(current, scratchA, width, height, SCALAR_SMOOTH_RADIUS);
@@ -86,18 +66,7 @@ function coverageThresholdFromHistogram(coverage, histogram) {
   return 0;
 }
 
-function coverageThreshold(raw, generalized, threshold, histogram) {
-  histogram.fill(0);
-  let coverage = 0;
-  for (let index = 0; index < raw.length; index++) {
-    const value = Math.max(0, Math.min(1, generalized[index]));
-    histogram[Math.min(HISTOGRAM_BINS - 1, Math.floor(value * HISTOGRAM_BINS))]++;
-    if (raw[index] >= threshold) coverage++;
-  }
-  return coverageThresholdFromHistogram(coverage, histogram);
-}
-
-function remapThresholds(state, histogram, rainCoverage) {
+function remapRainThresholds(state, histogram, rainCoverage) {
   histogram.fill(0);
   rainCoverage.fill(0);
   for (let index = 0; index < state.raw.rain.length; index++) {
@@ -114,12 +83,6 @@ function remapThresholds(state, histogram, rainCoverage) {
     state.rainThresholds[index] = Math.max(previous + (index ? 1e-5 : 0), Math.min(1, threshold));
     previous = state.rainThresholds[index];
   }
-  state.stormThreshold = coverageThreshold(state.raw.storm, state.smooth.storm, AREA_STORM_THRESHOLD, histogram);
-  state.hailThreshold = coverageThreshold(state.raw.hail, state.smooth.hail, AREA_HAIL_THRESHOLD, histogram);
-  for (let index = 0; index < AREA_SQUALL_THRESHOLDS.length; index++) {
-    state.squallThresholds[index] = coverageThreshold(state.raw.squall, state.smooth.squall, AREA_SQUALL_THRESHOLDS[index], histogram);
-  }
-  state.hurricaneThreshold = coverageThreshold(state.raw.hurricane, state.smooth.hurricane, AREA_HURRICANE_THRESHOLD, histogram);
 }
 
 export class GeographicScalarLattice {
@@ -165,14 +128,10 @@ export class GeographicScalarLattice {
   evaluate(time, reusable = null) {
     const state = reusable || makeState(this.length);
     const frame = prepareGeographicFieldFrame(time);
-    const value = { rain: 0, storm: 0, hail: 0, squall: 0, hurricane: 0 };
+    const value = { rain: 0 };
     for (let index = 0; index < this.length; index++) {
       geographicPreparedIntensityAtXY(frame, this.fieldPoints[index * 2], this.fieldPoints[index * 2 + 1], value);
       state.raw.rain[index] = value.rain;
-      state.raw.storm[index] = value.storm;
-      state.raw.hail[index] = value.hail;
-      state.raw.squall[index] = value.squall;
-      state.raw.hurricane[index] = value.hurricane;
     }
     state.smoothReady = false;
     return state;
@@ -180,11 +139,9 @@ export class GeographicScalarLattice {
 
   ensureSmooth(state) {
     if (state.smoothReady) return state;
-    if (!state.smooth) state.smooth = makeChannels(this.length);
-    for (const channel of ['rain', 'storm', 'hail', 'squall', 'hurricane']) {
-      smoothChannel(state.raw[channel], state.smooth[channel], this.scratchA, this.scratchB, this.width, this.height);
-    }
-    remapThresholds(state, this.histogram, this.rainCoverage);
+    if (!state.smooth) state.smooth = { rain: new Float32Array(this.length) };
+    smoothRain(state.raw.rain, state.smooth.rain, this.scratchA, this.scratchB, this.width, this.height);
+    remapRainThresholds(state, this.histogram, this.rainCoverage);
     state.smoothReady = true;
     return state;
   }
