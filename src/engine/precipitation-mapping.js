@@ -15,6 +15,6 @@ export function hailGradeForIntensity(intensity) {
   return 0;
 }
 
-export function intensityToStrength(intensity, layer, thresholds = INTENSITY_THRESHOLDS) {
-  return smoothstep(thresholds[layer] * 0.45, 0.93, intensity);
+export function intensityToStrength(intensity, layer) {
+  return smoothstep(INTENSITY_THRESHOLDS[layer] * 0.45, 0.93, intensity);
 }

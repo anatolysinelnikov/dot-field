@@ -38,11 +38,6 @@ export function geographicToSynthetic(longitude, latitude) {
   };
 }
 
-export function geographicIntensityAt(longitude, latitude, time) {
-  const point = geographicToSynthetic(longitude, latitude);
-  return evaluatePreparedField(prepareGeographicFieldFrame(time), point.x, point.y);
-}
-
 export function prepareGeographicFieldFrame(time) {
   const internalTime = time;
   const travelX = mix(

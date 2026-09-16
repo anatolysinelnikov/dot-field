@@ -104,9 +104,3 @@ export function evaluatePreparedField(frame, x, y, output = {}) {
   output.hurricane = clamp(sumComponents(frame.hurricane, x, y) * (0.98 + 0.02 * Math.sin(localX * 31 - y * 23)) * (frame.hasInitialHurricane ? 1 : 0));
   return output;
 }
-
-// Direct evaluation remains available for callers that do not use prepared
-// frames; this allocation-heavy convenience path is not hot.
-export function intensityAt(x, y, t, travelX) {
-  return evaluatePreparedField(prepareFieldFrame(t, travelX), x, y);
-}

@@ -4,7 +4,7 @@ Dot Field is a visual and behavioral reference prototype for deterministic geogr
 
 [Open the prototype](https://anatolysinelnikov.github.io/dot-field/)
 
-Rain is rendered as the scalar Areas field. Storm, Hail, Squall, and Hurricane are separate aggregate symbols; weather channels stay independent until presentation. Geographic samples and block anchors are deterministic. LOD changes symbol density while keeping icon screen size fixed.
+Rain is rendered as the scalar Areas field. Storm, Hail, Squall, and Hurricane are separate aggregate symbols; weather channels stay independent until presentation. Geographic samples and block anchors are deterministic. Icon sizing is defined in screen space, and LOD applies no additional icon scale; resolved Storm/Hail size may vary with severity or aggregated value.
 
 The winner priority is `hurricane > squall > hail > storm`, with this current presentation:
 

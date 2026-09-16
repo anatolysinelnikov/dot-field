@@ -3,8 +3,8 @@ import { clamp } from './math.js';
 
 // MapLibre's world is 512 CSS pixels wide at zoom 0. A dyadic grid step of
 // 1 / 2^level therefore has this nominal screen spacing at a given zoom.
-export const MERCATOR_WORLD_SIZE = 512;
-export const TARGET_GRID_SPACING = 9;
+const MERCATOR_WORLD_SIZE = 512;
+const TARGET_GRID_SPACING = 9;
 export const MIN_GRID_LEVEL = 7;
 export const MAX_GRID_LEVEL = 15;
 export const MAX_DISPLAY_GRID_LEVEL = 14;
