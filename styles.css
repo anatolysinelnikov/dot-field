@@ -88,9 +88,8 @@ html, body { overflow: hidden; background: #080b12; }
 .rain-base { background: #0090FF; }
 .rain-strong { background: #0000FF; }
 .storm i { background: #FF00FF; clip-path: polygon(50% 0, 63.5% 36.5%, 100% 50%, 63.5% 63.5%, 50% 100%, 36.5% 63.5%, 0 50%, 36.5% 36.5%); transform: scale(1.28); }
-.hail i { width: 9px; height: 9px; background: #FFD400; border-radius: 0; clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%); }
-.squall i { width: 7px; height: 7px; background: #FF8500; border-radius: 0; transform: rotate(45deg); }
-.hurricane i { width: 8px; height: 8px; background: #DB0414; border-radius: 0; }
+.hail i { width: 10px; height: 10px; background: #FFD400; border-radius: 0; clip-path: polygon(50% 0, 93.3% 25%, 93.3% 75%, 50% 100%, 6.7% 75%, 6.7% 25%); }
+.squall img, .tornado img { width: 18px; height: 18px; display: block; object-fit: contain; }
 
 button {
   height: 34px;
